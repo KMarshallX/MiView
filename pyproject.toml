@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "miview"
+version = "0.1.0"
+description = "A lightweight Linux-first NIfTI viewer for patch-based inspection workflows."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [
+  { name = "Marshall Xu" }
+]
+dependencies = [
+  "PySide6>=6.6",
+  "nibabel>=5.2",
+  "numpy>=1.26"
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0"
+]
+
+[project.scripts]
+miview = "miview.main:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
