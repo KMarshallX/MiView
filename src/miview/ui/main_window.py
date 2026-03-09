@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction
-from PySide6.QtWidgets import QFileDialog, QMainWindow, QSplitter
+from PySide6.QtWidgets import QFileDialog, QMainWindow, QMessageBox, QSplitter
 
+from miview.io.nifti_loader import load_nifti
+from miview.state.app_state import AppState
 from miview.ui.cursor_panel import CursorInspectionPanel
-from miview.ui.viewer_area import VisualizationPlaceholder
+from miview.viewer.slice_viewer_widget import SliceViewerWidget
 
 
 class MainWindow(QMainWindow):
@@ -13,6 +17,8 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("MiView")
         self.resize(1100, 700)
+        self.state = AppState()
+        self.slice_viewer = SliceViewerWidget()
 
         self._setup_central_layout()
         self._setup_menu()
@@ -20,7 +26,7 @@ class MainWindow(QMainWindow):
 
     def _setup_central_layout(self) -> None:
         splitter = QSplitter(Qt.Orientation.Horizontal, self)
-        splitter.addWidget(VisualizationPlaceholder(splitter))
+        splitter.addWidget(self.slice_viewer)
         splitter.addWidget(CursorInspectionPanel(splitter))
         splitter.setStretchFactor(0, 4)
         splitter.setStretchFactor(1, 1)
@@ -47,10 +53,28 @@ class MainWindow(QMainWindow):
             "",
             file_filter,
         )
-        if selected_file:
-            self.statusBar().showMessage(
-                f"Open selected: {selected_file} (loading not implemented yet)"
-            )
-        else:
+        if not selected_file:
             self.statusBar().showMessage("Open canceled")
+            return
 
+        try:
+            loaded = load_nifti(selected_file)
+        except (FileNotFoundError, ValueError) as exc:
+            QMessageBox.critical(self, "Open Failed", str(exc))
+            self.statusBar().showMessage("Open failed")
+            return
+
+        loaded_path = Path(selected_file)
+        try:
+            self.slice_viewer.load_volume(loaded.data)
+        except ValueError as exc:
+            QMessageBox.critical(self, "Open Failed", str(exc))
+            self.statusBar().showMessage("Open failed")
+            return
+
+        self.state.loaded_file_path = loaded_path
+        self.state.volume = loaded
+
+        self.statusBar().showMessage(
+            f"Loaded {loaded_path.name} | shape={loaded.shape} | dtype={loaded.dtype}"
+        )
