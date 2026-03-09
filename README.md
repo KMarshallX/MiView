@@ -17,3 +17,8 @@ MiView is intentionally minimal. The goal is to build a small, reliable viewer b
 
 MiView is under active development.
 
+### Deploy Locally
+```
+PYTHONPATH=src python -m miview
+```
+
