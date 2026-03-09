@@ -19,6 +19,10 @@ class MainWindow(QMainWindow):
         self.resize(1100, 700)
         self.state = AppState()
         self.slice_viewer = SliceViewerWidget()
+        self.cursor_panel = CursorInspectionPanel()
+        self.slice_viewer.cursor_inspection_changed.connect(
+            self.cursor_panel.set_cursor_values
+        )
 
         self._setup_central_layout()
         self._setup_menu()
@@ -27,7 +31,7 @@ class MainWindow(QMainWindow):
     def _setup_central_layout(self) -> None:
         splitter = QSplitter(Qt.Orientation.Horizontal, self)
         splitter.addWidget(self.slice_viewer)
-        splitter.addWidget(CursorInspectionPanel(splitter))
+        splitter.addWidget(self.cursor_panel)
         splitter.setStretchFactor(0, 4)
         splitter.setStretchFactor(1, 1)
         self.setCentralWidget(splitter)
