@@ -1,8 +1,18 @@
 from __future__ import annotations
 
 import numpy as np
-from PySide6.QtCore import QEvent, QObject, QPointF, Qt, Signal
-from PySide6.QtGui import QColor, QImage, QMouseEvent, QPainter, QPen, QPixmap, QResizeEvent
+from PySide6.QtCore import QEvent, QObject, QPointF, QRect, Qt, Signal
+from PySide6.QtGui import (
+    QColor,
+    QFont,
+    QImage,
+    QMouseEvent,
+    QPainter,
+    QPen,
+    QPixmap,
+    QResizeEvent,
+    QWheelEvent,
+)
 from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
 
 from miview.viewer.intensity import normalize_slice_to_uint8
@@ -16,7 +26,9 @@ from miview.viewer.slice_geometry import (
     map_label_position_to_plane_fraction,
     map_plane_indices_to_label_position,
     map_plane_fraction_to_cursor,
+    orientation_indicators_for_orientation,
     plane_axes_for_orientation,
+    step_cursor_slice,
 )
 
 
@@ -123,6 +135,11 @@ class SliceViewerWidget(QWidget):
                 mouse_event = event if isinstance(event, QMouseEvent) else None
                 if mouse_event is not None:
                     self._handle_mouse_release(mouse_event)
+            elif event.type() == QEvent.Type.Wheel:
+                wheel_event = event if isinstance(event, QWheelEvent) else None
+                if wheel_event is not None:
+                    self._handle_mouse_wheel(wheel_event)
+                    return True
             elif event.type() == QEvent.Type.Leave:
                 self._interaction_mode = None
                 self._last_drag_position = None
@@ -175,6 +192,7 @@ class SliceViewerWidget(QWidget):
             int(display_rect.height),
             self._current_pixmap,
         )
+        self._draw_orientation_indicators(painter)
 
         if (
             self._source_cursor_position is None
@@ -232,6 +250,26 @@ class SliceViewerWidget(QWidget):
         elif release_button == Qt.MouseButton.RightButton and self._interaction_mode == "right_zoom":
             self._interaction_mode = None
         self._last_drag_position = None
+
+    def _handle_mouse_wheel(self, wheel_event: QWheelEvent) -> None:
+        if self._display_volume is None or self._source_cursor_position is None:
+            return
+
+        delta_y = wheel_event.angleDelta().y()
+        if delta_y == 0:
+            return
+
+        # Wheel-up browses previous slice; wheel-down browses next slice.
+        step = -1 if delta_y > 0 else 1
+        display_cursor = self._display_volume.source_to_display(self._source_cursor_position)
+        next_display_cursor = step_cursor_slice(
+            self.orientation,
+            self._display_volume.display_shape,
+            display_cursor,
+            step,
+        )
+        source_cursor = self._display_volume.display_to_source(next_display_cursor)
+        self.cursor_position_selected.emit(*source_cursor)
 
     def _pan_by(self, current_position: QPointF) -> None:
         assert self._last_drag_position is not None
@@ -307,3 +345,34 @@ class SliceViewerWidget(QWidget):
 
     def viewport_size(self) -> tuple[int, int]:
         return (self.image_label.width(), self.image_label.height())
+
+    def _draw_orientation_indicators(self, painter: QPainter) -> None:
+        indicators = orientation_indicators_for_orientation(self.orientation)
+        indicator_font = QFont(self.slice_label.font())
+        indicator_font.setBold(True)
+        painter.setFont(indicator_font)
+        painter.setPen(QPen(QColor("#ffd400")))
+
+        margin = 8
+        rect = QRect(0, 0, self.image_label.width(), self.image_label.height())
+
+        painter.drawText(
+            rect.adjusted(margin, 0, 0, 0),
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+            indicators.left,
+        )
+        painter.drawText(
+            rect.adjusted(0, 0, -margin, 0),
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+            indicators.right,
+        )
+        painter.drawText(
+            rect.adjusted(0, margin, 0, 0),
+            Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter,
+            indicators.top,
+        )
+        painter.drawText(
+            rect.adjusted(0, 0, 0, -margin),
+            Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignHCenter,
+            indicators.bottom,
+        )

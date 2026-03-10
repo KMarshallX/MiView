@@ -11,6 +11,8 @@ from miview.viewer.slice_geometry import (
     map_plane_indices_to_label_position,
     map_cursor_to_plane_indices,
     map_plane_fraction_to_cursor,
+    orientation_indicators_for_orientation,
+    step_cursor_slice,
 )
 
 
@@ -26,9 +28,9 @@ def test_extract_oriented_slice_returns_expected_planes() -> None:
     coronal = extract_oriented_slice(volume, "coronal", cursor)
     sagittal = extract_oriented_slice(volume, "sagittal", cursor)
 
-    np.testing.assert_array_equal(axial, volume[:, :, 3].T[:, ::-1])
+    np.testing.assert_array_equal(axial, volume[:, :, 3].T[::-1, ::-1])
     np.testing.assert_array_equal(coronal, volume[:, 1, :].T[::-1, ::-1])
-    np.testing.assert_array_equal(sagittal, volume[2, :, :].T[::-1, :])
+    np.testing.assert_array_equal(sagittal, volume[2, :, :].T[::-1, ::-1])
 
 
 def test_map_plane_fraction_to_cursor_updates_orientation_axes_only() -> None:
@@ -37,7 +39,7 @@ def test_map_plane_fraction_to_cursor_updates_orientation_axes_only() -> None:
 
     assert map_plane_fraction_to_cursor("axial", shape, current_cursor, 0.5, 0.25) == (
         2,
-        2,
+        5,
         4,
     )
     assert map_plane_fraction_to_cursor("coronal", shape, current_cursor, 0.5, 0.25) == (
@@ -47,16 +49,38 @@ def test_map_plane_fraction_to_cursor_updates_orientation_axes_only() -> None:
     )
     assert map_plane_fraction_to_cursor(
         "sagittal", shape, current_cursor, 0.5, 0.25
-    ) == (2, 4, 7)
+    ) == (2, 3, 7)
 
 
 def test_map_cursor_to_plane_indices_returns_explicit_plane_coordinates() -> None:
     cursor = (4, 3, 2)
     shape = (6, 8, 10)
 
-    assert map_cursor_to_plane_indices("axial", cursor, shape) == (1, 3)
+    assert map_cursor_to_plane_indices("axial", cursor, shape) == (1, 4)
     assert map_cursor_to_plane_indices("coronal", cursor, shape) == (1, 7)
-    assert map_cursor_to_plane_indices("sagittal", cursor, shape) == (3, 7)
+    assert map_cursor_to_plane_indices("sagittal", cursor, shape) == (4, 7)
+
+
+def test_orientation_indicators_match_displayed_anatomical_directions() -> None:
+    axial = orientation_indicators_for_orientation("axial")
+    coronal = orientation_indicators_for_orientation("coronal")
+    sagittal = orientation_indicators_for_orientation("sagittal")
+
+    assert (axial.left, axial.right) == ("R", "L")
+    assert (axial.top, axial.bottom) == ("A", "P")
+    assert (coronal.left, coronal.right) == ("R", "L")
+    assert (sagittal.left, sagittal.right) == ("A", "P")
+    assert (coronal.top, coronal.bottom) == ("S", "I")
+    assert (sagittal.top, sagittal.bottom) == ("S", "I")
+
+
+def test_step_cursor_slice_moves_along_fixed_axis_and_clamps() -> None:
+    shape = (6, 8, 10)
+    cursor = (3, 4, 5)
+
+    assert step_cursor_slice("axial", shape, cursor, -2) == (3, 4, 3)
+    assert step_cursor_slice("coronal", shape, cursor, 10) == (3, 7, 5)
+    assert step_cursor_slice("sagittal", shape, cursor, -10) == (0, 4, 5)
 
 
 def test_compute_display_rect_applies_zoom_and_pan() -> None:

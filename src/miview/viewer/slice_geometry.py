@@ -25,6 +25,21 @@ class PlaneDefinition:
     vertical_flipped: bool
 
 
+@dataclass(frozen=True)
+class OrientationIndicators:
+    left: str
+    right: str
+    top: str
+    bottom: str
+
+
+_AXIS_DIRECTION_CODES: dict[int, tuple[str, str]] = {
+    0: ("L", "R"),
+    1: ("P", "A"),
+    2: ("I", "S"),
+}
+
+
 def center_cursor_for_volume(shape: tuple[int, int, int]) -> tuple[int, int, int]:
     """Return the logical center cursor as (x, y, z)."""
     if len(shape) != 3:
@@ -72,7 +87,7 @@ def plane_definition_for_orientation(orientation: Orientation) -> PlaneDefinitio
             vertical_axis=1,
             fixed_axis=2,
             horizontal_flipped=True,
-            vertical_flipped=False,
+            vertical_flipped=True,
         )
     if orientation == "coronal":
         return PlaneDefinition(
@@ -87,7 +102,7 @@ def plane_definition_for_orientation(orientation: Orientation) -> PlaneDefinitio
             horizontal_axis=1,
             vertical_axis=2,
             fixed_axis=0,
-            horizontal_flipped=False,
+            horizontal_flipped=True,
             vertical_flipped=True,
         )
     raise ValueError(f"Unsupported orientation: {orientation}")
@@ -102,12 +117,44 @@ def extract_oriented_slice(
     x_index, y_index, z_index = clamp_cursor_to_volume(cursor, tuple(volume.shape))
 
     if orientation == "axial":
-        return volume[:, :, z_index].T[:, ::-1]
+        return volume[:, :, z_index].T[::-1, ::-1]
     if orientation == "coronal":
         return volume[:, y_index, :].T[::-1, ::-1]
     if orientation == "sagittal":
-        return volume[x_index, :, :].T[::-1, :]
+        return volume[x_index, :, :].T[::-1, ::-1]
     raise ValueError(f"Unsupported orientation: {orientation}")
+
+
+def orientation_indicators_for_orientation(orientation: Orientation) -> OrientationIndicators:
+    """Return boundary orientation labels for the displayed plane."""
+    plane_definition = plane_definition_for_orientation(orientation)
+    horizontal_codes = _AXIS_DIRECTION_CODES[plane_definition.horizontal_axis]
+    vertical_codes = _AXIS_DIRECTION_CODES[plane_definition.vertical_axis]
+
+    if plane_definition.horizontal_flipped:
+        left, right = horizontal_codes[1], horizontal_codes[0]
+    else:
+        left, right = horizontal_codes[0], horizontal_codes[1]
+
+    if plane_definition.vertical_flipped:
+        top, bottom = vertical_codes[1], vertical_codes[0]
+    else:
+        top, bottom = vertical_codes[0], vertical_codes[1]
+
+    return OrientationIndicators(left=left, right=right, top=top, bottom=bottom)
+
+
+def step_cursor_slice(
+    orientation: Orientation,
+    shape: tuple[int, int, int],
+    current_cursor: tuple[int, int, int],
+    delta: int,
+) -> tuple[int, int, int]:
+    """Move the cursor along the orientation's fixed axis by delta slices."""
+    cursor = list(clamp_cursor_to_volume(current_cursor, shape))
+    fixed_axis = plane_definition_for_orientation(orientation).fixed_axis
+    cursor[fixed_axis] = min(max(cursor[fixed_axis] + delta, 0), shape[fixed_axis] - 1)
+    return tuple(cursor)
 
 
 def map_plane_fraction_to_cursor(
