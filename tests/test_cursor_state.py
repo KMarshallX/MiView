@@ -13,8 +13,8 @@ def test_cursor_state_clamps_and_emits_once() -> None:
     state.set_cursor_position((20, -3, 4))
     state.set_cursor_position((7, 0, 4))
 
-    assert state.cursor_position() == (7, 0, 4)
-    assert recorded == [(7, 0, 4)]
+    assert state.cursor_position() == (5, 0, 4)
+    assert recorded == [(5, 0, 4)]
 
 
 def test_cursor_state_retains_position_when_shape_changes() -> None:

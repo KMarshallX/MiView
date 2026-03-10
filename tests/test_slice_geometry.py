@@ -3,15 +3,19 @@ from __future__ import annotations
 import numpy as np
 
 from miview.viewer.slice_geometry import (
+    compute_display_rect,
+    compute_shared_base_scale,
     center_cursor_for_volume,
     extract_oriented_slice,
+    map_label_position_to_plane_fraction,
+    map_plane_indices_to_label_position,
     map_cursor_to_plane_indices,
     map_plane_fraction_to_cursor,
 )
 
 
 def test_center_cursor_for_volume_uses_logical_center() -> None:
-    assert center_cursor_for_volume((7, 9, 11)) == (4, 3, 5)
+    assert center_cursor_for_volume((7, 9, 11)) == (3, 4, 5)
 
 
 def test_extract_oriented_slice_returns_expected_planes() -> None:
@@ -22,9 +26,9 @@ def test_extract_oriented_slice_returns_expected_planes() -> None:
     coronal = extract_oriented_slice(volume, "coronal", cursor)
     sagittal = extract_oriented_slice(volume, "sagittal", cursor)
 
-    np.testing.assert_array_equal(axial, volume[:, :, 3])
-    np.testing.assert_array_equal(coronal, volume[1, :, :].T)
-    np.testing.assert_array_equal(sagittal, volume[:, 2, :].T)
+    np.testing.assert_array_equal(axial, volume[:, :, 3].T[:, ::-1])
+    np.testing.assert_array_equal(coronal, volume[:, 1, :].T[::-1, ::-1])
+    np.testing.assert_array_equal(sagittal, volume[2, :, :].T[::-1, :])
 
 
 def test_map_plane_fraction_to_cursor_updates_orientation_axes_only() -> None:
@@ -32,23 +36,48 @@ def test_map_plane_fraction_to_cursor_updates_orientation_axes_only() -> None:
     shape = (6, 8, 10)
 
     assert map_plane_fraction_to_cursor("axial", shape, current_cursor, 0.5, 0.25) == (
-        4,
-        1,
+        2,
+        2,
         4,
     )
     assert map_plane_fraction_to_cursor("coronal", shape, current_cursor, 0.5, 0.25) == (
-        4,
-        1,
         2,
+        1,
+        7,
     )
     assert map_plane_fraction_to_cursor(
         "sagittal", shape, current_cursor, 0.5, 0.25
-    ) == (2, 3, 2)
+    ) == (2, 4, 7)
 
 
 def test_map_cursor_to_plane_indices_returns_explicit_plane_coordinates() -> None:
     cursor = (4, 3, 2)
+    shape = (6, 8, 10)
 
-    assert map_cursor_to_plane_indices("axial", cursor) == (4, 3)
-    assert map_cursor_to_plane_indices("coronal", cursor) == (4, 2)
-    assert map_cursor_to_plane_indices("sagittal", cursor) == (3, 2)
+    assert map_cursor_to_plane_indices("axial", cursor, shape) == (1, 3)
+    assert map_cursor_to_plane_indices("coronal", cursor, shape) == (1, 7)
+    assert map_cursor_to_plane_indices("sagittal", cursor, shape) == (3, 7)
+
+
+def test_compute_display_rect_applies_zoom_and_pan() -> None:
+    display_rect = compute_display_rect((100, 50), (200, 200), 2.0, 1.5, (10.0, -5.0))
+
+    assert display_rect is not None
+    assert display_rect.width == 300.0
+    assert display_rect.height == 150.0
+    assert display_rect.left == -40.0
+    assert display_rect.top == 20.0
+
+
+def test_plane_fraction_and_label_position_mapping_stay_consistent() -> None:
+    display_rect = compute_display_rect((10, 10), (100, 100), 10.0, 1.0, (0.0, 0.0))
+    assert display_rect is not None
+
+    plane_fraction = map_label_position_to_plane_fraction((55.0, 35.0), display_rect)
+
+    assert plane_fraction == (0.55, 0.35)
+    assert map_plane_indices_to_label_position((5, 3), (10, 10), display_rect) == (55, 35)
+
+
+def test_compute_shared_base_scale_uses_smallest_fit_candidate() -> None:
+    assert compute_shared_base_scale([(200, 100), (150, 80)], [(300, 300), (300, 300)]) == 1.5

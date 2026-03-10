@@ -26,6 +26,10 @@ class CursorState(QObject):
     def cursor_position(self) -> tuple[int, int, int] | None:
         return self._cursor_position
 
+    def clear(self) -> None:
+        self._cursor_position = None
+        self._volume_shape = None
+
     def set_cursor_position(self, cursor_position: tuple[int, int, int]) -> None:
         if self._volume_shape is None:
             self._cursor_position = cursor_position

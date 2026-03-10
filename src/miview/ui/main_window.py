@@ -64,6 +64,10 @@ class MainWindow(QMainWindow):
         open_action.triggered.connect(self._on_open)
         file_menu.addAction(open_action)
 
+        unload_action = QAction("&Unload Image", self)
+        unload_action.triggered.connect(self._on_unload)
+        file_menu.addAction(unload_action)
+
         file_menu.addSeparator()
 
         exit_action = QAction("E&xit", self)
@@ -102,7 +106,7 @@ class MainWindow(QMainWindow):
 
         loaded_path = Path(selected_file)
         try:
-            self.slice_viewer.load_volume(loaded.data)
+            self.slice_viewer.load_volume(loaded)
         except ValueError as exc:
             QMessageBox.critical(self, "Open Failed", str(exc))
             self.statusBar().showMessage("Open failed")
@@ -117,6 +121,14 @@ class MainWindow(QMainWindow):
             f"Loaded {loaded_path.name} | shape={loaded.shape} | dtype={loaded.dtype}"
         )
         self._schedule_loading_progress_hide()
+
+    def _on_unload(self) -> None:
+        self.slice_viewer.unload_volume()
+        self.state.loaded_file_path = None
+        self.state.volume = None
+        self.state.cursor_position = None
+        self.cursor_panel.set_cursor_values(None, None, None, None)
+        self.statusBar().showMessage("Ready")
 
     def _update_cursor_position(
         self, x: int, y: int, z: int
