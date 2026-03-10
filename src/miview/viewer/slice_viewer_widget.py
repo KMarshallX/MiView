@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import numpy as np
-from PySide6.QtCore import QEvent, QObject, QPointF, QRect, Qt, Signal
+from PySide6.QtCore import QEvent, QObject, QPointF, QRect, QRectF, Qt, Signal
 from PySide6.QtGui import (
     QColor,
     QFont,
@@ -47,6 +47,8 @@ class SliceViewerWidget(QWidget):
     viewport_resized = Signal()
 
     ZOOM_DRAG_SENSITIVITY = 0.01
+    PATCH_HANDLE_RADIUS = 3.0
+    PATCH_HANDLE_HIT_RADIUS = 9.0
 
     def __init__(
         self, orientation: Orientation, parent: QWidget | None = None
@@ -66,7 +68,7 @@ class SliceViewerWidget(QWidget):
         self._patch_plane_bounds: PatchPlaneBounds | None = None
         self._patch_size_source = (1, 1, 1)
         self._patch_center_source: tuple[int, int, int] | None = None
-        self._active_patch_resize_edge: str | None = None
+        self._active_patch_resize_handle: str | None = None
         self._interaction_mode: str | None = None
         self._last_drag_position: QPointF | None = None
 
@@ -178,7 +180,8 @@ class SliceViewerWidget(QWidget):
             elif event.type() == QEvent.Type.Leave:
                 self._interaction_mode = None
                 self._last_drag_position = None
-                self._active_patch_resize_edge = None
+                self._active_patch_resize_handle = None
+                self.image_label.setCursor(Qt.CursorShape.ArrowCursor)
         return super().eventFilter(watched, event)
 
     def _render_current_slice(self) -> None:
@@ -277,6 +280,13 @@ class SliceViewerWidget(QWidget):
             self._interaction_mode = "right_zoom"
 
     def _handle_mouse_move(self, mouse_event: QMouseEvent) -> None:
+        if (
+            self._interaction_mode is None
+            and not mouse_event.buttons()
+            and self._display_volume is not None
+        ):
+            self._update_hover_cursor(mouse_event.position())
+
         if self._interaction_mode == "left_patch_resize":
             if mouse_event.buttons() & Qt.MouseButton.LeftButton:
                 self._update_patch_resize(mouse_event.position())
@@ -314,7 +324,8 @@ class SliceViewerWidget(QWidget):
         elif release_button == Qt.MouseButton.RightButton and self._interaction_mode == "right_zoom":
             self._interaction_mode = None
         self._last_drag_position = None
-        self._active_patch_resize_edge = None
+        self._active_patch_resize_handle = None
+        self._update_hover_cursor(mouse_event.position())
 
     def _handle_mouse_wheel(self, wheel_event: QWheelEvent) -> None:
         if self._display_volume is None or self._source_cursor_position is None:
@@ -450,7 +461,22 @@ class SliceViewerWidget(QWidget):
         border_color = QColor(0, 102, 255)
         painter.setPen(QPen(border_color, 2))
         painter.setBrush(fill_color)
-        painter.drawRect(int(left), int(top), int(max(right - left, 1.0)), int(max(bottom - top, 1.0)))
+        overlay_rect = QRectF(
+            left,
+            top,
+            max(right - left, 1.0),
+            max(bottom - top, 1.0),
+        )
+        painter.drawRect(overlay_rect)
+
+        painter.setPen(QPen(QColor("#ffffff"), 1))
+        painter.setBrush(QColor("#ffffff"))
+        for handle_center in self._resize_handle_positions(overlay_rect).values():
+            painter.drawEllipse(
+                handle_center,
+                self.PATCH_HANDLE_RADIUS,
+                self.PATCH_HANDLE_RADIUS,
+            )
 
     def _draw_orientation_indicators(self, painter: QPainter) -> None:
         indicators = orientation_indicators_for_orientation(self.orientation)
@@ -495,22 +521,9 @@ class SliceViewerWidget(QWidget):
         if overlay_rect is None:
             return False
 
-        x = label_position.x()
-        y = label_position.y()
-        tolerance = 8.0
-
-        edge_hits = {
-            "left": abs(x - overlay_rect.left()) <= tolerance and overlay_rect.top() <= y <= overlay_rect.bottom(),
-            "right": abs(x - overlay_rect.right()) <= tolerance and overlay_rect.top() <= y <= overlay_rect.bottom(),
-            "top": abs(y - overlay_rect.top()) <= tolerance and overlay_rect.left() <= x <= overlay_rect.right(),
-            "bottom": abs(y - overlay_rect.bottom()) <= tolerance and overlay_rect.left() <= x <= overlay_rect.right(),
-        }
-        for edge, hit in edge_hits.items():
-            if not hit:
-                continue
-            if axis_for_resize_edge(self.orientation, edge) is None:
-                continue
-            self._active_patch_resize_edge = edge
+        handle_name = self._resize_handle_at_position(label_position, overlay_rect)
+        if handle_name is not None:
+            self._active_patch_resize_handle = handle_name
             return True
         return False
 
@@ -518,7 +531,7 @@ class SliceViewerWidget(QWidget):
         if (
             self._display_volume is None
             or self._source_cursor_position is None
-            or self._active_patch_resize_edge is None
+            or self._active_patch_resize_handle is None
         ):
             return
 
@@ -543,19 +556,22 @@ class SliceViewerWidget(QWidget):
         )
         source_resized_cursor = self._display_volume.display_to_source(display_resized_cursor)
 
-        axis = axis_for_resize_edge(self.orientation, self._active_patch_resize_edge)
-        if axis is None:
-            return
+        resize_edges = self._resize_edges_for_handle(self._active_patch_resize_handle)
+        patch_center = self._patch_center_source or self._source_cursor_position
+        for edge in resize_edges:
+            axis = axis_for_resize_edge(self.orientation, edge)
+            if axis is None:
+                continue
 
-        current_size = self._patch_size_source[axis]
-        new_size = resized_axis_size_from_edge(
-            self._source_cursor_position[axis],
-            source_resized_cursor[axis],
-            self._active_patch_resize_edge,
-            current_size,
-        )
-        if new_size != current_size:
-            self.patch_axis_size_requested.emit(axis, new_size)
+            current_size = self._patch_size_source[axis]
+            new_size = resized_axis_size_from_edge(
+                patch_center[axis],
+                source_resized_cursor[axis],
+                edge,
+                current_size,
+            )
+            if new_size != current_size:
+                self.patch_axis_size_requested.emit(axis, new_size)
 
     def _start_patch_drag_if_hit(self, label_position: QPointF) -> bool:
         if not self._patch_overlay_visible:
@@ -569,10 +585,9 @@ class SliceViewerWidget(QWidget):
         if overlay_rect is None:
             return False
 
-        point = label_position.toPoint()
-        return overlay_rect.contains(point)
+        return overlay_rect.contains(label_position)
 
-    def _overlay_display_rect(self, display_rect: DisplayRect) -> QRect | None:
+    def _overlay_display_rect(self, display_rect: DisplayRect) -> QRectF | None:
         if self._patch_plane_bounds is None or self._display_volume is None:
             return None
 
@@ -605,11 +620,11 @@ class SliceViewerWidget(QWidget):
             display_rect.top,
             display_rect.height,
         )
-        return QRect(
-            int(left),
-            int(top),
-            int(max(right - left, 1.0)),
-            int(max(bottom - top, 1.0)),
+        return QRectF(
+            left,
+            top,
+            max(right - left, 1.0),
+            max(bottom - top, 1.0),
         )
 
     def _emit_patch_center_from_label_position(self, label_position: QPointF) -> None:
@@ -642,6 +657,81 @@ class SliceViewerWidget(QWidget):
         )
         source_center = self._display_volume.display_to_source(display_center)
         self.patch_center_position_selected.emit(*source_center)
+
+    def _resize_handle_positions(self, overlay_rect: QRectF) -> dict[str, QPointF]:
+        left = overlay_rect.left()
+        right = overlay_rect.right()
+        top = overlay_rect.top()
+        bottom = overlay_rect.bottom()
+        mid_x = (left + right) / 2.0
+
+        if self.orientation == "axial":
+            return {
+                "top_left": QPointF(left, top),
+                "top_right": QPointF(right, top),
+                "bottom_left": QPointF(left, bottom),
+                "bottom_right": QPointF(right, bottom),
+            }
+        return {
+            "top_mid": QPointF(mid_x, top),
+            "bottom_mid": QPointF(mid_x, bottom),
+        }
+
+    def _resize_handle_at_position(
+        self, label_position: QPointF, overlay_rect: QRectF
+    ) -> str | None:
+        for handle_name, center in self._resize_handle_positions(overlay_rect).items():
+            dx = label_position.x() - center.x()
+            dy = label_position.y() - center.y()
+            if float(np.hypot(dx, dy)) <= self.PATCH_HANDLE_HIT_RADIUS:
+                return handle_name
+        return None
+
+    def _resize_edges_for_handle(self, handle_name: str) -> tuple[str, ...]:
+        if handle_name == "top_left":
+            return ("left", "top")
+        if handle_name == "top_right":
+            return ("right", "top")
+        if handle_name == "bottom_left":
+            return ("left", "bottom")
+        if handle_name == "bottom_right":
+            return ("right", "bottom")
+        if handle_name == "top_mid":
+            return ("top",)
+        if handle_name == "bottom_mid":
+            return ("bottom",)
+        return ()
+
+    def _update_hover_cursor(self, label_position: QPointF) -> None:
+        display_rect = self._display_rect()
+        if (
+            not self._patch_overlay_visible
+            or display_rect is None
+            or self._patch_plane_bounds is None
+        ):
+            self.image_label.setCursor(Qt.CursorShape.ArrowCursor)
+            return
+
+        overlay_rect = self._overlay_display_rect(display_rect)
+        if overlay_rect is None:
+            self.image_label.setCursor(Qt.CursorShape.ArrowCursor)
+            return
+
+        handle_name = self._resize_handle_at_position(label_position, overlay_rect)
+        if handle_name is not None:
+            if handle_name in ("top_left", "bottom_right"):
+                self.image_label.setCursor(Qt.CursorShape.SizeFDiagCursor)
+            elif handle_name in ("top_right", "bottom_left"):
+                self.image_label.setCursor(Qt.CursorShape.SizeBDiagCursor)
+            else:
+                self.image_label.setCursor(Qt.CursorShape.SizeVerCursor)
+            return
+
+        if overlay_rect.contains(label_position):
+            self.image_label.setCursor(Qt.CursorShape.SizeAllCursor)
+            return
+
+        self.image_label.setCursor(Qt.CursorShape.ArrowCursor)
 
 
 def _edge_index_to_display_coordinate(
