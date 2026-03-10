@@ -17,6 +17,11 @@ from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
 
 from miview.viewer.intensity import normalize_slice_to_uint8, window_slice_to_uint8
 from miview.viewer.oriented_volume import OrientedVolume
+from miview.patch.selector import (
+    PatchPlaneBounds,
+    axis_for_resize_edge,
+    resized_axis_size_from_edge,
+)
 from miview.viewer.slice_geometry import (
     DisplayRect,
     Orientation,
@@ -36,7 +41,9 @@ class SliceViewerWidget(QWidget):
     """Single 2D slice view for one anatomical orientation."""
 
     cursor_position_selected = Signal(int, int, int)
+    patch_center_position_selected = Signal(int, int, int)
     zoom_factor_requested = Signal(float)
+    patch_axis_size_requested = Signal(int, int)
     viewport_resized = Signal()
 
     ZOOM_DRAG_SENSITIVITY = 0.01
@@ -54,6 +61,12 @@ class SliceViewerWidget(QWidget):
         self._zoom_factor = 1.0
         self._pan_offset = (0.0, 0.0)
         self._cursor_overlay_visible = True
+        self._patch_overlay_visible = False
+        self._patch_overlay_opacity = 0.5
+        self._patch_plane_bounds: PatchPlaneBounds | None = None
+        self._patch_size_source = (1, 1, 1)
+        self._patch_center_source: tuple[int, int, int] | None = None
+        self._active_patch_resize_edge: str | None = None
         self._interaction_mode: str | None = None
         self._last_drag_position: QPointF | None = None
 
@@ -123,6 +136,21 @@ class SliceViewerWidget(QWidget):
         self._cursor_overlay_visible = visible
         self._update_scaled_pixmap()
 
+    def set_patch_overlay(
+        self,
+        visible: bool,
+        plane_bounds: PatchPlaneBounds | None,
+        opacity: float,
+        patch_size_source: tuple[int, int, int],
+        patch_center_source: tuple[int, int, int] | None,
+    ) -> None:
+        self._patch_overlay_visible = visible
+        self._patch_plane_bounds = plane_bounds
+        self._patch_overlay_opacity = min(max(opacity, 0.0), 1.0)
+        self._patch_size_source = patch_size_source
+        self._patch_center_source = patch_center_source
+        self._update_scaled_pixmap()
+
     def resizeEvent(self, event: QResizeEvent) -> None:
         super().resizeEvent(event)
         self._update_scaled_pixmap()
@@ -150,6 +178,7 @@ class SliceViewerWidget(QWidget):
             elif event.type() == QEvent.Type.Leave:
                 self._interaction_mode = None
                 self._last_drag_position = None
+                self._active_patch_resize_edge = None
         return super().eventFilter(watched, event)
 
     def _render_current_slice(self) -> None:
@@ -207,10 +236,14 @@ class SliceViewerWidget(QWidget):
         self._draw_orientation_indicators(painter)
 
         if (
-            self._source_cursor_position is None
-            or self._display_volume is None
-            or not self._cursor_overlay_visible
+            self._patch_overlay_visible
+            and self._patch_plane_bounds is not None
+            and self._display_volume is not None
+            and self._source_cursor_position is not None
         ):
+            self._draw_patch_overlay(painter, display_rect)
+
+        if self._source_cursor_position is None or self._display_volume is None or not self._cursor_overlay_visible:
             painter.end()
             self.image_label.setPixmap(canvas)
             return
@@ -230,6 +263,12 @@ class SliceViewerWidget(QWidget):
     def _handle_mouse_press(self, mouse_event: QMouseEvent) -> None:
         self._last_drag_position = mouse_event.position()
         if mouse_event.button() == Qt.MouseButton.LeftButton:
+            if self._start_patch_resize_if_hit(mouse_event.position()):
+                self._interaction_mode = "left_patch_resize"
+                return
+            if self._start_patch_drag_if_hit(mouse_event.position()):
+                self._interaction_mode = "left_patch_drag"
+                return
             self._interaction_mode = "left_cursor"
             self._emit_cursor_from_label_position(mouse_event.position())
         elif mouse_event.button() == Qt.MouseButton.MiddleButton:
@@ -238,6 +277,15 @@ class SliceViewerWidget(QWidget):
             self._interaction_mode = "right_zoom"
 
     def _handle_mouse_move(self, mouse_event: QMouseEvent) -> None:
+        if self._interaction_mode == "left_patch_resize":
+            if mouse_event.buttons() & Qt.MouseButton.LeftButton:
+                self._update_patch_resize(mouse_event.position())
+            return
+        if self._interaction_mode == "left_patch_drag":
+            if mouse_event.buttons() & Qt.MouseButton.LeftButton:
+                self._emit_patch_center_from_label_position(mouse_event.position())
+            return
+
         if self._interaction_mode == "left_cursor":
             if mouse_event.buttons() & Qt.MouseButton.LeftButton:
                 self._emit_cursor_from_label_position(mouse_event.position())
@@ -255,13 +303,18 @@ class SliceViewerWidget(QWidget):
 
     def _handle_mouse_release(self, mouse_event: QMouseEvent) -> None:
         release_button = mouse_event.button()
-        if release_button == Qt.MouseButton.LeftButton and self._interaction_mode == "left_cursor":
+        if release_button == Qt.MouseButton.LeftButton and self._interaction_mode in (
+            "left_cursor",
+            "left_patch_resize",
+            "left_patch_drag",
+        ):
             self._interaction_mode = None
         elif release_button == Qt.MouseButton.MiddleButton and self._interaction_mode == "middle_pan":
             self._interaction_mode = None
         elif release_button == Qt.MouseButton.RightButton and self._interaction_mode == "right_zoom":
             self._interaction_mode = None
         self._last_drag_position = None
+        self._active_patch_resize_edge = None
 
     def _handle_mouse_wheel(self, wheel_event: QWheelEvent) -> None:
         if self._display_volume is None or self._source_cursor_position is None:
@@ -358,6 +411,47 @@ class SliceViewerWidget(QWidget):
     def viewport_size(self) -> tuple[int, int]:
         return (self.image_label.width(), self.image_label.height())
 
+    def _draw_patch_overlay(self, painter: QPainter, display_rect: DisplayRect) -> None:
+        assert self._patch_plane_bounds is not None
+        assert self._display_volume is not None
+
+        horizontal_axis, vertical_axis, _ = plane_axes_for_orientation(self.orientation)
+        plane_shape = (
+            self._display_volume.display_shape[horizontal_axis],
+            self._display_volume.display_shape[vertical_axis],
+        )
+
+        left = _edge_index_to_display_coordinate(
+            self._patch_plane_bounds.horizontal_start,
+            plane_shape[0],
+            display_rect.left,
+            display_rect.width,
+        )
+        right = _edge_index_to_display_coordinate(
+            self._patch_plane_bounds.horizontal_end,
+            plane_shape[0],
+            display_rect.left,
+            display_rect.width,
+        )
+        top = _edge_index_to_display_coordinate(
+            self._patch_plane_bounds.vertical_start,
+            plane_shape[1],
+            display_rect.top,
+            display_rect.height,
+        )
+        bottom = _edge_index_to_display_coordinate(
+            self._patch_plane_bounds.vertical_end,
+            plane_shape[1],
+            display_rect.top,
+            display_rect.height,
+        )
+
+        fill_color = QColor(0, 102, 255, int(round(self._patch_overlay_opacity * 255)))
+        border_color = QColor(0, 102, 255)
+        painter.setPen(QPen(border_color, 2))
+        painter.setBrush(fill_color)
+        painter.drawRect(int(left), int(top), int(max(right - left, 1.0)), int(max(bottom - top, 1.0)))
+
     def _draw_orientation_indicators(self, painter: QPainter) -> None:
         indicators = orientation_indicators_for_orientation(self.orientation)
         indicator_font = QFont(self.slice_label.font())
@@ -388,3 +482,184 @@ class SliceViewerWidget(QWidget):
             Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignHCenter,
             indicators.bottom,
         )
+
+    def _start_patch_resize_if_hit(self, label_position: QPointF) -> bool:
+        if not self._patch_overlay_visible or self._patch_plane_bounds is None:
+            return False
+
+        display_rect = self._display_rect()
+        if display_rect is None:
+            return False
+
+        overlay_rect = self._overlay_display_rect(display_rect)
+        if overlay_rect is None:
+            return False
+
+        x = label_position.x()
+        y = label_position.y()
+        tolerance = 8.0
+
+        edge_hits = {
+            "left": abs(x - overlay_rect.left()) <= tolerance and overlay_rect.top() <= y <= overlay_rect.bottom(),
+            "right": abs(x - overlay_rect.right()) <= tolerance and overlay_rect.top() <= y <= overlay_rect.bottom(),
+            "top": abs(y - overlay_rect.top()) <= tolerance and overlay_rect.left() <= x <= overlay_rect.right(),
+            "bottom": abs(y - overlay_rect.bottom()) <= tolerance and overlay_rect.left() <= x <= overlay_rect.right(),
+        }
+        for edge, hit in edge_hits.items():
+            if not hit:
+                continue
+            if axis_for_resize_edge(self.orientation, edge) is None:
+                continue
+            self._active_patch_resize_edge = edge
+            return True
+        return False
+
+    def _update_patch_resize(self, label_position: QPointF) -> None:
+        if (
+            self._display_volume is None
+            or self._source_cursor_position is None
+            or self._active_patch_resize_edge is None
+        ):
+            return
+
+        display_rect = self._display_rect()
+        if display_rect is None:
+            return
+
+        plane_fraction = map_label_position_to_plane_fraction(
+            (label_position.x(), label_position.y()),
+            display_rect,
+        )
+        if plane_fraction is None:
+            return
+
+        display_cursor = self._display_volume.source_to_display(self._source_cursor_position)
+        display_resized_cursor = map_plane_fraction_to_cursor(
+            self.orientation,
+            self._display_volume.display_shape,
+            display_cursor,
+            plane_fraction[0],
+            plane_fraction[1],
+        )
+        source_resized_cursor = self._display_volume.display_to_source(display_resized_cursor)
+
+        axis = axis_for_resize_edge(self.orientation, self._active_patch_resize_edge)
+        if axis is None:
+            return
+
+        current_size = self._patch_size_source[axis]
+        new_size = resized_axis_size_from_edge(
+            self._source_cursor_position[axis],
+            source_resized_cursor[axis],
+            self._active_patch_resize_edge,
+            current_size,
+        )
+        if new_size != current_size:
+            self.patch_axis_size_requested.emit(axis, new_size)
+
+    def _start_patch_drag_if_hit(self, label_position: QPointF) -> bool:
+        if not self._patch_overlay_visible:
+            return False
+
+        display_rect = self._display_rect()
+        if display_rect is None:
+            return False
+
+        overlay_rect = self._overlay_display_rect(display_rect)
+        if overlay_rect is None:
+            return False
+
+        point = label_position.toPoint()
+        return overlay_rect.contains(point)
+
+    def _overlay_display_rect(self, display_rect: DisplayRect) -> QRect | None:
+        if self._patch_plane_bounds is None or self._display_volume is None:
+            return None
+
+        horizontal_axis, vertical_axis, _ = plane_axes_for_orientation(self.orientation)
+        plane_shape = (
+            self._display_volume.display_shape[horizontal_axis],
+            self._display_volume.display_shape[vertical_axis],
+        )
+        left = _edge_index_to_display_coordinate(
+            self._patch_plane_bounds.horizontal_start,
+            plane_shape[0],
+            display_rect.left,
+            display_rect.width,
+        )
+        right = _edge_index_to_display_coordinate(
+            self._patch_plane_bounds.horizontal_end,
+            plane_shape[0],
+            display_rect.left,
+            display_rect.width,
+        )
+        top = _edge_index_to_display_coordinate(
+            self._patch_plane_bounds.vertical_start,
+            plane_shape[1],
+            display_rect.top,
+            display_rect.height,
+        )
+        bottom = _edge_index_to_display_coordinate(
+            self._patch_plane_bounds.vertical_end,
+            plane_shape[1],
+            display_rect.top,
+            display_rect.height,
+        )
+        return QRect(
+            int(left),
+            int(top),
+            int(max(right - left, 1.0)),
+            int(max(bottom - top, 1.0)),
+        )
+
+    def _emit_patch_center_from_label_position(self, label_position: QPointF) -> None:
+        if (
+            self._display_volume is None
+            or self._patch_center_source is None
+        ):
+            return
+
+        display_rect = self._display_rect()
+        if display_rect is None:
+            return
+
+        plane_fraction = map_label_position_to_plane_fraction(
+            (label_position.x(), label_position.y()),
+            display_rect,
+        )
+        if plane_fraction is None:
+            return
+
+        horizontal_axis, vertical_axis, _ = plane_axes_for_orientation(self.orientation)
+        display_center = list(
+            self._display_volume.source_to_display(self._patch_center_source)
+        )
+        horizontal_size = self._display_volume.display_shape[horizontal_axis]
+        vertical_size = self._display_volume.display_shape[vertical_axis]
+        display_center[horizontal_axis] = _fraction_to_display_index(
+            plane_fraction[0], horizontal_size
+        )
+        display_center[vertical_axis] = _fraction_to_display_index(
+            plane_fraction[1], vertical_size
+        )
+
+        source_center = self._display_volume.display_to_source(
+            (display_center[0], display_center[1], display_center[2])
+        )
+        self.patch_center_position_selected.emit(*source_center)
+
+
+def _edge_index_to_display_coordinate(
+    edge_index: int, axis_size: int, rect_origin: float, rect_size: float
+) -> float:
+    if axis_size <= 0:
+        return rect_origin
+    clamped = min(max(edge_index, 0), axis_size)
+    return rect_origin + (clamped / axis_size) * rect_size
+
+
+def _fraction_to_display_index(fraction: float, axis_size: int) -> int:
+    if axis_size <= 0:
+        return 0
+    clamped_fraction = min(max(fraction, 0.0), np.nextafter(1.0, 0.0))
+    return int(clamped_fraction * axis_size)

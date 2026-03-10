@@ -16,10 +16,12 @@ from PySide6.QtWidgets import (
 )
 
 from miview.io.nifti_loader import load_nifti
+from miview.patch.extractor import extract_patch
 from miview.state.app_state import AppState
 from miview.state.contrast_state import ContrastState
 from miview.ui.contrast_control_bar import ContrastControlBar
 from miview.ui.cursor_panel import CursorInspectionPanel
+from miview.ui.patch_window import PatchViewerWindow
 from miview.viewer.intensity import robust_auto_window, volume_intensity_range
 from miview.viewer.triplanar_viewer_widget import TriPlanarViewerWidget
 
@@ -34,16 +36,23 @@ class MainWindow(QMainWindow):
         self.slice_viewer = TriPlanarViewerWidget()
         self.cursor_panel = CursorInspectionPanel()
         self.contrast_control_bar = ContrastControlBar(self)
+        self.cursor_overlay_action: QAction | None = None
+        self._cursor_overlay_checked_before_patch = True
+        self.patch_toggle_action: QAction | None = None
         self.loading_progress_bar = QProgressBar(self)
         self._loading_hide_timer = QTimer(self)
+        self._patch_windows: list[PatchViewerWindow] = []
         self._loading_hide_timer.setSingleShot(True)
         self._loading_hide_timer.timeout.connect(self._hide_loading_progress)
         self.slice_viewer.cursor_inspection_changed.connect(
             self.cursor_panel.set_cursor_values
         )
         self.slice_viewer.cursor_state.cursor_changed.connect(self._update_cursor_position)
+        self.slice_viewer.patch_selection_changed.connect(self._on_patch_selection_changed)
         self.contrast_control_bar.window_changed.connect(self.contrast_state.set_window)
         self.contrast_control_bar.auto_requested.connect(self._on_auto_contrast)
+        self.cursor_panel.patch_opacity_changed.connect(self.slice_viewer.set_patch_overlay_opacity)
+        self.cursor_panel.select_patch_requested.connect(self._on_select_patch)
         self.contrast_state.availability_changed.connect(
             self.contrast_control_bar.set_enabled_state
         )
@@ -54,6 +63,7 @@ class MainWindow(QMainWindow):
         self._setup_central_layout()
         self._setup_loading_progress_bar()
         self._setup_menu()
+        self.cursor_panel.set_patch_opacity(self.slice_viewer.patch_overlay_opacity())
         self.statusBar().showMessage("Ready")
 
     def _setup_central_layout(self) -> None:
@@ -82,6 +92,7 @@ class MainWindow(QMainWindow):
     def _setup_menu(self) -> None:
         file_menu = self.menuBar().addMenu("&File")
         view_menu = self.menuBar().addMenu("&View")
+        tool_menu = self.menuBar().addMenu("&Tool")
 
         open_action = QAction("&Open", self)
         open_action.triggered.connect(self._on_open)
@@ -97,13 +108,19 @@ class MainWindow(QMainWindow):
         exit_action.triggered.connect(self.close)
         file_menu.addAction(exit_action)
 
-        cursor_overlay_action = QAction("Show &Cursor Overlay", self)
-        cursor_overlay_action.setCheckable(True)
-        cursor_overlay_action.setChecked(True)
-        cursor_overlay_action.toggled.connect(
+        self.cursor_overlay_action = QAction("Show &Cursor Overlay", self)
+        self.cursor_overlay_action.setCheckable(True)
+        self.cursor_overlay_action.setChecked(True)
+        self.cursor_overlay_action.toggled.connect(
             self.slice_viewer.set_cursor_overlay_visible
         )
-        view_menu.addAction(cursor_overlay_action)
+        view_menu.addAction(self.cursor_overlay_action)
+
+        self.patch_toggle_action = QAction("&Patch Selection", self)
+        self.patch_toggle_action.setCheckable(True)
+        self.patch_toggle_action.setChecked(False)
+        self.patch_toggle_action.toggled.connect(self._on_patch_selection_toggled)
+        tool_menu.addAction(self.patch_toggle_action)
 
     def _on_open(self) -> None:
         file_filter = "NIfTI Files (*.nii *.nii.gz);;All Files (*)"
@@ -139,6 +156,8 @@ class MainWindow(QMainWindow):
         self.state.loaded_file_path = loaded_path
         self.state.volume = loaded
         self.state.cursor_position = self.slice_viewer.current_cursor_position()
+        self.state.selected_patch_bounds = None
+        self.state.selected_patch_data = None
         self._initialize_contrast_for_loaded_volume()
 
         self.statusBar().showMessage(
@@ -152,6 +171,17 @@ class MainWindow(QMainWindow):
         self.state.loaded_file_path = None
         self.state.volume = None
         self.state.cursor_position = None
+        self.state.selected_patch_bounds = None
+        self.state.selected_patch_data = None
+        if self.patch_toggle_action is not None:
+            was_blocked = self.patch_toggle_action.blockSignals(True)
+            self.patch_toggle_action.setChecked(False)
+            self.patch_toggle_action.blockSignals(was_blocked)
+        self.slice_viewer.set_patch_selection_enabled(False)
+        if self.cursor_overlay_action is not None:
+            self.cursor_overlay_action.setEnabled(True)
+            self.slice_viewer.set_cursor_overlay_visible(self.cursor_overlay_action.isChecked())
+        self.cursor_panel.set_patch_controls_visible(False)
         self.cursor_panel.set_cursor_values(None, None, None, None)
         self.statusBar().showMessage("Ready")
 
@@ -186,3 +216,42 @@ class MainWindow(QMainWindow):
             return
         window_min, window_max = robust_auto_window(self.state.volume.data)
         self.contrast_state.set_window(window_min, window_max)
+
+    def _on_patch_selection_toggled(self, enabled: bool) -> None:
+        self.slice_viewer.set_patch_selection_enabled(enabled)
+        self.cursor_panel.set_patch_controls_visible(enabled)
+        if self.cursor_overlay_action is not None:
+            if enabled:
+                self._cursor_overlay_checked_before_patch = self.cursor_overlay_action.isChecked()
+                self.cursor_overlay_action.setChecked(False)
+                self.cursor_overlay_action.setEnabled(False)
+                self.slice_viewer.set_cursor_overlay_visible(False)
+            else:
+                self.cursor_overlay_action.setEnabled(True)
+                self.cursor_overlay_action.setChecked(self._cursor_overlay_checked_before_patch)
+        if enabled:
+            self.cursor_panel.set_patch_opacity(self.slice_viewer.patch_overlay_opacity())
+
+    def _on_select_patch(self) -> None:
+        if self.state.volume is None:
+            return
+
+        bounds = self.slice_viewer.current_patch_bounds()
+        if bounds is None:
+            return
+
+        extracted = extract_patch(self.state.volume, bounds)
+        self.state.selected_patch_bounds = bounds
+        self.state.selected_patch_data = extracted
+
+        patch_window = PatchViewerWindow(extracted, self)
+        patch_window.show()
+        self._patch_windows.append(patch_window)
+        patch_window.destroyed.connect(
+            lambda _: self._patch_windows.remove(patch_window)
+            if patch_window in self._patch_windows
+            else None
+        )
+
+    def _on_patch_selection_changed(self, bounds: object) -> None:
+        self.state.selected_patch_bounds = bounds if bounds is not None else None
