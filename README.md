@@ -17,8 +17,9 @@ MiView is intentionally minimal. The goal is to build a small, reliable viewer b
 
 MiView is under active development.
 
+The current viewer provides a minimal tri-planar layout with axial, coronal, and sagittal 2D slice views plus a cursor inspection panel.
+
 ### Deploy Locally
 ```
 PYTHONPATH=src python -m miview
 ```
-

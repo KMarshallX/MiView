@@ -10,4 +10,4 @@ from miview.io.nifti_loader import NiftiLoadResult
 class AppState:
     loaded_file_path: Path | None = None
     volume: NiftiLoadResult | None = None
-
+    cursor_position: tuple[int, int, int] | None = None
