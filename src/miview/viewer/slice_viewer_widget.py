@@ -15,7 +15,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
 
-from miview.viewer.intensity import normalize_slice_to_uint8
+from miview.viewer.intensity import normalize_slice_to_uint8, window_slice_to_uint8
 from miview.viewer.oriented_volume import OrientedVolume
 from miview.viewer.slice_geometry import (
     DisplayRect,
@@ -48,6 +48,7 @@ class SliceViewerWidget(QWidget):
         self.orientation = orientation
         self._display_volume: OrientedVolume | None = None
         self._source_cursor_position: tuple[int, int, int] | None = None
+        self._contrast_window: tuple[float, float] | None = None
         self._current_pixmap: QPixmap | None = None
         self._base_scale = 1.0
         self._zoom_factor = 1.0
@@ -89,6 +90,7 @@ class SliceViewerWidget(QWidget):
     def unload_volume(self) -> None:
         self._display_volume = None
         self._source_cursor_position = None
+        self._contrast_window = None
         self._current_pixmap = None
         self._pan_offset = (0.0, 0.0)
         self._interaction_mode = None
@@ -103,6 +105,11 @@ class SliceViewerWidget(QWidget):
 
         self._source_cursor_position = cursor_position
         self._render_current_slice()
+
+    def set_contrast_window(self, window_min: float, window_max: float) -> None:
+        self._contrast_window = (window_min, window_max)
+        if self._display_volume is not None and self._source_cursor_position is not None:
+            self._render_current_slice()
 
     def set_base_scale(self, base_scale: float) -> None:
         self._base_scale = base_scale
@@ -153,7 +160,12 @@ class SliceViewerWidget(QWidget):
         slice_2d = extract_oriented_slice(
             self._display_volume.display_data, self.orientation, display_cursor
         )
-        slice_8bit = normalize_slice_to_uint8(slice_2d)
+        if self._contrast_window is None:
+            slice_8bit = normalize_slice_to_uint8(slice_2d)
+        else:
+            slice_8bit = window_slice_to_uint8(
+                slice_2d, self._contrast_window[0], self._contrast_window[1]
+            )
         contiguous = np.ascontiguousarray(slice_8bit)
         height, width = contiguous.shape
         image = QImage(

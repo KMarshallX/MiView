@@ -24,6 +24,7 @@ class TriPlanarViewerWidget(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._display_volume: OrientedVolume | None = None
+        self._contrast_window: tuple[float, float] | None = None
         self.cursor_state = CursorState(self)
         self.zoom_state = ZoomState(self)
 
@@ -63,6 +64,10 @@ class TriPlanarViewerWidget(QWidget):
         self.cursor_state.set_volume_shape(self._display_volume.source_shape)
         for view in self._views:
             view.load_volume(self._display_volume)
+            if self._contrast_window is not None:
+                view.set_contrast_window(
+                    self._contrast_window[0], self._contrast_window[1]
+                )
 
         self._update_shared_base_scale()
         self.zoom_state.set_zoom_factor(1.0)
@@ -81,6 +86,13 @@ class TriPlanarViewerWidget(QWidget):
     def set_cursor_overlay_visible(self, visible: bool) -> None:
         for view in self._views:
             view.set_cursor_overlay_visible(visible)
+
+    def set_contrast_window(self, window_min: float, window_max: float) -> None:
+        if window_max < window_min:
+            window_min, window_max = window_max, window_min
+        self._contrast_window = (window_min, window_max)
+        for view in self._views:
+            view.set_contrast_window(window_min, window_max)
 
     def _on_cursor_selected(self, x: int, y: int, z: int) -> None:
         self.cursor_state.set_cursor_position((x, y, z))

@@ -7,15 +7,20 @@ from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QApplication,
     QFileDialog,
+    QVBoxLayout,
     QMainWindow,
     QMessageBox,
     QProgressBar,
     QSplitter,
+    QWidget,
 )
 
 from miview.io.nifti_loader import load_nifti
 from miview.state.app_state import AppState
+from miview.state.contrast_state import ContrastState
+from miview.ui.contrast_control_bar import ContrastControlBar
 from miview.ui.cursor_panel import CursorInspectionPanel
+from miview.viewer.intensity import robust_auto_window, volume_intensity_range
 from miview.viewer.triplanar_viewer_widget import TriPlanarViewerWidget
 
 
@@ -25,8 +30,10 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("MiView")
         self.resize(1100, 700)
         self.state = AppState()
+        self.contrast_state = ContrastState(self)
         self.slice_viewer = TriPlanarViewerWidget()
         self.cursor_panel = CursorInspectionPanel()
+        self.contrast_control_bar = ContrastControlBar(self)
         self.loading_progress_bar = QProgressBar(self)
         self._loading_hide_timer = QTimer(self)
         self._loading_hide_timer.setSingleShot(True)
@@ -35,6 +42,14 @@ class MainWindow(QMainWindow):
             self.cursor_panel.set_cursor_values
         )
         self.slice_viewer.cursor_state.cursor_changed.connect(self._update_cursor_position)
+        self.contrast_control_bar.window_changed.connect(self.contrast_state.set_window)
+        self.contrast_control_bar.auto_requested.connect(self._on_auto_contrast)
+        self.contrast_state.availability_changed.connect(
+            self.contrast_control_bar.set_enabled_state
+        )
+        self.contrast_state.range_changed.connect(self.contrast_control_bar.set_available_range)
+        self.contrast_state.window_changed.connect(self.contrast_control_bar.set_window)
+        self.contrast_state.window_changed.connect(self.slice_viewer.set_contrast_window)
 
         self._setup_central_layout()
         self._setup_loading_progress_bar()
@@ -42,12 +57,20 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Ready")
 
     def _setup_central_layout(self) -> None:
+        content_widget = QWidget(self)
+        content_layout = QVBoxLayout(content_widget)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(0)
+
         splitter = QSplitter(Qt.Orientation.Horizontal, self)
         splitter.addWidget(self.slice_viewer)
         splitter.addWidget(self.cursor_panel)
         splitter.setStretchFactor(0, 4)
         splitter.setStretchFactor(1, 1)
-        self.setCentralWidget(splitter)
+
+        content_layout.addWidget(self.contrast_control_bar)
+        content_layout.addWidget(splitter, 1)
+        self.setCentralWidget(content_widget)
 
     def _setup_loading_progress_bar(self) -> None:
         self.loading_progress_bar.setRange(0, 0)
@@ -116,6 +139,7 @@ class MainWindow(QMainWindow):
         self.state.loaded_file_path = loaded_path
         self.state.volume = loaded
         self.state.cursor_position = self.slice_viewer.current_cursor_position()
+        self._initialize_contrast_for_loaded_volume()
 
         self.statusBar().showMessage(
             f"Loaded {loaded_path.name} | shape={loaded.shape} | dtype={loaded.dtype}"
@@ -124,6 +148,7 @@ class MainWindow(QMainWindow):
 
     def _on_unload(self) -> None:
         self.slice_viewer.unload_volume()
+        self.contrast_state.clear()
         self.state.loaded_file_path = None
         self.state.volume = None
         self.state.cursor_position = None
@@ -146,3 +171,18 @@ class MainWindow(QMainWindow):
 
     def _hide_loading_progress(self) -> None:
         self.loading_progress_bar.setVisible(False)
+
+    def _initialize_contrast_for_loaded_volume(self) -> None:
+        if self.state.volume is None:
+            self.contrast_state.clear()
+            return
+
+        range_min, range_max = volume_intensity_range(self.state.volume.data)
+        self.contrast_state.set_available_range(range_min, range_max)
+        self.contrast_state.set_window(range_min, range_max, force_emit=True)
+
+    def _on_auto_contrast(self) -> None:
+        if self.state.volume is None or not self.contrast_state.is_enabled():
+            return
+        window_min, window_max = robust_auto_window(self.state.volume.data)
+        self.contrast_state.set_window(window_min, window_max)
