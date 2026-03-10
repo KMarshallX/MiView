@@ -5,7 +5,11 @@ from dataclasses import dataclass
 import numpy as np
 
 from miview.viewer.oriented_volume import OrientedVolume
-from miview.viewer.slice_geometry import Orientation, plane_axes_for_orientation
+from miview.viewer.slice_geometry import (
+    Orientation,
+    plane_axes_for_orientation,
+    plane_definition_for_orientation,
+)
 
 DEFAULT_PATCH_SIZE = (64, 64, 10)
 
@@ -143,15 +147,29 @@ def source_bounds_to_display_bounds(
 def project_bounds_to_orientation(
     bounds: PatchBounds,
     orientation: Orientation,
+    display_shape: tuple[int, int, int],
 ) -> PatchPlaneBounds:
+    plane_definition = plane_definition_for_orientation(orientation)
     horizontal_axis, vertical_axis, _ = plane_axes_for_orientation(orientation)
     starts = (bounds.x_start, bounds.y_start, bounds.z_start)
     ends = (bounds.x_end, bounds.y_end, bounds.z_end)
+    horizontal_start, horizontal_end = _project_axis_interval_to_orientation(
+        starts[horizontal_axis],
+        ends[horizontal_axis],
+        display_shape[horizontal_axis],
+        plane_definition.horizontal_flipped,
+    )
+    vertical_start, vertical_end = _project_axis_interval_to_orientation(
+        starts[vertical_axis],
+        ends[vertical_axis],
+        display_shape[vertical_axis],
+        plane_definition.vertical_flipped,
+    )
     return PatchPlaneBounds(
-        horizontal_start=starts[horizontal_axis],
-        horizontal_end=ends[horizontal_axis],
-        vertical_start=starts[vertical_axis],
-        vertical_end=ends[vertical_axis],
+        horizontal_start=horizontal_start,
+        horizontal_end=horizontal_end,
+        vertical_start=vertical_start,
+        vertical_end=vertical_end,
     )
 
 
@@ -232,3 +250,14 @@ def _axis_bounds(center: int, size: int, axis_length: int) -> tuple[int, int]:
 
 def _clamp_patch_size(size: int) -> int:
     return max(1, int(size))
+
+
+def _project_axis_interval_to_orientation(
+    start: int, end: int, axis_size: int, flipped: bool
+) -> tuple[int, int]:
+    clamped_start = min(max(start, 0), axis_size)
+    clamped_end = min(max(end, 0), axis_size)
+
+    if flipped:
+        return axis_size - clamped_end, axis_size - clamped_start
+    return clamped_start, clamped_end

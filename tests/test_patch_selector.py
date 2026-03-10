@@ -54,14 +54,18 @@ def test_source_bounds_to_display_bounds_respects_axis_mapping() -> None:
 
 def test_project_bounds_to_orientation_matches_expected_view_sizes() -> None:
     bounds = PatchBounds(10, 74, 20, 84, 5, 15)
+    display_shape = (100, 100, 40)
 
-    axial = project_bounds_to_orientation(bounds, "axial")
-    coronal = project_bounds_to_orientation(bounds, "coronal")
-    sagittal = project_bounds_to_orientation(bounds, "sagittal")
+    axial = project_bounds_to_orientation(bounds, "axial", display_shape)
+    coronal = project_bounds_to_orientation(bounds, "coronal", display_shape)
+    sagittal = project_bounds_to_orientation(bounds, "sagittal", display_shape)
 
     assert (axial.horizontal_end - axial.horizontal_start, axial.vertical_end - axial.vertical_start) == (64, 64)
     assert (coronal.horizontal_end - coronal.horizontal_start, coronal.vertical_end - coronal.vertical_start) == (64, 10)
     assert (sagittal.horizontal_end - sagittal.horizontal_start, sagittal.vertical_end - sagittal.vertical_start) == (64, 10)
+    assert (axial.horizontal_start, axial.vertical_start) == (26, 16)
+    assert (coronal.horizontal_start, coronal.vertical_start) == (26, 25)
+    assert (sagittal.horizontal_start, sagittal.vertical_start) == (16, 25)
 
 
 def test_orientation_slice_intersects_bounds_checks_fixed_axis_interval() -> None:

@@ -630,22 +630,17 @@ class SliceViewerWidget(QWidget):
         if plane_fraction is None:
             return
 
-        horizontal_axis, vertical_axis, _ = plane_axes_for_orientation(self.orientation)
-        display_center = list(
-            self._display_volume.source_to_display(self._patch_center_source)
+        display_center = self._display_volume.source_to_display(
+            self._patch_center_source
         )
-        horizontal_size = self._display_volume.display_shape[horizontal_axis]
-        vertical_size = self._display_volume.display_shape[vertical_axis]
-        display_center[horizontal_axis] = _fraction_to_display_index(
-            plane_fraction[0], horizontal_size
+        display_center = map_plane_fraction_to_cursor(
+            self.orientation,
+            self._display_volume.display_shape,
+            display_center,
+            plane_fraction[0],
+            plane_fraction[1],
         )
-        display_center[vertical_axis] = _fraction_to_display_index(
-            plane_fraction[1], vertical_size
-        )
-
-        source_center = self._display_volume.display_to_source(
-            (display_center[0], display_center[1], display_center[2])
-        )
+        source_center = self._display_volume.display_to_source(display_center)
         self.patch_center_position_selected.emit(*source_center)
 
 
@@ -656,10 +651,3 @@ def _edge_index_to_display_coordinate(
         return rect_origin
     clamped = min(max(edge_index, 0), axis_size)
     return rect_origin + (clamped / axis_size) * rect_size
-
-
-def _fraction_to_display_index(fraction: float, axis_size: int) -> int:
-    if axis_size <= 0:
-        return 0
-    clamped_fraction = min(max(fraction, 0.0), np.nextafter(1.0, 0.0))
-    return int(clamped_fraction * axis_size)

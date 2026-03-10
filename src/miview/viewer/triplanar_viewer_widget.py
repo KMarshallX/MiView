@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import logging
+import os
+
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import QGridLayout, QWidget
 
@@ -18,9 +21,12 @@ from miview.viewer.oriented_volume import OrientedVolume, build_oriented_volume
 from miview.viewer.slice_geometry import (
     center_cursor_for_volume,
     compute_shared_base_scale,
+    plane_axes_for_orientation,
     plane_shape_for_orientation,
 )
 from miview.viewer.slice_viewer_widget import SliceViewerWidget
+
+LOGGER = logging.getLogger(__name__)
 
 
 class TriPlanarViewerWidget(QWidget):
@@ -33,6 +39,12 @@ class TriPlanarViewerWidget(QWidget):
         super().__init__(parent)
         self._display_volume: OrientedVolume | None = None
         self._contrast_window: tuple[float, float] | None = None
+        self._patch_debug_enabled = os.getenv("MIVIEW_PATCH_DEBUG", "").lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
         self.cursor_state = CursorState(self)
         self.zoom_state = ZoomState(self)
         self.patch_selector = PatchSelector(DEFAULT_PATCH_SIZE)
@@ -210,7 +222,11 @@ class TriPlanarViewerWidget(QWidget):
                 )
             )
             plane_bounds = (
-                project_bounds_to_orientation(display_bounds, view.orientation)
+                project_bounds_to_orientation(
+                    display_bounds,
+                    view.orientation,
+                    self._display_volume.display_shape,
+                )
                 if visible_in_view
                 else None
             )
@@ -221,5 +237,44 @@ class TriPlanarViewerWidget(QWidget):
                 size_xyz,
                 source_patch_center,
             )
+
+        if self._patch_debug_enabled and enabled:
+            LOGGER.warning(
+                "Patch debug: center=(%d, %d, %d) bounds=(%d:%d, %d:%d, %d:%d)",
+                source_patch_center[0],
+                source_patch_center[1],
+                source_patch_center[2],
+                bounds.x_start,
+                bounds.x_end,
+                bounds.y_start,
+                bounds.y_end,
+                bounds.z_start,
+                bounds.z_end,
+            )
+            for view in self._views:
+                visible_in_view = orientation_slice_intersects_bounds(
+                    display_bounds, view.orientation, display_cursor
+                )
+                if not visible_in_view:
+                    _, _, fixed_axis = plane_axes_for_orientation(view.orientation)
+                    LOGGER.warning(
+                        "Patch debug [%s]: hidden at slice index=%d",
+                        view.orientation,
+                        display_cursor[fixed_axis],
+                    )
+                    continue
+                plane_bounds = project_bounds_to_orientation(
+                    display_bounds,
+                    view.orientation,
+                    self._display_volume.display_shape,
+                )
+                LOGGER.warning(
+                    "Patch debug [%s]: rect h=(%d:%d) v=(%d:%d)",
+                    view.orientation,
+                    plane_bounds.horizontal_start,
+                    plane_bounds.horizontal_end,
+                    plane_bounds.vertical_start,
+                    plane_bounds.vertical_end,
+                )
 
         self.patch_selection_changed.emit(bounds if enabled else None)
