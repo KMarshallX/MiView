@@ -8,6 +8,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QPushButton,
     QSlider,
+    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
@@ -17,6 +18,7 @@ class CursorInspectionPanel(QWidget):
     """Right-side panel for cursor/voxel readouts."""
 
     patch_opacity_changed = Signal(float)
+    patch_size_changed = Signal(int, int, int)
     select_patch_requested = Signal()
 
     PANEL_WIDTH = 220
@@ -44,9 +46,31 @@ class CursorInspectionPanel(QWidget):
         self.patch_opacity_slider.setRange(0, 100)
         self.patch_opacity_slider.setValue(50)
         self.patch_opacity_slider.valueChanged.connect(self._on_opacity_slider_changed)
+
+        self.patch_width_spinbox = QSpinBox(self.patch_group)
+        self.patch_width_spinbox.setRange(1, 9999)
+        self.patch_width_spinbox.setValue(1)
+        self.patch_width_spinbox.setSuffix(" vox")
+        self.patch_width_spinbox.valueChanged.connect(self._on_patch_size_changed)
+
+        self.patch_height_spinbox = QSpinBox(self.patch_group)
+        self.patch_height_spinbox.setRange(1, 9999)
+        self.patch_height_spinbox.setValue(1)
+        self.patch_height_spinbox.setSuffix(" vox")
+        self.patch_height_spinbox.valueChanged.connect(self._on_patch_size_changed)
+
+        self.patch_depth_spinbox = QSpinBox(self.patch_group)
+        self.patch_depth_spinbox.setRange(1, 9999)
+        self.patch_depth_spinbox.setValue(1)
+        self.patch_depth_spinbox.setSuffix(" vox")
+        self.patch_depth_spinbox.valueChanged.connect(self._on_patch_size_changed)
+
         self.select_patch_button = QPushButton("Select Patch", self.patch_group)
         self.select_patch_button.clicked.connect(self.select_patch_requested.emit)
         patch_form.addRow("Opacity:", self.patch_opacity_slider)
+        patch_form.addRow("Width (LR / X):", self.patch_width_spinbox)
+        patch_form.addRow("Height (AP / Y):", self.patch_height_spinbox)
+        patch_form.addRow("Depth (SI / Z):", self.patch_depth_spinbox)
         patch_form.addRow(self.select_patch_button)
 
         layout = QVBoxLayout(self)
@@ -76,6 +100,9 @@ class CursorInspectionPanel(QWidget):
     def set_patch_controls_visible(self, visible: bool) -> None:
         self.patch_group.setVisible(visible)
         self.patch_opacity_slider.setEnabled(visible)
+        self.patch_width_spinbox.setEnabled(visible)
+        self.patch_height_spinbox.setEnabled(visible)
+        self.patch_depth_spinbox.setEnabled(visible)
         self.select_patch_button.setEnabled(visible)
 
     def set_patch_opacity(self, opacity: float) -> None:
@@ -86,3 +113,21 @@ class CursorInspectionPanel(QWidget):
 
     def _on_opacity_slider_changed(self, slider_value: int) -> None:
         self.patch_opacity_changed.emit(slider_value / 100.0)
+
+    def set_patch_size_xyz(self, size_xyz: tuple[int, int, int]) -> None:
+        x_size, y_size, z_size = size_xyz
+        for spinbox, value in (
+            (self.patch_width_spinbox, x_size),
+            (self.patch_height_spinbox, y_size),
+            (self.patch_depth_spinbox, z_size),
+        ):
+            was_blocked = spinbox.blockSignals(True)
+            spinbox.setValue(max(1, int(value)))
+            spinbox.blockSignals(was_blocked)
+
+    def _on_patch_size_changed(self, _: int) -> None:
+        self.patch_size_changed.emit(
+            self.patch_width_spinbox.value(),
+            self.patch_height_spinbox.value(),
+            self.patch_depth_spinbox.value(),
+        )

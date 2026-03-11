@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import os
 
+import numpy as np
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import QGridLayout, QWidget
 
@@ -19,6 +20,7 @@ from miview.patch.selector import (
 )
 from miview.viewer.oriented_volume import OrientedVolume, build_oriented_volume
 from miview.viewer.slice_geometry import (
+    Orientation,
     center_cursor_for_volume,
     compute_shared_base_scale,
     plane_axes_for_orientation,
@@ -48,6 +50,12 @@ class TriPlanarViewerWidget(QWidget):
         self.cursor_state = CursorState(self)
         self.zoom_state = ZoomState(self)
         self.patch_selector = PatchSelector(DEFAULT_PATCH_SIZE)
+        self._projection_mode = "MIP"
+        self._projection_enabled: dict[str, bool] = {
+            "axial": False,
+            "sagittal": False,
+            "coronal": False,
+        }
 
         self.axial_view = SliceViewerWidget("axial", self)
         self.coronal_view = SliceViewerWidget("coronal", self)
@@ -98,6 +106,7 @@ class TriPlanarViewerWidget(QWidget):
         initial_center = center_cursor_for_volume(self._display_volume.source_shape)
         self.patch_selector.set_center(initial_center)
         self.cursor_state.set_cursor_position(initial_center)
+        self._update_projection_overrides()
 
     def unload_volume(self) -> None:
         self._display_volume = None
@@ -113,6 +122,7 @@ class TriPlanarViewerWidget(QWidget):
                 self.patch_selector.size_xyz(),
                 None,
             )
+            view.set_projection_slice(None)
         self.patch_selection_changed.emit(None)
 
     def current_cursor_position(self) -> tuple[int, int, int] | None:
@@ -141,6 +151,14 @@ class TriPlanarViewerWidget(QWidget):
     def patch_size_xyz(self) -> tuple[int, int, int]:
         return self.patch_selector.size_xyz()
 
+    def set_patch_size_xyz(self, size_xyz: tuple[int, int, int]) -> None:
+        changed = False
+        for axis, axis_size in enumerate(size_xyz):
+            if self.patch_selector.set_size_axis(axis, axis_size):
+                changed = True
+        if changed:
+            self._update_patch_overlays()
+
     def current_patch_bounds(self) -> PatchBounds | None:
         return self.patch_selector.current_bounds()
 
@@ -150,6 +168,23 @@ class TriPlanarViewerWidget(QWidget):
         self._contrast_window = (window_min, window_max)
         for view in self._views:
             view.set_contrast_window(window_min, window_max)
+
+    def set_projection_mode(self, mode: str) -> None:
+        normalized_mode = mode.strip().upper()
+        if normalized_mode not in {"MIP", "MINIP"}:
+            return
+        if self._projection_mode == normalized_mode:
+            return
+        self._projection_mode = normalized_mode
+        self._update_projection_overrides()
+
+    def set_projection_enabled(self, orientation: Orientation, enabled: bool) -> None:
+        if orientation not in self._projection_enabled:
+            return
+        if self._projection_enabled[orientation] == enabled:
+            return
+        self._projection_enabled[orientation] = enabled
+        self._update_projection_overrides()
 
     def _on_cursor_selected(self, x: int, y: int, z: int) -> None:
         self.cursor_state.set_cursor_position((x, y, z))
@@ -278,3 +313,37 @@ class TriPlanarViewerWidget(QWidget):
                 )
 
         self.patch_selection_changed.emit(bounds if enabled else None)
+
+    def _update_projection_overrides(self) -> None:
+        if self._display_volume is None:
+            for view in self._views:
+                view.set_projection_slice(None)
+            return
+
+        volume = self._display_volume.display_data
+        for view in self._views:
+            if not self._projection_enabled.get(view.orientation, False):
+                view.set_projection_slice(None)
+                continue
+            projection_slice = _project_oriented_volume(
+                volume,
+                view.orientation,
+                self._projection_mode,
+            )
+            view.set_projection_slice(
+                projection_slice,
+                f"{self._projection_mode} ({view.orientation.title()})",
+            )
+
+
+def _project_oriented_volume(
+    volume: np.ndarray, orientation: Orientation, mode: str
+) -> np.ndarray:
+    reducer = np.max if mode == "MIP" else np.min
+    if orientation == "axial":
+        return reducer(volume, axis=2).T[::-1, ::-1]
+    if orientation == "coronal":
+        return reducer(volume, axis=1).T[::-1, ::-1]
+    if orientation == "sagittal":
+        return reducer(volume, axis=0).T[::-1, ::-1]
+    raise ValueError(f"Unsupported orientation: {orientation}")

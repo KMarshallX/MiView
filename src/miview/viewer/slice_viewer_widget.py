@@ -68,6 +68,8 @@ class SliceViewerWidget(QWidget):
         self._patch_plane_bounds: PatchPlaneBounds | None = None
         self._patch_size_source = (1, 1, 1)
         self._patch_center_source: tuple[int, int, int] | None = None
+        self._projection_slice_2d: np.ndarray | None = None
+        self._projection_label: str | None = None
         self._active_patch_resize_handle: str | None = None
         self._interaction_mode: str | None = None
         self._last_drag_position: QPointF | None = None
@@ -98,6 +100,8 @@ class SliceViewerWidget(QWidget):
         self._pan_offset = (0.0, 0.0)
         self._interaction_mode = None
         self._last_drag_position = None
+        self._projection_slice_2d = None
+        self._projection_label = None
         self.image_label.setText("Set cursor to view slices")
         self.image_label.setPixmap(QPixmap())
         self.slice_label.setText("Slice: -")
@@ -110,6 +114,8 @@ class SliceViewerWidget(QWidget):
         self._pan_offset = (0.0, 0.0)
         self._interaction_mode = None
         self._last_drag_position = None
+        self._projection_slice_2d = None
+        self._projection_label = None
         self.image_label.setText("No volume loaded")
         self.image_label.setPixmap(QPixmap())
         self.slice_label.setText("Slice: -")
@@ -153,6 +159,21 @@ class SliceViewerWidget(QWidget):
         self._patch_center_source = patch_center_source
         self._update_scaled_pixmap()
 
+    def set_projection_slice(
+        self, slice_2d: np.ndarray | None, label: str | None = None
+    ) -> None:
+        if slice_2d is None:
+            self._projection_slice_2d = None
+            self._projection_label = None
+        else:
+            projection = np.asarray(slice_2d)
+            if projection.ndim != 2:
+                raise ValueError("Projection slice must be a 2D array.")
+            self._projection_slice_2d = projection
+            self._projection_label = label
+        if self._display_volume is not None and self._source_cursor_position is not None:
+            self._render_current_slice()
+
     def resizeEvent(self, event: QResizeEvent) -> None:
         super().resizeEvent(event)
         self._update_scaled_pixmap()
@@ -189,9 +210,12 @@ class SliceViewerWidget(QWidget):
             return
 
         display_cursor = self._display_volume.source_to_display(self._source_cursor_position)
-        slice_2d = extract_oriented_slice(
-            self._display_volume.display_data, self.orientation, display_cursor
-        )
+        if self._projection_slice_2d is not None:
+            slice_2d = self._projection_slice_2d
+        else:
+            slice_2d = extract_oriented_slice(
+                self._display_volume.display_data, self.orientation, display_cursor
+            )
         if self._contrast_window is None:
             slice_8bit = normalize_slice_to_uint8(slice_2d)
         else:
@@ -212,10 +236,14 @@ class SliceViewerWidget(QWidget):
         self.image_label.setText("")
         self._update_scaled_pixmap()
 
-        _, _, fixed_axis = plane_axes_for_orientation(self.orientation)
-        slice_index = display_cursor[fixed_axis]
-        max_index = self._display_volume.display_shape[fixed_axis] - 1
-        self.slice_label.setText(f"Slice: {slice_index} / {max_index}")
+        if self._projection_slice_2d is not None:
+            projection_text = self._projection_label or "Projection"
+            self.slice_label.setText(f"Slice: {projection_text}")
+        else:
+            _, _, fixed_axis = plane_axes_for_orientation(self.orientation)
+            slice_index = display_cursor[fixed_axis]
+            max_index = self._display_volume.display_shape[fixed_axis] - 1
+            self.slice_label.setText(f"Slice: {slice_index} / {max_index}")
 
     def _update_scaled_pixmap(self) -> None:
         if self._current_pixmap is None:

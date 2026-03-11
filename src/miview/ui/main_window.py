@@ -7,6 +7,7 @@ from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QApplication,
     QFileDialog,
+    QSizePolicy,
     QVBoxLayout,
     QMainWindow,
     QMessageBox,
@@ -52,6 +53,7 @@ class MainWindow(QMainWindow):
         self.contrast_control_bar.window_changed.connect(self.contrast_state.set_window)
         self.contrast_control_bar.auto_requested.connect(self._on_auto_contrast)
         self.cursor_panel.patch_opacity_changed.connect(self.slice_viewer.set_patch_overlay_opacity)
+        self.cursor_panel.patch_size_changed.connect(self._on_patch_size_changed)
         self.cursor_panel.select_patch_requested.connect(self._on_select_patch)
         self.contrast_state.availability_changed.connect(
             self.contrast_control_bar.set_enabled_state
@@ -61,9 +63,9 @@ class MainWindow(QMainWindow):
         self.contrast_state.window_changed.connect(self.slice_viewer.set_contrast_window)
 
         self._setup_central_layout()
-        self._setup_loading_progress_bar()
         self._setup_menu()
         self.cursor_panel.set_patch_opacity(self.slice_viewer.patch_overlay_opacity())
+        self.cursor_panel.set_patch_size_xyz(self.slice_viewer.patch_size_xyz())
         self.statusBar().showMessage("Ready")
 
     def _setup_central_layout(self) -> None:
@@ -80,14 +82,19 @@ class MainWindow(QMainWindow):
 
         content_layout.addWidget(self.contrast_control_bar)
         content_layout.addWidget(splitter, 1)
+        self._setup_loading_progress_bar()
+        content_layout.addWidget(self.loading_progress_bar)
         self.setCentralWidget(content_widget)
 
     def _setup_loading_progress_bar(self) -> None:
         self.loading_progress_bar.setRange(0, 0)
         self.loading_progress_bar.setVisible(False)
         self.loading_progress_bar.setTextVisible(False)
-        self.loading_progress_bar.setFixedWidth(180)
-        self.statusBar().addPermanentWidget(self.loading_progress_bar)
+        self.loading_progress_bar.setFixedHeight(8)
+        self.loading_progress_bar.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Fixed,
+        )
 
     def _setup_menu(self) -> None:
         file_menu = self.menuBar().addMenu("&File")
@@ -231,6 +238,7 @@ class MainWindow(QMainWindow):
                 self.cursor_overlay_action.setChecked(self._cursor_overlay_checked_before_patch)
         if enabled:
             self.cursor_panel.set_patch_opacity(self.slice_viewer.patch_overlay_opacity())
+            self.cursor_panel.set_patch_size_xyz(self.slice_viewer.patch_size_xyz())
 
     def _on_select_patch(self) -> None:
         if self.state.volume is None:
@@ -255,3 +263,7 @@ class MainWindow(QMainWindow):
 
     def _on_patch_selection_changed(self, bounds: object) -> None:
         self.state.selected_patch_bounds = bounds if bounds is not None else None
+        self.cursor_panel.set_patch_size_xyz(self.slice_viewer.patch_size_xyz())
+
+    def _on_patch_size_changed(self, width_lr: int, height_ap: int, depth_si: int) -> None:
+        self.slice_viewer.set_patch_size_xyz((width_lr, height_ap, depth_si))
