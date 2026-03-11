@@ -22,11 +22,21 @@ def test_load_nifti_returns_expected_fields(tmp_path) -> None:
     nib.save(image, str(file_path))
 
     loaded = load_nifti(file_path)
+    source_orientation = nib.orientations.io_orientation(affine)
+    canonical_orientation = nib.orientations.axcodes2ornt(("R", "P", "I"))
+    source_to_canonical = nib.orientations.ornt_transform(
+        source_orientation, canonical_orientation
+    )
+    expected_data = nib.orientations.apply_orientation(data, source_to_canonical)
+    expected_affine = affine @ nib.orientations.inv_ornt_aff(
+        source_to_canonical, data.shape
+    )
 
     assert loaded.shape == data.shape
     assert loaded.dtype == data.dtype
-    np.testing.assert_array_equal(loaded.data, data)
-    np.testing.assert_array_equal(loaded.affine, affine)
+    np.testing.assert_array_equal(loaded.data, expected_data)
+    np.testing.assert_array_equal(loaded.affine, expected_affine)
+    assert nib.orientations.aff2axcodes(loaded.affine) == ("R", "P", "I")
     assert loaded.header["dim"][0] == 3
 
 

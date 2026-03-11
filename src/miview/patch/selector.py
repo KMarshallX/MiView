@@ -16,7 +16,7 @@ DEFAULT_PATCH_SIZE = (64, 64, 10)
 
 @dataclass(frozen=True)
 class PatchBounds:
-    """Half-open 3D voxel bounds in source index space."""
+    """Half-open 3D voxel bounds in canonical anatomical (RPI) index space."""
 
     x_start: int
     x_end: int
@@ -44,7 +44,7 @@ class PatchPlaneBounds:
 
 
 class PatchSelector:
-    """Shared 3D patch selection state centered on the logical source cursor."""
+    """Shared 3D patch selection state in canonical anatomical (RPI) axes."""
 
     def __init__(self, default_size: tuple[int, int, int] = DEFAULT_PATCH_SIZE) -> None:
         self._enabled = False

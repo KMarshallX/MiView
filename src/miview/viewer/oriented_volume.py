@@ -8,7 +8,7 @@ import numpy as np
 
 @dataclass(frozen=True)
 class OrientedVolume:
-    """Volume reoriented to canonical RAS display space with explicit index mapping."""
+    """Canonical-RPI source volume and canonical-RAS display volume with index mapping."""
 
     source_data: np.ndarray
     display_data: np.ndarray
