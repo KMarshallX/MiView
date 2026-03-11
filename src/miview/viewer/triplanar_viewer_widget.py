@@ -134,6 +134,8 @@ class TriPlanarViewerWidget(QWidget):
 
     def set_patch_selection_enabled(self, enabled: bool) -> None:
         if enabled and self.cursor_state.cursor_position() is not None:
+            for axis, default_size in enumerate(DEFAULT_PATCH_SIZE):
+                self.patch_selector.set_size_axis(axis, default_size)
             self.patch_selector.set_center(self.cursor_state.cursor_position())
         self.patch_selector.set_enabled(enabled)
         self._update_patch_overlays()
