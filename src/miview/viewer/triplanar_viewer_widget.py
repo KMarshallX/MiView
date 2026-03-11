@@ -167,6 +167,22 @@ class TriPlanarViewerWidget(QWidget):
     def current_patch_center(self) -> tuple[int, int, int] | None:
         return self.patch_selector.center()
 
+    def recenter_views_on_patch_box(self) -> None:
+        target_cursor = self.patch_selector.center()
+        if target_cursor is None:
+            bounds = self.patch_selector.current_bounds()
+            if bounds is not None:
+                target_cursor = (
+                    (bounds.x_start + bounds.x_end - 1) // 2,
+                    (bounds.y_start + bounds.y_end - 1) // 2,
+                    (bounds.z_start + bounds.z_end - 1) // 2,
+                )
+        if target_cursor is not None:
+            self.cursor_state.set_cursor_position(target_cursor)
+
+        for view in self._views:
+            view.recenter_on_patch_overlay()
+
     def set_contrast_window(self, window_min: float, window_max: float) -> None:
         if window_max < window_min:
             window_min, window_max = window_max, window_min

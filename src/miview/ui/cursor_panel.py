@@ -20,6 +20,7 @@ class CursorInspectionPanel(QWidget):
     patch_opacity_changed = Signal(float)
     patch_size_changed = Signal(int, int, int)
     select_patch_requested = Signal()
+    find_patch_box_requested = Signal()
 
     PANEL_WIDTH = 220
 
@@ -67,11 +68,14 @@ class CursorInspectionPanel(QWidget):
 
         self.select_patch_button = QPushButton("Select Patch", self.patch_group)
         self.select_patch_button.clicked.connect(self.select_patch_requested.emit)
+        self.find_patch_box_button = QPushButton("Find Patch Box", self.patch_group)
+        self.find_patch_box_button.clicked.connect(self.find_patch_box_requested.emit)
         patch_form.addRow("Opacity:", self.patch_opacity_slider)
         patch_form.addRow("Width (LR / X):", self.patch_width_spinbox)
         patch_form.addRow("Height (AP / Y):", self.patch_height_spinbox)
         patch_form.addRow("Depth (SI / Z):", self.patch_depth_spinbox)
         patch_form.addRow(self.select_patch_button)
+        patch_form.addRow(self.find_patch_box_button)
 
         layout = QVBoxLayout(self)
         layout.addWidget(group)
@@ -104,6 +108,7 @@ class CursorInspectionPanel(QWidget):
         self.patch_height_spinbox.setEnabled(visible)
         self.patch_depth_spinbox.setEnabled(visible)
         self.select_patch_button.setEnabled(visible)
+        self.find_patch_box_button.setEnabled(visible)
 
     def set_patch_opacity(self, opacity: float) -> None:
         slider_value = int(round(min(max(opacity, 0.0), 1.0) * 100))

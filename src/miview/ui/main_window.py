@@ -55,6 +55,7 @@ class MainWindow(QMainWindow):
         self.cursor_panel.patch_opacity_changed.connect(self.slice_viewer.set_patch_overlay_opacity)
         self.cursor_panel.patch_size_changed.connect(self._on_patch_size_changed)
         self.cursor_panel.select_patch_requested.connect(self._on_select_patch)
+        self.cursor_panel.find_patch_box_requested.connect(self._on_find_patch_box)
         self.contrast_state.availability_changed.connect(
             self.contrast_control_bar.set_enabled_state
         )
@@ -279,3 +280,6 @@ class MainWindow(QMainWindow):
 
     def _on_patch_size_changed(self, width_lr: int, height_ap: int, depth_si: int) -> None:
         self.slice_viewer.set_patch_size_xyz((width_lr, height_ap, depth_si))
+
+    def _on_find_patch_box(self) -> None:
+        self.slice_viewer.recenter_views_on_patch_box()

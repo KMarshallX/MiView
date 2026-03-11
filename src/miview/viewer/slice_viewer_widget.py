@@ -450,6 +450,42 @@ class SliceViewerWidget(QWidget):
     def viewport_size(self) -> tuple[int, int]:
         return (self.image_label.width(), self.image_label.height())
 
+    def recenter_on_patch_overlay(self) -> bool:
+        """Pan view so the current patch center aligns with viewport center."""
+        if self._display_volume is None or self._patch_center_source is None:
+            return False
+
+        display_rect = self._display_rect()
+        if display_rect is None:
+            return False
+
+        display_patch_center = self._display_volume.source_to_display(self._patch_center_source)
+        horizontal_index, vertical_index = map_cursor_to_plane_indices(
+            self.orientation,
+            display_patch_center,
+            self._display_volume.display_shape,
+        )
+        horizontal_axis, vertical_axis, _ = plane_axes_for_orientation(self.orientation)
+        patch_center_x, patch_center_y = map_plane_indices_to_label_position(
+            (horizontal_index, vertical_index),
+            (
+                self._display_volume.display_shape[horizontal_axis],
+                self._display_volume.display_shape[vertical_axis],
+            ),
+            display_rect,
+        )
+
+        viewport_center = QPointF(
+            self.image_label.width() / 2.0,
+            self.image_label.height() / 2.0,
+        )
+        delta_x = viewport_center.x() - float(patch_center_x)
+        delta_y = viewport_center.y() - float(patch_center_y)
+        pan_x, pan_y = self._pan_offset
+        self._pan_offset = (pan_x + delta_x, pan_y + delta_y)
+        self._update_scaled_pixmap()
+        return True
+
     def _draw_patch_overlay(self, painter: QPainter, display_rect: DisplayRect) -> None:
         assert self._patch_plane_bounds is not None
         assert self._display_volume is not None
