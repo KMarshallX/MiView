@@ -164,6 +164,9 @@ class TriPlanarViewerWidget(QWidget):
     def current_patch_bounds(self) -> PatchBounds | None:
         return self.patch_selector.current_bounds()
 
+    def current_patch_center(self) -> tuple[int, int, int] | None:
+        return self.patch_selector.center()
+
     def set_contrast_window(self, window_min: float, window_max: float) -> None:
         if window_max < window_min:
             window_min, window_max = window_max, window_min

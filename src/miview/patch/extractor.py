@@ -11,11 +11,17 @@ def extract_patch(volume: NiftiLoadResult, bounds: PatchBounds) -> NiftiLoadResu
     patch_data = np.asarray(volume.data[bounds.as_slices()]).copy()
 
     patch_affine = np.asarray(volume.affine).copy()
+    # Shift world origin so patch voxel (0,0,0) maps to the cropped location in
+    # the source image. This keeps patch/world alignment correct in external tools.
     origin_shift = np.array([bounds.x_start, bounds.y_start, bounds.z_start, 1.0], dtype=np.float64)
     patch_affine[:3, 3] = (volume.affine @ origin_shift)[:3]
 
     patch_header = volume.header.copy()
     patch_header.set_data_shape(patch_data.shape)
+    _, qform_code = patch_header.get_qform(coded=True)
+    _, sform_code = patch_header.get_sform(coded=True)
+    patch_header.set_qform(patch_affine, code=int(qform_code) if qform_code else 1)
+    patch_header.set_sform(patch_affine, code=int(sform_code) if sform_code else 1)
 
     return NiftiLoadResult(
         data=patch_data,

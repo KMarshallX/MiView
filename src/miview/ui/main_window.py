@@ -245,6 +245,7 @@ class MainWindow(QMainWindow):
             return
 
         bounds = self.slice_viewer.current_patch_bounds()
+        center = self.slice_viewer.current_patch_center()
         if bounds is None:
             return
 
@@ -252,7 +253,18 @@ class MainWindow(QMainWindow):
         self.state.selected_patch_bounds = bounds
         self.state.selected_patch_data = extracted
 
-        patch_window = PatchViewerWindow(extracted, self)
+        source_image_name = (
+            self.state.loaded_file_path.name
+            if self.state.loaded_file_path is not None
+            else "image.nii.gz"
+        )
+        patch_window = PatchViewerWindow(
+            extracted,
+            self,
+            source_image_name=source_image_name,
+            patch_center=center,
+            patch_size=self.slice_viewer.patch_size_xyz(),
+        )
         patch_window.show()
         self._patch_windows.append(patch_window)
         patch_window.destroyed.connect(
