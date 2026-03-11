@@ -241,9 +241,9 @@ class SliceViewerWidget(QWidget):
             self.slice_label.setText(f"Slice: {projection_text}")
         else:
             _, _, fixed_axis = plane_axes_for_orientation(self.orientation)
-            slice_index = display_cursor[fixed_axis]
-            max_index = self._display_volume.display_shape[fixed_axis] - 1
-            self.slice_label.setText(f"Slice: {slice_index} / {max_index}")
+            slice_index = display_cursor[fixed_axis] + 1
+            total_slices = self._display_volume.display_shape[fixed_axis]
+            self.slice_label.setText(f"Slice: {slice_index} / {total_slices}")
 
     def _update_scaled_pixmap(self) -> None:
         if self._current_pixmap is None:
