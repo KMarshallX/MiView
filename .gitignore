@@ -5,3 +5,5 @@ sample_data/
 *.pyc
 *.pyo
 *.pyd
+
+debug.ipynb
