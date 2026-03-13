@@ -24,10 +24,12 @@ from miview.segmentation_models import LoadedSegmentation
 from miview.segmentation_validation import validate_segmentation_compatibility
 from miview.state.app_state import AppState
 from miview.state.contrast_state import ContrastState
+from miview.tools import apply_tool, derive_volume, get_tool
 from miview.ui.contrast_control_bar import ContrastControlBar
 from miview.ui.cursor_panel import CursorInspectionPanel
 from miview.ui.patch_window import PatchViewerWindow
 from miview.ui.segmentation_config_window import SegmentationConfigWindow
+from miview.ui.tools_menu import build_tools_submenu, resolve_tool_parameters
 from miview.ui.window_styling import (
     ResponsiveFontScaler,
     apply_window_content_frame,
@@ -129,7 +131,7 @@ class MainWindow(QMainWindow):
         file_menu = self.menuBar().addMenu("&File")
         view_menu = self.menuBar().addMenu("&View")
         segmentation_menu = self.menuBar().addMenu("&Segmentation")
-        tool_menu = self.menuBar().addMenu("&Tool")
+        tools_menu = self.menuBar().addMenu("&Tools")
 
         open_action = QAction("&Open", self)
         open_action.triggered.connect(self._on_open)
@@ -157,7 +159,12 @@ class MainWindow(QMainWindow):
         self.patch_toggle_action.setCheckable(True)
         self.patch_toggle_action.setChecked(False)
         self.patch_toggle_action.toggled.connect(self._on_patch_selection_toggled)
-        tool_menu.addAction(self.patch_toggle_action)
+        tools_menu.addAction(self.patch_toggle_action)
+        build_tools_submenu(
+            self,
+            tools_menu,
+            self._on_apply_tool_to_main_image_requested,
+        )
 
         self.load_segmentation_action = QAction("&Load Segmentation", self)
         self.load_segmentation_action.triggered.connect(self._on_load_segmentation)
@@ -355,6 +362,57 @@ class MainWindow(QMainWindow):
     def _on_find_patch_box(self) -> None:
         self.slice_viewer.recenter_views_on_patch_box()
 
+    def _on_apply_tool_to_main_image_requested(self, tool_id: str) -> None:
+        if self.state.volume is None:
+            QMessageBox.warning(
+                self,
+                "No Image Loaded",
+                "Load an image volume before applying a tool.",
+            )
+            return
+
+        parameters = resolve_tool_parameters(self, tool_id, self.state.volume.data)
+        if parameters is None:
+            self.statusBar().showMessage("Tool application canceled")
+            return
+
+        try:
+            transformed_data = apply_tool(tool_id, self.state.volume.data, parameters)
+            transformed_volume = derive_volume(self.state.volume, transformed_data)
+        except ValueError as exc:
+            QMessageBox.critical(self, "Tool Application Failed", str(exc))
+            self.statusBar().showMessage("Tool application failed")
+            return
+
+        self.state.volume = transformed_volume
+        cursor_position = self.state.cursor_position
+        patch_enabled = self.slice_viewer.patch_selection_enabled()
+        patch_center = self.slice_viewer.current_patch_center()
+        patch_size = self.slice_viewer.patch_size_xyz()
+        self.slice_viewer.replace_volume(
+            transformed_volume,
+            cursor_position=cursor_position,
+            patch_center=patch_center,
+            patch_size_xyz=patch_size,
+            patch_selection_enabled=patch_enabled,
+        )
+        self.state.cursor_position = self.slice_viewer.current_cursor_position()
+        self.state.selected_patch_bounds = self.slice_viewer.current_patch_bounds()
+        if self.state.selected_patch_bounds is not None:
+            self.state.selected_patch_data = extract_patch(
+                transformed_volume,
+                self.state.selected_patch_bounds,
+            )
+        else:
+            self.state.selected_patch_data = None
+
+        self._initialize_contrast_for_loaded_volume()
+        self._sync_patch_windows_from_processed_main_image()
+        self._apply_active_segmentation_overlay()
+
+        tool_label = get_tool(tool_id).label
+        self.statusBar().showMessage(f"Applied {tool_label} to main image")
+
     def _on_load_segmentation(self) -> None:
         if self.state.volume is None or self.state.loaded_file_path is None:
             QMessageBox.warning(
@@ -544,3 +602,14 @@ class MainWindow(QMainWindow):
     def _update_patch_windows_segmentation_opacity_for_current_image(self) -> None:
         for patch_window in self._patch_windows_for_current_image():
             patch_window.update_segmentation_opacity(self.state.segmentation_opacity)
+
+    def _sync_patch_windows_from_processed_main_image(self) -> None:
+        if self.state.volume is None:
+            return
+        for patch_window in self._patch_windows_for_current_image():
+            bounds = patch_window.source_patch_bounds()
+            if bounds is None:
+                continue
+            patch_window.sync_patch_from_parent(
+                extract_patch(self.state.volume, bounds)
+            )

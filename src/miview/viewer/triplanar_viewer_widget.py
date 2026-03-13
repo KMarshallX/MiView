@@ -111,6 +111,35 @@ class TriPlanarViewerWidget(QWidget):
         self.cursor_state.set_cursor_position(initial_center)
         self._update_projection_overrides()
 
+    def replace_volume(
+        self,
+        volume: NiftiLoadResult,
+        *,
+        cursor_position: tuple[int, int, int] | None = None,
+        patch_center: tuple[int, int, int] | None = None,
+        patch_size_xyz: tuple[int, int, int] | None = None,
+        patch_selection_enabled: bool | None = None,
+    ) -> None:
+        """Replace source volume while restoring viewer interaction state."""
+        self.load_volume(volume)
+
+        if patch_selection_enabled is not None:
+            self.set_patch_selection_enabled(patch_selection_enabled)
+
+        if cursor_position is not None and self._display_volume is not None:
+            self.cursor_state.set_cursor_position(
+                _clamp_voxel(cursor_position, self._display_volume.source_shape)
+            )
+
+        if patch_size_xyz is not None:
+            self.set_patch_size_xyz(patch_size_xyz)
+
+        if patch_center is not None and self._display_volume is not None:
+            self.patch_selector.set_center(
+                _clamp_voxel(patch_center, self._display_volume.source_shape)
+            )
+            self._update_patch_overlays()
+
     def unload_volume(self) -> None:
         self._display_volume = None
         self._segmentation_display_volume = None
@@ -424,3 +453,12 @@ def _project_oriented_volume(
     if orientation == "sagittal":
         return reducer(volume, axis=0).T[::-1, ::-1]
     raise ValueError(f"Unsupported orientation: {orientation}")
+
+
+def _clamp_voxel(
+    voxel: tuple[int, int, int],
+    shape: tuple[int, int, int],
+) -> tuple[int, int, int]:
+    return tuple(
+        int(min(max(voxel[axis], 0), shape[axis] - 1)) for axis in range(3)
+    )

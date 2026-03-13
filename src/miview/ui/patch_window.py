@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QResizeEvent
+from PySide6.QtGui import QAction, QResizeEvent
 from PySide6.QtWidgets import (
     QComboBox,
     QFileDialog,
@@ -22,8 +22,10 @@ from miview.nifti_io import NiftiLoadResult
 from miview.patch_saver import build_patch_default_filename, save_patch_nifti
 from miview.patch_selector import PatchBounds
 from miview.state.contrast_state import ContrastState
+from miview.tools import apply_tool, derive_volume, get_tool
 from miview.ui.contrast_control_bar import ContrastControlBar
 from miview.ui.cursor_panel import CursorInspectionPanel
+from miview.ui.tools_menu import build_tools_submenu, resolve_tool_parameters
 from miview.ui.window_styling import (
     ResponsiveFontScaler,
     apply_window_content_frame,
@@ -79,6 +81,7 @@ class PatchViewerWindow(QMainWindow):
         self._right_control_stack_layout.addStretch(1)
         self.add_right_control_panel(self.mip_minip_panel)
         self.add_right_control_panel(self.patch_save_panel)
+        self._setup_menu()
 
         self.slice_viewer.cursor_inspection_changed.connect(
             self.cursor_panel.set_cursor_values
@@ -115,6 +118,18 @@ class PatchViewerWindow(QMainWindow):
         apply_window_content_frame(self, central)
         self.setCentralWidget(central)
         self._font_scaler.apply()
+
+    def _setup_menu(self) -> None:
+        tools_menu = self.menuBar().addMenu("&Tools")
+        build_tools_submenu(
+            self,
+            tools_menu,
+            self._on_apply_tool_to_patch_requested,
+        )
+        tools_menu.addSeparator()
+        auto_contrast_action = QAction("&Auto Contrast", self)
+        auto_contrast_action.triggered.connect(self._on_auto_contrast)
+        tools_menu.addAction(auto_contrast_action)
 
     def add_right_control_panel(self, panel: QWidget) -> None:
         """Insert a tool/config panel below cursor inspection in the right stack."""
@@ -196,6 +211,26 @@ class PatchViewerWindow(QMainWindow):
         window_min, window_max = robust_auto_window(self._patch_data)
         self.contrast_state.set_window(window_min, window_max)
 
+    def _on_apply_tool_to_patch_requested(self, tool_id: str) -> None:
+        parameters = resolve_tool_parameters(self, tool_id, self._patch_data)
+        if parameters is None:
+            self.statusBar().showMessage("Tool application canceled")
+            return
+
+        try:
+            transformed_data = apply_tool(tool_id, self._patch_data, parameters)
+            transformed_volume = derive_volume(self._patch_volume, transformed_data)
+        except ValueError as exc:
+            QMessageBox.critical(self, "Tool Application Failed", str(exc))
+            self.statusBar().showMessage("Tool application failed")
+            return
+
+        self._patch_volume = transformed_volume
+        self._patch_data = transformed_volume.data
+        self._replace_patch_viewer_volume(transformed_volume)
+        self._initialize_contrast(transformed_volume)
+        self.statusBar().showMessage(f"Applied {get_tool(tool_id).label} to selected patch")
+
     def _on_save_patch_clicked(self) -> None:
         default_name = self._default_patch_filename()
         selected_path, _ = QFileDialog.getSaveFileName(
@@ -247,6 +282,26 @@ class PatchViewerWindow(QMainWindow):
 
     def update_segmentation_opacity(self, opacity: float) -> None:
         self.slice_viewer.set_segmentation_overlay_opacity(opacity)
+
+    def sync_patch_from_parent(self, patch_volume: NiftiLoadResult) -> None:
+        """Replace local patch data from parent-image processing updates."""
+        self._patch_volume = patch_volume
+        self._patch_data = patch_volume.data
+        self._replace_patch_viewer_volume(patch_volume)
+        self._initialize_contrast(patch_volume)
+
+    def _replace_patch_viewer_volume(self, patch_volume: NiftiLoadResult) -> None:
+        cursor_position = self.slice_viewer.current_cursor_position()
+        patch_enabled = self.slice_viewer.patch_selection_enabled()
+        patch_center = self.slice_viewer.current_patch_center()
+        patch_size = self.slice_viewer.patch_size_xyz()
+        self.slice_viewer.replace_volume(
+            patch_volume,
+            cursor_position=cursor_position,
+            patch_center=patch_center,
+            patch_size_xyz=patch_size,
+            patch_selection_enabled=patch_enabled,
+        )
 
     def resizeEvent(self, event: QResizeEvent) -> None:
         super().resizeEvent(event)
