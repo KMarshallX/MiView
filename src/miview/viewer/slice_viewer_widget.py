@@ -13,7 +13,7 @@ from PySide6.QtGui import (
     QResizeEvent,
     QWheelEvent,
 )
-from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QLabel, QSlider, QVBoxLayout, QWidget
 
 from miview.viewer.intensity import normalize_slice_to_uint8, window_slice_to_uint8
 from miview.viewer.oriented_volume import OrientedVolume
@@ -89,10 +89,17 @@ class SliceViewerWidget(QWidget):
 
         self.slice_label = QLabel("Slice: -", self)
         self.slice_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.slice_slider = QSlider(Qt.Orientation.Horizontal, self)
+        self.slice_slider.setEnabled(False)
+        self.slice_slider.setRange(0, 0)
+        self.slice_slider.setSingleStep(1)
+        self.slice_slider.setPageStep(1)
+        self.slice_slider.valueChanged.connect(self._on_slice_slider_value_changed)
 
         layout = QVBoxLayout(self)
         layout.addWidget(self.title_label)
         layout.addWidget(self.image_label, 1)
+        layout.addWidget(self.slice_slider)
         layout.addWidget(self.slice_label)
         layout.setContentsMargins(8, 8, 8, 8)
 
@@ -106,6 +113,7 @@ class SliceViewerWidget(QWidget):
         self._projection_slice_2d = None
         self._projection_segmentation_slice_2d = None
         self._projection_label = None
+        self._configure_slice_slider()
         self.image_label.setText("Set cursor to view slices")
         self.image_label.setPixmap(QPixmap())
         self.slice_label.setText("Slice: -")
@@ -122,6 +130,9 @@ class SliceViewerWidget(QWidget):
         self._projection_slice_2d = None
         self._projection_segmentation_slice_2d = None
         self._projection_label = None
+        self.slice_slider.setEnabled(False)
+        self.slice_slider.setRange(0, 0)
+        self.slice_slider.setValue(0)
         self.image_label.setText("No volume loaded")
         self.image_label.setPixmap(QPixmap())
         self.slice_label.setText("Slice: -")
@@ -279,6 +290,54 @@ class SliceViewerWidget(QWidget):
             slice_index = display_cursor[fixed_axis] + 1
             total_slices = self._display_volume.display_shape[fixed_axis]
             self.slice_label.setText(f"Slice: {slice_index} / {total_slices}")
+        self._sync_slice_slider(display_cursor)
+
+    def _configure_slice_slider(self) -> None:
+        if self._display_volume is None:
+            self.slice_slider.setEnabled(False)
+            self.slice_slider.setRange(0, 0)
+            self.slice_slider.setValue(0)
+            return
+
+        _, _, fixed_axis = plane_axes_for_orientation(self.orientation)
+        total_slices = self._display_volume.display_shape[fixed_axis]
+        self.slice_slider.setEnabled(total_slices > 1)
+        self.slice_slider.setRange(0, max(total_slices - 1, 0))
+
+    def _sync_slice_slider(self, display_cursor: tuple[int, int, int]) -> None:
+        if self._display_volume is None:
+            return
+        _, _, fixed_axis = plane_axes_for_orientation(self.orientation)
+        target_index = int(display_cursor[fixed_axis])
+        if self.slice_slider.value() == target_index:
+            return
+        was_blocked = self.slice_slider.blockSignals(True)
+        self.slice_slider.setValue(target_index)
+        self.slice_slider.blockSignals(was_blocked)
+
+    def _on_slice_slider_value_changed(self, value: int) -> None:
+        if self._display_volume is None or self._source_cursor_position is None:
+            return
+
+        display_cursor = self._display_volume.source_to_display(self._source_cursor_position)
+        _, _, fixed_axis = plane_axes_for_orientation(self.orientation)
+        clamped_value = max(
+            0,
+            min(value, self._display_volume.display_shape[fixed_axis] - 1),
+        )
+        if display_cursor[fixed_axis] == clamped_value:
+            return
+
+        next_display_cursor = list(display_cursor)
+        next_display_cursor[fixed_axis] = clamped_value
+        source_cursor = self._display_volume.display_to_source(
+            (
+                int(next_display_cursor[0]),
+                int(next_display_cursor[1]),
+                int(next_display_cursor[2]),
+            )
+        )
+        self.cursor_position_selected.emit(*source_cursor)
 
     def _update_scaled_pixmap(self) -> None:
         if self._current_pixmap is None:
