@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
 
 from miview.io.nifti_loader import NiftiLoadResult
 from miview.patch.saver import build_patch_default_filename, save_patch_nifti
+from miview.patch.selector import PatchBounds
 from miview.state.contrast_state import ContrastState
 from miview.ui.contrast_control_bar import ContrastControlBar
 from miview.ui.cursor_panel import CursorInspectionPanel
@@ -32,8 +33,12 @@ class PatchViewerWindow(QMainWindow):
     def __init__(
         self,
         patch_volume: NiftiLoadResult,
+        segmentation_volume: NiftiLoadResult | None = None,
+        segmentation_opacity: float = 0.5,
         parent: QMainWindow | None = None,
         source_image_name: str = "image.nii.gz",
+        source_image_path: Path | None = None,
+        source_patch_bounds: PatchBounds | None = None,
         patch_center: tuple[int, int, int] | None = None,
         patch_size: tuple[int, int, int] | None = None,
     ) -> None:
@@ -42,6 +47,8 @@ class PatchViewerWindow(QMainWindow):
         self.resize(900, 560)
 
         self._source_image_name = source_image_name
+        self._source_image_path = source_image_path
+        self._source_patch_bounds = source_patch_bounds
         self._patch_center = patch_center
         self._patch_size = patch_size if patch_size is not None else patch_volume.shape
         self._patch_data = patch_volume.data
@@ -75,6 +82,11 @@ class PatchViewerWindow(QMainWindow):
         self.contrast_state.window_changed.connect(self.contrast_control_bar.set_window)
         self.contrast_state.window_changed.connect(self.slice_viewer.set_contrast_window)
         self.slice_viewer.load_volume(patch_volume)
+        if segmentation_volume is not None:
+            self.slice_viewer.set_segmentation_overlay(
+                segmentation_volume,
+                opacity=segmentation_opacity,
+            )
         self._initialize_contrast(patch_volume)
         self._sync_projection_controls()
 
@@ -207,3 +219,19 @@ class PatchViewerWindow(QMainWindow):
             extension=".nii.gz",
         )
         return str(Path.home() / filename)
+
+    def source_image_path(self) -> Path | None:
+        return self._source_image_path
+
+    def source_patch_bounds(self) -> PatchBounds | None:
+        return self._source_patch_bounds
+
+    def update_segmentation_overlay(
+        self,
+        segmentation_volume: NiftiLoadResult | None,
+        opacity: float,
+    ) -> None:
+        self.slice_viewer.set_segmentation_overlay(segmentation_volume, opacity=opacity)
+
+    def update_segmentation_opacity(self, opacity: float) -> None:
+        self.slice_viewer.set_segmentation_overlay_opacity(opacity)

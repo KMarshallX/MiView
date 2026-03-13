@@ -68,7 +68,10 @@ class SliceViewerWidget(QWidget):
         self._patch_plane_bounds: PatchPlaneBounds | None = None
         self._patch_size_source = (1, 1, 1)
         self._patch_center_source: tuple[int, int, int] | None = None
+        self._segmentation_display_data: np.ndarray | None = None
+        self._segmentation_overlay_opacity = 0.5
         self._projection_slice_2d: np.ndarray | None = None
+        self._projection_segmentation_slice_2d: np.ndarray | None = None
         self._projection_label: str | None = None
         self._active_patch_resize_handle: str | None = None
         self._interaction_mode: str | None = None
@@ -101,6 +104,7 @@ class SliceViewerWidget(QWidget):
         self._interaction_mode = None
         self._last_drag_position = None
         self._projection_slice_2d = None
+        self._projection_segmentation_slice_2d = None
         self._projection_label = None
         self.image_label.setText("Set cursor to view slices")
         self.image_label.setPixmap(QPixmap())
@@ -111,10 +115,12 @@ class SliceViewerWidget(QWidget):
         self._source_cursor_position = None
         self._contrast_window = None
         self._current_pixmap = None
+        self._segmentation_display_data = None
         self._pan_offset = (0.0, 0.0)
         self._interaction_mode = None
         self._last_drag_position = None
         self._projection_slice_2d = None
+        self._projection_segmentation_slice_2d = None
         self._projection_label = None
         self.image_label.setText("No volume loaded")
         self.image_label.setPixmap(QPixmap())
@@ -159,17 +165,46 @@ class SliceViewerWidget(QWidget):
         self._patch_center_source = patch_center_source
         self._update_scaled_pixmap()
 
+    def set_segmentation_overlay(
+        self, segmentation_display_data: np.ndarray | None, opacity: float
+    ) -> None:
+        self._segmentation_display_data = (
+            np.asarray(segmentation_display_data)
+            if segmentation_display_data is not None
+            else None
+        )
+        self._segmentation_overlay_opacity = min(max(opacity, 0.0), 1.0)
+        if self._display_volume is not None and self._source_cursor_position is not None:
+            self._render_current_slice()
+        else:
+            self._update_scaled_pixmap()
+
     def set_projection_slice(
-        self, slice_2d: np.ndarray | None, label: str | None = None
+        self,
+        slice_2d: np.ndarray | None,
+        label: str | None = None,
+        segmentation_slice_2d: np.ndarray | None = None,
     ) -> None:
         if slice_2d is None:
             self._projection_slice_2d = None
+            self._projection_segmentation_slice_2d = None
             self._projection_label = None
         else:
             projection = np.asarray(slice_2d)
             if projection.ndim != 2:
                 raise ValueError("Projection slice must be a 2D array.")
             self._projection_slice_2d = projection
+            if segmentation_slice_2d is None:
+                self._projection_segmentation_slice_2d = None
+            else:
+                segmentation_projection = np.asarray(segmentation_slice_2d)
+                if segmentation_projection.ndim != 2:
+                    raise ValueError("Segmentation projection slice must be a 2D array.")
+                if segmentation_projection.shape != projection.shape:
+                    raise ValueError(
+                        "Segmentation projection slice must match projection slice shape."
+                    )
+                self._projection_segmentation_slice_2d = segmentation_projection
             self._projection_label = label
         if self._display_volume is not None and self._source_cursor_position is not None:
             self._render_current_slice()
@@ -264,6 +299,7 @@ class SliceViewerWidget(QWidget):
             int(display_rect.height),
             self._current_pixmap,
         )
+        self._draw_segmentation_overlay(painter, display_rect)
         self._draw_orientation_indicators(painter)
 
         if (
@@ -290,6 +326,56 @@ class SliceViewerWidget(QWidget):
         painter.end()
 
         self.image_label.setPixmap(canvas)
+
+    def _draw_segmentation_overlay(
+        self, painter: QPainter, display_rect: DisplayRect
+    ) -> None:
+        if (
+            self._segmentation_display_data is None
+            or self._display_volume is None
+            or self._source_cursor_position is None
+        ):
+            return
+
+        if self._projection_slice_2d is not None:
+            if self._projection_segmentation_slice_2d is None:
+                return
+            segmentation_slice = self._projection_segmentation_slice_2d
+        else:
+            display_cursor = self._display_volume.source_to_display(self._source_cursor_position)
+            segmentation_slice = extract_oriented_slice(
+                self._segmentation_display_data,
+                self.orientation,
+                display_cursor,
+            )
+        segmentation_mask = np.asarray(segmentation_slice) > 0
+        if not np.any(segmentation_mask):
+            return
+
+        height, width = segmentation_mask.shape
+        overlay = np.zeros((height, width, 4), dtype=np.uint8)
+        overlay[..., 0] = 255
+        overlay[..., 3] = (
+            segmentation_mask.astype(np.uint8)
+            * int(round(self._segmentation_overlay_opacity * 255.0))
+        )
+        overlay_contiguous = np.ascontiguousarray(overlay)
+        overlay_image = QImage(
+            overlay_contiguous.data,
+            width,
+            height,
+            width * 4,
+            QImage.Format.Format_RGBA8888,
+        )
+        painter.drawImage(
+            QRectF(
+                display_rect.left,
+                display_rect.top,
+                display_rect.width,
+                display_rect.height,
+            ),
+            overlay_image.copy(),
+        )
 
     def _handle_mouse_press(self, mouse_event: QMouseEvent) -> None:
         self._last_drag_position = mouse_event.position()

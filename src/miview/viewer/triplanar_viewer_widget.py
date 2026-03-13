@@ -40,6 +40,8 @@ class TriPlanarViewerWidget(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._display_volume: OrientedVolume | None = None
+        self._segmentation_display_volume: OrientedVolume | None = None
+        self._segmentation_opacity: float = 0.5
         self._contrast_window: tuple[float, float] | None = None
         self._patch_debug_enabled = os.getenv("MIVIEW_PATCH_DEBUG", "").lower() in (
             "1",
@@ -100,6 +102,7 @@ class TriPlanarViewerWidget(QWidget):
                 view.set_contrast_window(
                     self._contrast_window[0], self._contrast_window[1]
                 )
+        self._apply_segmentation_overlay_to_views()
 
         self._update_shared_base_scale()
         self.zoom_state.set_zoom_factor(1.0)
@@ -110,11 +113,13 @@ class TriPlanarViewerWidget(QWidget):
 
     def unload_volume(self) -> None:
         self._display_volume = None
+        self._segmentation_display_volume = None
         self.cursor_state.clear()
         self.zoom_state.set_zoom_factor(1.0)
         self.patch_selector.clear()
         for view in self._views:
             view.unload_volume()
+            view.set_segmentation_overlay(None, self._segmentation_opacity)
             view.set_patch_overlay(
                 False,
                 None,
@@ -206,6 +211,35 @@ class TriPlanarViewerWidget(QWidget):
             return
         self._projection_enabled[orientation] = enabled
         self._update_projection_overrides()
+
+    def set_segmentation_overlay(
+        self, segmentation_volume: NiftiLoadResult | None, opacity: float | None = None
+    ) -> None:
+        if opacity is not None:
+            self._segmentation_opacity = min(max(opacity, 0.0), 1.0)
+        if segmentation_volume is None:
+            self._segmentation_display_volume = None
+            self._apply_segmentation_overlay_to_views()
+            return
+
+        if segmentation_volume.data.ndim != 3:
+            raise ValueError(
+                f"Segmentation overlay expects a 3D volume, got {segmentation_volume.data.ndim}D."
+            )
+        if self._display_volume is not None and segmentation_volume.shape != self._display_volume.source_shape:
+            raise ValueError(
+                "Segmentation shape does not match the loaded image shape."
+            )
+
+        self._segmentation_display_volume = build_oriented_volume(
+            segmentation_volume.data,
+            segmentation_volume.affine,
+        )
+        self._apply_segmentation_overlay_to_views()
+
+    def set_segmentation_overlay_opacity(self, opacity: float) -> None:
+        self._segmentation_opacity = min(max(opacity, 0.0), 1.0)
+        self._apply_segmentation_overlay_to_views()
 
     def _on_cursor_selected(self, x: int, y: int, z: int) -> None:
         self.cursor_state.set_cursor_position((x, y, z))
@@ -338,23 +372,45 @@ class TriPlanarViewerWidget(QWidget):
     def _update_projection_overrides(self) -> None:
         if self._display_volume is None:
             for view in self._views:
-                view.set_projection_slice(None)
+                view.set_projection_slice(None, segmentation_slice_2d=None)
             return
 
         volume = self._display_volume.display_data
         for view in self._views:
             if not self._projection_enabled.get(view.orientation, False):
-                view.set_projection_slice(None)
+                view.set_projection_slice(None, segmentation_slice_2d=None)
                 continue
             projection_slice = _project_oriented_volume(
                 volume,
                 view.orientation,
                 self._projection_mode,
             )
+            segmentation_projection_slice = None
+            if self._segmentation_display_volume is not None:
+                segmentation_projection_slice = _project_oriented_volume(
+                    self._segmentation_display_volume.display_data,
+                    view.orientation,
+                    self._projection_mode,
+                )
             view.set_projection_slice(
                 projection_slice,
                 f"{self._projection_mode} ({view.orientation.title()})",
+                segmentation_slice_2d=segmentation_projection_slice,
             )
+
+    def _apply_segmentation_overlay_to_views(self) -> None:
+        if self._segmentation_display_volume is None:
+            for view in self._views:
+                view.set_segmentation_overlay(None, self._segmentation_opacity)
+            self._update_projection_overrides()
+            return
+
+        for view in self._views:
+            view.set_segmentation_overlay(
+                self._segmentation_display_volume.display_data,
+                self._segmentation_opacity,
+            )
+        self._update_projection_overrides()
 
 
 def _project_oriented_volume(
