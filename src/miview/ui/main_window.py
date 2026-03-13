@@ -4,7 +4,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from PySide6.QtCore import QTimer, Qt
-from PySide6.QtGui import QAction
+from PySide6.QtGui import QAction, QResizeEvent
 from PySide6.QtWidgets import (
     QApplication,
     QFileDialog,
@@ -28,6 +28,10 @@ from miview.ui.contrast_control_bar import ContrastControlBar
 from miview.ui.cursor_panel import CursorInspectionPanel
 from miview.ui.patch_window import PatchViewerWindow
 from miview.ui.segmentation_config_window import SegmentationConfigWindow
+from miview.ui.window_styling import (
+    ResponsiveFontScaler,
+    apply_window_content_frame,
+)
 from miview.viewer.intensity import robust_auto_window, volume_intensity_range
 from miview.viewer.triplanar_viewer_widget import TriPlanarViewerWidget
 
@@ -38,6 +42,11 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("MiView")
         self.resize(1100, 700)
         self.state = AppState()
+        self._font_scaler = ResponsiveFontScaler(
+            self,
+            reference_width=1100,
+            reference_height=700,
+        )
         self.contrast_state = ContrastState(self)
         self.slice_viewer = TriPlanarViewerWidget()
         self.cursor_panel = CursorInspectionPanel()
@@ -84,6 +93,7 @@ class MainWindow(QMainWindow):
         self.cursor_panel.set_patch_size_xyz(self.slice_viewer.patch_size_xyz())
         self.segmentation_config_window.set_opacity(self.state.segmentation_opacity)
         self._refresh_segmentation_ui()
+        self._font_scaler.apply()
         self.statusBar().showMessage("Ready")
 
     def _setup_central_layout(self) -> None:
@@ -102,6 +112,7 @@ class MainWindow(QMainWindow):
         content_layout.addWidget(splitter, 1)
         self._setup_loading_progress_bar()
         content_layout.addWidget(self.loading_progress_bar)
+        apply_window_content_frame(self, content_widget)
         self.setCentralWidget(content_widget)
 
     def _setup_loading_progress_bar(self) -> None:
@@ -169,6 +180,10 @@ class MainWindow(QMainWindow):
             self._on_open_segmentation_configuration
         )
         segmentation_menu.addAction(self.open_segmentation_config_action)
+
+    def resizeEvent(self, event: QResizeEvent) -> None:
+        super().resizeEvent(event)
+        self._font_scaler.apply()
 
     def _on_open(self) -> None:
         file_filter = "NIfTI Files (*.nii *.nii.gz);;All Files (*)"

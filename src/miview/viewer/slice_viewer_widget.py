@@ -79,6 +79,10 @@ class SliceViewerWidget(QWidget):
 
         self.title_label = QLabel(self.orientation.title(), self)
         self.title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.title_label.setProperty("exclude_responsive_scaling", True)
+        self._fixed_title_font = QFont(self.title_label.font())
+        self.title_label.setFont(self._fixed_title_font)
+        self._fixed_orientation_indicator_font = QFont(self._fixed_title_font)
 
         self.image_label = QLabel("No volume loaded", self)
         self.image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -689,7 +693,7 @@ class SliceViewerWidget(QWidget):
 
     def _draw_orientation_indicators(self, painter: QPainter) -> None:
         indicators = orientation_indicators_for_orientation(self.orientation)
-        indicator_font = QFont(self.slice_label.font())
+        indicator_font = QFont(self._fixed_orientation_indicator_font)
         indicator_font.setBold(True)
         painter.setFont(indicator_font)
         painter.setPen(QPen(QColor("#ffd400")))

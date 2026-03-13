@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QResizeEvent
 from PySide6.QtWidgets import (
     QComboBox,
     QFileDialog,
@@ -23,6 +24,10 @@ from miview.patch.selector import PatchBounds
 from miview.state.contrast_state import ContrastState
 from miview.ui.contrast_control_bar import ContrastControlBar
 from miview.ui.cursor_panel import CursorInspectionPanel
+from miview.ui.window_styling import (
+    ResponsiveFontScaler,
+    apply_window_content_frame,
+)
 from miview.viewer.intensity import robust_auto_window, volume_intensity_range
 from miview.viewer.triplanar_viewer_widget import TriPlanarViewerWidget
 
@@ -53,6 +58,11 @@ class PatchViewerWindow(QMainWindow):
         self._patch_size = patch_size if patch_size is not None else patch_volume.shape
         self._patch_data = patch_volume.data
         self._patch_volume = patch_volume
+        self._font_scaler = ResponsiveFontScaler(
+            self,
+            reference_width=900,
+            reference_height=560,
+        )
         self.contrast_state = ContrastState(self)
         self.contrast_control_bar = ContrastControlBar(self)
         self.slice_viewer = TriPlanarViewerWidget(self)
@@ -102,7 +112,9 @@ class PatchViewerWindow(QMainWindow):
         layout.setSpacing(0)
         layout.addWidget(self.contrast_control_bar)
         layout.addWidget(splitter, 1)
+        apply_window_content_frame(self, central)
         self.setCentralWidget(central)
+        self._font_scaler.apply()
 
     def add_right_control_panel(self, panel: QWidget) -> None:
         """Insert a tool/config panel below cursor inspection in the right stack."""
@@ -235,3 +247,7 @@ class PatchViewerWindow(QMainWindow):
 
     def update_segmentation_opacity(self, opacity: float) -> None:
         self.slice_viewer.set_segmentation_overlay_opacity(opacity)
+
+    def resizeEvent(self, event: QResizeEvent) -> None:
+        super().resizeEvent(event)
+        self._font_scaler.apply()
