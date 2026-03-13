@@ -125,6 +125,10 @@ Implement:
   - full image
   - current patch
 - clear preview or replacement behavior for transformed outputs
+- A Gitgraph inspired visual history of applied tools and transformations
+   - each entry should show the tool name, parameters, and target scope
+   - clicking an entry should show a preview of the resulting image or patch after applying that tool
+   - clicking an entry should allow reverting to the state before that tool was applied
 
 Initial tool set should include:
 - normalization
