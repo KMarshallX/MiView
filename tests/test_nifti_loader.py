@@ -4,7 +4,7 @@ import nibabel as nib
 import numpy as np
 import pytest
 
-from miview.io.nifti_loader import load_nifti
+from miview.nifti_io import load_nifti
 
 
 def test_load_nifti_returns_expected_fields(tmp_path) -> None:

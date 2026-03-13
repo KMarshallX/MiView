@@ -17,7 +17,7 @@ from PySide6.QtWidgets import QLabel, QSlider, QVBoxLayout, QWidget
 
 from miview.viewer.intensity import normalize_slice_to_uint8, window_slice_to_uint8
 from miview.viewer.oriented_volume import OrientedVolume
-from miview.patch.selector import (
+from miview.patch_selector import (
     PatchPlaneBounds,
     axis_for_resize_edge,
     resized_axis_size_from_edge,

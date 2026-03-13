@@ -5,7 +5,7 @@ from pathlib import Path
 import nibabel as nib
 import numpy as np
 
-from miview.io.nifti_loader import NiftiLoadResult
+from miview.nifti_io import NiftiLoadResult
 
 
 def build_patch_default_filename(

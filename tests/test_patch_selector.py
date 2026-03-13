@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from miview.patch.selector import (
+from miview.patch_selector import (
     PatchBounds,
     PatchSelector,
     axis_for_resize_edge,

@@ -9,8 +9,8 @@ from PySide6.QtWidgets import QGridLayout, QWidget
 
 from miview.state.cursor_state import CursorState
 from miview.state.zoom_state import ZoomState
-from miview.io.nifti_loader import NiftiLoadResult
-from miview.patch.selector import (
+from miview.nifti_io import NiftiLoadResult
+from miview.patch_selector import (
     DEFAULT_PATCH_SIZE,
     PatchBounds,
     PatchSelector,

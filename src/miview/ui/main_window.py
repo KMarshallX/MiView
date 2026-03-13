@@ -17,11 +17,11 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from miview.io.nifti_loader import load_nifti
-from miview.patch.extractor import extract_patch
-from miview.patch.selector import PatchBounds
-from miview.segmentation.models import LoadedSegmentation
-from miview.segmentation.validation import validate_segmentation_compatibility
+from miview.nifti_io import load_nifti
+from miview.patch_extractor import extract_patch
+from miview.patch_selector import PatchBounds
+from miview.segmentation_models import LoadedSegmentation
+from miview.segmentation_validation import validate_segmentation_compatibility
 from miview.state.app_state import AppState
 from miview.state.contrast_state import ContrastState
 from miview.ui.contrast_control_bar import ContrastControlBar

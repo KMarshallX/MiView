@@ -18,9 +18,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from miview.io.nifti_loader import NiftiLoadResult
-from miview.patch.saver import build_patch_default_filename, save_patch_nifti
-from miview.patch.selector import PatchBounds
+from miview.nifti_io import NiftiLoadResult
+from miview.patch_saver import build_patch_default_filename, save_patch_nifti
+from miview.patch_selector import PatchBounds
 from miview.state.contrast_state import ContrastState
 from miview.ui.contrast_control_bar import ContrastControlBar
 from miview.ui.cursor_panel import CursorInspectionPanel

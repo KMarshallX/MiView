@@ -4,9 +4,9 @@ from dataclasses import dataclass
 from dataclasses import field
 from pathlib import Path
 
-from miview.io.nifti_loader import NiftiLoadResult
-from miview.patch.selector import PatchBounds
-from miview.segmentation.models import LoadedSegmentation
+from miview.nifti_io import NiftiLoadResult
+from miview.patch_selector import PatchBounds
+from miview.segmentation_models import LoadedSegmentation
 
 
 @dataclass

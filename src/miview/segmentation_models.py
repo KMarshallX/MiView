@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from miview.io.nifti_loader import NiftiLoadResult
+from miview.nifti_io import NiftiLoadResult
 
 
 @dataclass(frozen=True)
