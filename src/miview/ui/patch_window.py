@@ -2,27 +2,40 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import numpy as np
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QAction, QResizeEvent
+from PySide6.QtGui import (
+    QAction,
+    QColor,
+    QFont,
+    QGuiApplication,
+    QImage,
+    QPainter,
+    QResizeEvent,
+)
 from PySide6.QtWidgets import (
     QComboBox,
     QFileDialog,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
+    QLayout,
     QMainWindow,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QSplitter,
     QVBoxLayout,
     QWidget,
 )
 
 from miview.nifti_io import NiftiLoadResult
+from miview.patch_history import PatchHistoryManager
 from miview.patch_saver import build_patch_default_filename, save_patch_nifti
 from miview.patch_selector import PatchBounds
 from miview.state.contrast_state import ContrastState
-from miview.tools import get_tool
+from miview.tools import derive_volume, get_tool
+from miview.tools.patch_utility import patch_utility_from_tool
 from miview.ui.contrast_helpers import (
     apply_auto_contrast,
     connect_contrast_controls,
@@ -30,7 +43,8 @@ from miview.ui.contrast_helpers import (
 )
 from miview.ui.contrast_control_bar import ContrastControlBar
 from miview.ui.cursor_panel import CursorInspectionPanel
-from miview.ui.tool_actions import apply_tool_to_volume
+from miview.ui.patch_history_panel import PatchHistoryPanel
+from miview.ui.tool_actions import apply_tool_to_volume_with_metadata
 from miview.ui.tools_menu import build_tools_submenu
 from miview.ui.window_styling import (
     ResponsiveFontScaler,
@@ -56,7 +70,6 @@ class PatchViewerWindow(QMainWindow):
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Selected Patch")
-        self.resize(900, 560)
         self.setAcceptDrops(False)
 
         self._source_image_name = source_image_name
@@ -66,6 +79,11 @@ class PatchViewerWindow(QMainWindow):
         self._patch_size = patch_size if patch_size is not None else patch_volume.shape
         self._patch_data = patch_volume.data
         self._patch_volume = patch_volume
+        self._patch_history = PatchHistoryManager(
+            patch_volume.data,
+            apply_operation=self._apply_history_operation,
+            checkpoint_interval=5,
+        )
         self._font_scaler = ResponsiveFontScaler(
             self,
             reference_width=900,
@@ -78,15 +96,43 @@ class PatchViewerWindow(QMainWindow):
         self.cursor_panel.set_patch_controls_visible(False)
         self.mip_minip_panel = self._build_mip_minip_panel(self)
         self.patch_save_panel = self._build_save_panel(self)
+        self.patch_history_panel = PatchHistoryPanel(self)
+        self.patch_history_panel.restore_requested.connect(
+            self._on_restore_patch_history_node_requested
+        )
+        self._right_panels: list[QWidget] = []
         self._right_control_container = QWidget(self)
-        self._right_control_container.setFixedWidth(self.cursor_panel.width())
         self._right_control_stack_layout = QVBoxLayout(self._right_control_container)
         self._right_control_stack_layout.setContentsMargins(0, 0, 0, 0)
         self._right_control_stack_layout.setSpacing(8)
+        self._right_control_stack_layout.setSizeConstraint(
+            QLayout.SizeConstraint.SetMinAndMaxSize
+        )
         self._right_control_stack_layout.addWidget(self.cursor_panel)
         self._right_control_stack_layout.addStretch(1)
         self.add_right_control_panel(self.mip_minip_panel)
         self.add_right_control_panel(self.patch_save_panel)
+        self.add_right_control_panel(self.patch_history_panel)
+
+        self._viewer_scroll_area = QScrollArea(self)
+        self._viewer_scroll_area.setWidgetResizable(True)
+        self._viewer_scroll_area.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        )
+        self._viewer_scroll_area.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self._viewer_scroll_area.setWidget(self.slice_viewer)
+
+        self._right_control_scroll_area = QScrollArea(self)
+        self._right_control_scroll_area.setWidgetResizable(True)
+        self._right_control_scroll_area.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        )
+        self._right_control_scroll_area.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        )
+        self._right_control_scroll_area.setWidget(self._right_control_container)
         self._setup_menu()
 
         self.slice_viewer.cursor_inspection_changed.connect(
@@ -106,22 +152,25 @@ class PatchViewerWindow(QMainWindow):
             )
         self._initialize_contrast(patch_volume)
         self._sync_projection_controls()
+        self._configure_scroll_region_constraints()
 
-        splitter = QSplitter(Qt.Orientation.Horizontal, self)
-        splitter.addWidget(self.slice_viewer)
-        splitter.addWidget(self._right_control_container)
-        splitter.setStretchFactor(0, 4)
-        splitter.setStretchFactor(1, 1)
+        self._main_splitter = QSplitter(Qt.Orientation.Horizontal, self)
+        self._main_splitter.addWidget(self._viewer_scroll_area)
+        self._main_splitter.addWidget(self._right_control_scroll_area)
+        self._main_splitter.setStretchFactor(0, 4)
+        self._main_splitter.setStretchFactor(1, 1)
 
         central = QWidget(self)
         layout = QVBoxLayout(central)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
         layout.addWidget(self.contrast_control_bar)
-        layout.addWidget(splitter, 1)
+        layout.addWidget(self._main_splitter, 1)
         apply_window_content_frame(self, central)
         self.setCentralWidget(central)
         self._font_scaler.apply()
+        self._apply_initial_window_size()
+        self._refresh_patch_history_panel()
 
     def _setup_menu(self) -> None:
         tools_menu = self.menuBar().addMenu("&Tools")
@@ -139,6 +188,7 @@ class PatchViewerWindow(QMainWindow):
         """Insert a tool/config panel below cursor inspection in the right stack."""
         insert_at = max(self._right_control_stack_layout.count() - 1, 0)
         self._right_control_stack_layout.insertWidget(insert_at, panel)
+        self._right_panels.append(panel)
 
     def _build_mip_minip_panel(self, parent: QWidget | None = None) -> QGroupBox:
         panel = QGroupBox("MIP / MinIP", parent)
@@ -181,6 +231,9 @@ class PatchViewerWindow(QMainWindow):
     def _build_save_panel(self, parent: QWidget | None = None) -> QGroupBox:
         panel = QGroupBox("Patch Save", parent)
         layout = QVBoxLayout(panel)
+        self.save_views_button = QPushButton("Save MIP/MinIP Image...", panel)
+        self.save_views_button.clicked.connect(self._on_save_views_clicked)
+        layout.addWidget(self.save_views_button)
         self.save_patch_button = QPushButton("Save Patch...", panel)
         self.save_patch_button.clicked.connect(self._on_save_patch_clicked)
         layout.addWidget(self.save_patch_button)
@@ -211,19 +264,31 @@ class PatchViewerWindow(QMainWindow):
         apply_auto_contrast(self.contrast_state, self._patch_data)
 
     def _on_apply_tool_to_patch_requested(self, tool_id: str) -> None:
-        transformed_volume, status_message = apply_tool_to_volume(
+        tool_result, status_message = apply_tool_to_volume_with_metadata(
             self,
             tool_id,
             self._patch_volume,
         )
-        if transformed_volume is None:
+        if tool_result is None:
             self.statusBar().showMessage(status_message)
             return
 
+        transformed_volume = tool_result.transformed_volume
+        utility = patch_utility_from_tool(tool_id)
+        parameter_summary = utility.summarize(tool_result.parameters)
+        self._patch_history.record_operation(
+            operation_type=utility.utility_id,
+            operation_label=utility.label,
+            operation_parameters=tool_result.parameters,
+            resulting_patch=transformed_volume.data,
+            parameter_summary=parameter_summary,
+            is_expensive=False,
+        )
         self._patch_volume = transformed_volume
         self._patch_data = transformed_volume.data
         self._replace_patch_viewer_volume(transformed_volume)
         self._initialize_contrast(transformed_volume)
+        self._refresh_patch_history_panel()
         self.statusBar().showMessage(f"Applied {get_tool(tool_id).label} to selected patch")
 
     def _on_save_patch_clicked(self) -> None:
@@ -247,6 +312,43 @@ class PatchViewerWindow(QMainWindow):
 
         self.statusBar().showMessage(f"Patch saved: {saved_path}")
 
+    def _on_save_views_clicked(self) -> None:
+        export_default = self._default_views_filename()
+        selected_path, selected_filter = QFileDialog.getSaveFileName(
+            self,
+            "Save Current Patch Views",
+            export_default,
+            "PNG Image (*.png);;JPEG Image (*.jpg *.jpeg);;All Files (*)",
+        )
+        if not selected_path:
+            self.statusBar().showMessage("View export canceled")
+            return
+
+        try:
+            export_path, format_name = self._resolve_views_export_target(
+                selected_path,
+                selected_filter,
+            )
+            composite = self._build_views_composite_image()
+            if composite is None:
+                QMessageBox.warning(
+                    self,
+                    "Export Failed",
+                    "Current views are not available for export yet.",
+                )
+                self.statusBar().showMessage("View export failed")
+                return
+            if not composite.save(str(export_path), format_name):
+                raise ValueError(
+                    "Unable to save image. Check path permissions and file format."
+                )
+        except (OSError, ValueError) as exc:
+            QMessageBox.critical(self, "Export Failed", str(exc))
+            self.statusBar().showMessage("View export failed")
+            return
+
+        self.statusBar().showMessage(f"Saved current views: {export_path}")
+
     def _default_patch_filename(self) -> str:
         center = self._patch_center if self._patch_center is not None else (0, 0, 0)
         size = (
@@ -261,6 +363,84 @@ class PatchViewerWindow(QMainWindow):
             extension=".nii.gz",
         )
         return str(Path.home() / filename)
+
+    def _default_views_filename(self) -> str:
+        stem = Path(self._default_patch_filename()).stem
+        if stem.endswith(".nii"):
+            stem = stem[:-4]
+        return str(Path.home() / f"{stem}_views.png")
+
+    def _resolve_views_export_target(
+        self,
+        selected_path: str,
+        selected_filter: str,
+    ) -> tuple[Path, str]:
+        export_path = Path(selected_path)
+        suffix = export_path.suffix.lower()
+        if suffix == ".png":
+            return export_path, "PNG"
+        if suffix in {".jpg", ".jpeg"}:
+            return export_path, "JPG"
+
+        if "JPEG" in selected_filter.upper():
+            return export_path.with_suffix(".jpg"), "JPG"
+        return export_path.with_suffix(".png"), "PNG"
+
+    def _build_views_composite_image(self) -> QImage | None:
+        view_planes: list[tuple[str, np.ndarray]] = []
+        for title, view in (
+            ("Axial", self.slice_viewer.axial_view),
+            ("Coronal", self.slice_viewer.coronal_view),
+            ("Sagittal", self.slice_viewer.sagittal_view),
+        ):
+            plane = view.current_display_plane_uint8()
+            if plane is None:
+                return None
+            view_planes.append((title, plane))
+
+        title_height = 24
+        margin = 8
+        panel_gap = 8
+        panel_widths = [int(plane.shape[1]) for _, plane in view_planes]
+        panel_heights = [int(plane.shape[0]) for _, plane in view_planes]
+        canvas_width = margin * 2 + sum(panel_widths) + panel_gap * (len(view_planes) - 1)
+        canvas_height = margin * 2 + title_height + max(panel_heights)
+        canvas = QImage(canvas_width, canvas_height, QImage.Format.Format_RGB32)
+        canvas.fill(QColor(18, 18, 18))
+
+        painter = QPainter(canvas)
+        try:
+            title_font = QFont(painter.font())
+            title_font.setBold(True)
+            painter.setFont(title_font)
+            painter.setPen(QColor(230, 230, 230))
+
+            x_offset = margin
+            for title, plane in view_planes:
+                contiguous = np.ascontiguousarray(plane)
+                height, width = contiguous.shape
+                image = QImage(
+                    contiguous.data,
+                    width,
+                    height,
+                    width,
+                    QImage.Format.Format_Grayscale8,
+                ).copy()
+                painter.drawText(
+                    x_offset,
+                    margin + 16,
+                    title,
+                )
+                painter.drawImage(
+                    x_offset,
+                    margin + title_height,
+                    image,
+                )
+                x_offset += width + panel_gap
+        finally:
+            painter.end()
+
+        return canvas
 
     def source_image_path(self) -> Path | None:
         return self._source_image_path
@@ -282,8 +462,95 @@ class PatchViewerWindow(QMainWindow):
         """Replace local patch data from parent-image processing updates."""
         self._patch_volume = patch_volume
         self._patch_data = patch_volume.data
+        self._patch_history.reset(patch_volume.data)
         self._replace_patch_viewer_volume(patch_volume)
         self._initialize_contrast(patch_volume)
+        self._refresh_patch_history_panel()
+
+    def _on_restore_patch_history_node_requested(self, node_id: str) -> None:
+        try:
+            restored_patch = self._patch_history.restore(node_id)
+        except ValueError as exc:
+            QMessageBox.warning(self, "Patch Restore Failed", str(exc))
+            self.statusBar().showMessage("Patch restore failed")
+            return
+
+        restored_volume = derive_volume(self._patch_volume, restored_patch)
+        self._patch_volume = restored_volume
+        self._patch_data = restored_patch
+        self._replace_patch_viewer_volume(restored_volume)
+        self._initialize_contrast(restored_volume)
+        self._refresh_patch_history_panel()
+        self.statusBar().showMessage("Restored selected patch to history state")
+
+    def _apply_history_operation(
+        self,
+        patch_state: np.ndarray,
+        operation_type: str,
+        parameters: dict[str, int | float],
+    ) -> np.ndarray:
+        utility = patch_utility_from_tool(operation_type)
+        return utility.apply(patch_state, parameters)
+
+    def _refresh_patch_history_panel(self) -> None:
+        self.patch_history_panel.set_history(
+            self._patch_history.nodes_by_step(),
+            self._patch_history.active_node_id,
+        )
+
+    def _configure_scroll_region_constraints(self) -> None:
+        viewer_min_width = max(
+            self.slice_viewer.minimumSizeHint().width(),
+            self.slice_viewer.sizeHint().width(),
+            self.slice_viewer.minimumWidth(),
+        )
+        viewer_min_height = max(
+            self.slice_viewer.minimumSizeHint().height(),
+            self.slice_viewer.sizeHint().height(),
+            self.slice_viewer.minimumHeight(),
+        )
+        self.slice_viewer.setMinimumSize(viewer_min_width, viewer_min_height)
+
+        panel_widths = [self._required_widget_width(self.cursor_panel)]
+        panel_widths.extend(self._required_widget_width(panel) for panel in self._right_panels)
+        layout_margins = self._right_control_stack_layout.contentsMargins()
+        right_min_width = max(panel_widths) + layout_margins.left() + layout_margins.right()
+        self._right_control_container.setMinimumWidth(right_min_width)
+
+    def _apply_initial_window_size(self) -> None:
+        screen = self.screen() or QGuiApplication.primaryScreen()
+        if screen is None:
+            return
+
+        available = screen.availableGeometry()
+        viewer_width = self.slice_viewer.minimumWidth()
+        right_width = self._right_control_container.minimumWidth()
+        self._main_splitter.setSizes([viewer_width, right_width])
+
+        central_widget = self.centralWidget()
+        if central_widget is None:
+            return
+
+        central_hint = central_widget.sizeHint()
+        status_height = self.statusBar().sizeHint().height()
+        preferred_width = max(
+            central_hint.width(),
+            viewer_width + right_width + self._main_splitter.handleWidth(),
+        )
+        target_width = min(preferred_width, int(available.width() * 0.95))
+        target_height = min(
+            max(central_hint.height() + status_height, self.minimumSizeHint().height()),
+            int(available.height() * 0.95),
+        )
+        self.resize(target_width, target_height)
+
+    @staticmethod
+    def _required_widget_width(widget: QWidget) -> int:
+        return max(
+            widget.minimumSizeHint().width(),
+            widget.sizeHint().width(),
+            widget.minimumWidth(),
+        )
 
     def _replace_patch_viewer_volume(self, patch_volume: NiftiLoadResult) -> None:
         cursor_position = self.slice_viewer.current_cursor_position()

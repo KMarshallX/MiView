@@ -2,10 +2,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QUrl
+from PySide6.QtCore import Qt, QUrl
+from PySide6.QtGui import QImageWriter
 from PySide6.QtWidgets import QApplication
 import nibabel as nib
 import numpy as np
+import pytest
 
 from miview.nifti_io import NiftiLoadResult
 from miview.tools import derive_volume
@@ -124,6 +126,107 @@ def test_patch_window_does_not_enable_drag_and_drop() -> None:
 
     assert not window.acceptDrops()
     assert not window.slice_viewer.acceptDrops()
+
+    window.deleteLater()
+    _ = app
+
+
+def test_patch_window_uses_separate_scroll_regions_for_viewer_and_config() -> None:
+    app = QApplication.instance() or QApplication([])
+    patch_volume = _build_test_volume((5, 5, 5))
+
+    window = PatchViewerWindow(patch_volume)
+
+    assert window._main_splitter.widget(0) is window._viewer_scroll_area
+    assert window._main_splitter.widget(1) is window._right_control_scroll_area
+    assert (
+        window._viewer_scroll_area.horizontalScrollBarPolicy()
+        == Qt.ScrollBarPolicy.ScrollBarAsNeeded
+    )
+    assert (
+        window._viewer_scroll_area.verticalScrollBarPolicy()
+        == Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+    )
+    assert (
+        window._right_control_scroll_area.horizontalScrollBarPolicy()
+        == Qt.ScrollBarPolicy.ScrollBarAsNeeded
+    )
+    assert (
+        window._right_control_scroll_area.verticalScrollBarPolicy()
+        == Qt.ScrollBarPolicy.ScrollBarAsNeeded
+    )
+    assert window.slice_viewer.minimumWidth() > 0
+    assert window._right_control_container.minimumWidth() >= window.cursor_panel.minimumWidth()
+
+    window.deleteLater()
+    _ = app
+
+
+def test_patch_window_has_views_export_button_above_save_patch_button() -> None:
+    app = QApplication.instance() or QApplication([])
+    patch_volume = _build_test_volume((5, 5, 5))
+    window = PatchViewerWindow(patch_volume)
+
+    save_layout = window.patch_save_panel.layout()
+    assert save_layout is not None
+    assert save_layout.itemAt(0).widget() is window.save_views_button
+    assert save_layout.itemAt(1).widget() is window.save_patch_button
+
+    window.deleteLater()
+    _ = app
+
+
+def test_patch_window_builds_composite_image_from_current_views() -> None:
+    app = QApplication.instance() or QApplication([])
+    patch_volume = _build_test_volume((5, 5, 5))
+    window = PatchViewerWindow(patch_volume)
+    window.projection_mode_combo.setCurrentText("MinIP")
+    window.axial_toggle_button.setChecked(True)
+    window.coronal_toggle_button.setChecked(True)
+    window.sagittal_toggle_button.setChecked(True)
+
+    composite = window._build_views_composite_image()
+
+    assert composite is not None
+    assert composite.width() > 0
+    assert composite.height() > 0
+
+    window.deleteLater()
+    _ = app
+
+
+def test_patch_window_composite_export_saves_png_and_jpg(tmp_path: Path) -> None:
+    app = QApplication.instance() or QApplication([])
+    patch_volume = _build_test_volume((5, 5, 5))
+    window = PatchViewerWindow(patch_volume)
+    window.axial_toggle_button.setChecked(True)
+    window.coronal_toggle_button.setChecked(True)
+    window.sagittal_toggle_button.setChecked(True)
+    composite = window._build_views_composite_image()
+    assert composite is not None
+
+    png_target, png_format = window._resolve_views_export_target(
+        str(tmp_path / "views"),
+        "PNG Image (*.png)",
+    )
+    assert composite.save(str(png_target), png_format)
+    assert png_target.suffix.lower() == ".png"
+    assert png_target.exists()
+
+    supported_formats = {
+        bytes(value).decode("ascii").lower()
+        for value in QImageWriter.supportedImageFormats()
+    }
+    if "jpg" not in supported_formats and "jpeg" not in supported_formats:
+        pytest.skip("JPEG export is not supported by this Qt build.")
+
+    jpg_target, jpg_format = window._resolve_views_export_target(
+        str(tmp_path / "views"),
+        "JPEG Image (*.jpg *.jpeg)",
+    )
+    assert composite.save(str(jpg_target), jpg_format)
+    assert jpg_target.suffix.lower() == ".jpg"
+    assert jpg_target.exists()
 
     window.deleteLater()
     _ = app

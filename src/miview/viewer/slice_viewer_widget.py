@@ -260,18 +260,9 @@ class SliceViewerWidget(QWidget):
             return
 
         display_cursor = self._display_volume.source_to_display(self._source_cursor_position)
-        if self._projection_slice_2d is not None:
-            slice_2d = self._projection_slice_2d
-        else:
-            slice_2d = extract_oriented_slice(
-                self._display_volume.display_data, self.orientation, display_cursor
-            )
-        if self._contrast_window is None:
-            slice_8bit = normalize_slice_to_uint8(slice_2d)
-        else:
-            slice_8bit = window_slice_to_uint8(
-                slice_2d, self._contrast_window[0], self._contrast_window[1]
-            )
+        slice_8bit = self.current_display_plane_uint8()
+        if slice_8bit is None:
+            return
         contiguous = np.ascontiguousarray(slice_8bit)
         height, width = contiguous.shape
         image = QImage(
@@ -295,6 +286,31 @@ class SliceViewerWidget(QWidget):
             total_slices = self._display_volume.display_shape[fixed_axis]
             self.slice_label.setText(f"Slice: {slice_index} / {total_slices}")
         self._sync_slice_slider(display_cursor)
+
+    def current_display_plane_uint8(self) -> np.ndarray | None:
+        """Return the currently displayed base plane as grayscale uint8.
+
+        This excludes cursor/patch overlays and segmentation overlays.
+        """
+        if self._display_volume is None or self._source_cursor_position is None:
+            return None
+
+        display_cursor = self._display_volume.source_to_display(self._source_cursor_position)
+        if self._projection_slice_2d is not None:
+            slice_2d = self._projection_slice_2d
+        else:
+            slice_2d = extract_oriented_slice(
+                self._display_volume.display_data,
+                self.orientation,
+                display_cursor,
+            )
+        if self._contrast_window is None:
+            return normalize_slice_to_uint8(slice_2d)
+        return window_slice_to_uint8(
+            slice_2d,
+            self._contrast_window[0],
+            self._contrast_window[1],
+        )
 
     def _configure_slice_slider(self) -> None:
         if self._display_volume is None:
