@@ -314,23 +314,8 @@ class TriPlanarViewerWidget(QWidget):
         self.nifti_file_dropped.emit(dropped_path)
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:
-        if watched in self._drop_event_sources:
-            if event.type() == QEvent.Type.DragEnter:
-                drag_enter_event = event if isinstance(event, QDragEnterEvent) else None
-                if drag_enter_event is not None and self._accept_drop_event(drag_enter_event):
-                    return True
-            elif event.type() == QEvent.Type.DragMove:
-                drag_move_event = event if isinstance(event, QDragMoveEvent) else None
-                if drag_move_event is not None and self._accept_drop_event(drag_move_event):
-                    return True
-            elif event.type() == QEvent.Type.Drop:
-                drop_event = event if isinstance(event, QDropEvent) else None
-                if drop_event is not None:
-                    dropped_path = self._dropped_nifti_path(drop_event)
-                    if dropped_path is not None:
-                        drop_event.acceptProposedAction()
-                        self.nifti_file_dropped.emit(dropped_path)
-                        return True
+        if watched in self._drop_event_sources and self._handle_drop_event(event):
+            return True
         return super().eventFilter(watched, event)
 
     def _on_cursor_selected(self, x: int, y: int, z: int) -> None:
@@ -509,6 +494,31 @@ class TriPlanarViewerWidget(QWidget):
             event.ignore()
             return False
         event.acceptProposedAction()
+        return True
+
+    def _handle_drop_event(self, event: QEvent) -> bool:
+        if event.type() == QEvent.Type.DragEnter:
+            drag_enter_event = event if isinstance(event, QDragEnterEvent) else None
+            return (
+                drag_enter_event is not None
+                and self._accept_drop_event(drag_enter_event)
+            )
+        if event.type() == QEvent.Type.DragMove:
+            drag_move_event = event if isinstance(event, QDragMoveEvent) else None
+            return (
+                drag_move_event is not None
+                and self._accept_drop_event(drag_move_event)
+            )
+        if event.type() != QEvent.Type.Drop:
+            return False
+        drop_event = event if isinstance(event, QDropEvent) else None
+        if drop_event is None:
+            return False
+        dropped_path = self._dropped_nifti_path(drop_event)
+        if dropped_path is None:
+            return False
+        drop_event.acceptProposedAction()
+        self.nifti_file_dropped.emit(dropped_path)
         return True
 
     def _dropped_nifti_path(

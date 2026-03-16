@@ -88,9 +88,12 @@ class CursorInspectionPanel(QWidget):
     def set_cursor_values(
         self, x: int | None, y: int | None, z: int | None, intensity: float | int | None
     ) -> None:
-        self.x_value.setText("-" if x is None else str(x))
-        self.y_value.setText("-" if y is None else str(y))
-        self.z_value.setText("-" if z is None else str(z))
+        for label, value in (
+            (self.x_value, x),
+            (self.y_value, y),
+            (self.z_value, z),
+        ):
+            label.setText("-" if value is None else str(value))
         self.intensity_value.setText(self._format_intensity(intensity))
 
     @staticmethod
@@ -103,12 +106,8 @@ class CursorInspectionPanel(QWidget):
 
     def set_patch_controls_visible(self, visible: bool) -> None:
         self.patch_group.setVisible(visible)
-        self.patch_opacity_slider.setEnabled(visible)
-        self.patch_width_spinbox.setEnabled(visible)
-        self.patch_height_spinbox.setEnabled(visible)
-        self.patch_depth_spinbox.setEnabled(visible)
-        self.select_patch_button.setEnabled(visible)
-        self.find_patch_box_button.setEnabled(visible)
+        for widget in self._patch_control_widgets():
+            widget.setEnabled(visible)
 
     def set_patch_opacity(self, opacity: float) -> None:
         slider_value = int(round(min(max(opacity, 0.0), 1.0) * 100))
@@ -120,12 +119,7 @@ class CursorInspectionPanel(QWidget):
         self.patch_opacity_changed.emit(slider_value / 100.0)
 
     def set_patch_size_xyz(self, size_xyz: tuple[int, int, int]) -> None:
-        x_size, y_size, z_size = size_xyz
-        for spinbox, value in (
-            (self.patch_width_spinbox, x_size),
-            (self.patch_height_spinbox, y_size),
-            (self.patch_depth_spinbox, z_size),
-        ):
+        for spinbox, value in zip(self._patch_size_spinboxes(), size_xyz, strict=True):
             was_blocked = spinbox.blockSignals(True)
             spinbox.setValue(max(1, int(value)))
             spinbox.blockSignals(was_blocked)
@@ -135,4 +129,21 @@ class CursorInspectionPanel(QWidget):
             self.patch_width_spinbox.value(),
             self.patch_height_spinbox.value(),
             self.patch_depth_spinbox.value(),
+        )
+
+    def _patch_control_widgets(self) -> tuple[QWidget, ...]:
+        return (
+            self.patch_opacity_slider,
+            self.patch_width_spinbox,
+            self.patch_height_spinbox,
+            self.patch_depth_spinbox,
+            self.select_patch_button,
+            self.find_patch_box_button,
+        )
+
+    def _patch_size_spinboxes(self) -> tuple[QSpinBox, QSpinBox, QSpinBox]:
+        return (
+            self.patch_width_spinbox,
+            self.patch_height_spinbox,
+            self.patch_depth_spinbox,
         )

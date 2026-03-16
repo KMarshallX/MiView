@@ -24,19 +24,24 @@ from miview.segmentation_models import LoadedSegmentation
 from miview.segmentation_validation import validate_segmentation_compatibility
 from miview.state.app_state import AppState
 from miview.state.contrast_state import ContrastState
-from miview.tools import apply_tool, derive_volume, get_tool
+from miview.tools import get_tool
+from miview.ui.contrast_helpers import (
+    apply_auto_contrast,
+    connect_contrast_controls,
+    initialize_contrast_state,
+)
 from miview.ui.contrast_control_bar import ContrastControlBar
 from miview.ui.cursor_panel import CursorInspectionPanel
 from miview.ui.drop_load_choice_dialog import DropLoadChoice, DropLoadChoiceDialog
 from miview.ui.drop_loading import first_supported_local_nifti_path
 from miview.ui.patch_window import PatchViewerWindow
 from miview.ui.segmentation_config_window import SegmentationConfigWindow
-from miview.ui.tools_menu import build_tools_submenu, resolve_tool_parameters
+from miview.ui.tool_actions import apply_tool_to_volume
+from miview.ui.tools_menu import build_tools_submenu
 from miview.ui.window_styling import (
     ResponsiveFontScaler,
     apply_window_content_frame,
 )
-from miview.viewer.intensity import robust_auto_window, volume_intensity_range
 from miview.viewer.triplanar_viewer_widget import TriPlanarViewerWidget
 
 
@@ -82,18 +87,16 @@ class MainWindow(QMainWindow):
         self.slice_viewer.nifti_file_dropped.connect(self._on_viewer_nifti_file_dropped)
         self.slice_viewer.cursor_state.cursor_changed.connect(self._update_cursor_position)
         self.slice_viewer.patch_selection_changed.connect(self._on_patch_selection_changed)
-        self.contrast_control_bar.window_changed.connect(self.contrast_state.set_window)
-        self.contrast_control_bar.auto_requested.connect(self._on_auto_contrast)
         self.cursor_panel.patch_opacity_changed.connect(self.slice_viewer.set_patch_overlay_opacity)
         self.cursor_panel.patch_size_changed.connect(self._on_patch_size_changed)
         self.cursor_panel.select_patch_requested.connect(self._on_select_patch)
         self.cursor_panel.find_patch_box_requested.connect(self._on_find_patch_box)
-        self.contrast_state.availability_changed.connect(
-            self.contrast_control_bar.set_enabled_state
+        connect_contrast_controls(
+            self.contrast_control_bar,
+            self.contrast_state,
+            self.slice_viewer,
+            self._on_auto_contrast,
         )
-        self.contrast_state.range_changed.connect(self.contrast_control_bar.set_available_range)
-        self.contrast_state.window_changed.connect(self.contrast_control_bar.set_window)
-        self.contrast_state.window_changed.connect(self.slice_viewer.set_contrast_window)
 
         self._setup_central_layout()
         self._setup_menu()
@@ -221,25 +224,10 @@ class MainWindow(QMainWindow):
         super().dropEvent(event)
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:
-        if watched in {self._content_widget, self._main_splitter}:
-            if event.type() == QEvent.Type.DragEnter:
-                drag_enter_event = event if isinstance(event, QDragEnterEvent) else None
-                if drag_enter_event is not None and self._accept_drop_for_viewer(
-                    drag_enter_event, watched
-                ):
-                    return True
-            elif event.type() == QEvent.Type.DragMove:
-                drag_move_event = event if isinstance(event, QDragMoveEvent) else None
-                if drag_move_event is not None and self._accept_drop_for_viewer(
-                    drag_move_event, watched
-                ):
-                    return True
-            elif event.type() == QEvent.Type.Drop:
-                drop_event = event if isinstance(event, QDropEvent) else None
-                if drop_event is not None and self._handle_drop_for_viewer(
-                    drop_event, watched
-                ):
-                    return True
+        if watched in {self._content_widget, self._main_splitter} and self._handle_viewer_drop_event(
+            watched, event
+        ):
+            return True
         return super().eventFilter(watched, event)
 
     def _on_open(self) -> None:
@@ -295,19 +283,13 @@ class MainWindow(QMainWindow):
         self.loading_progress_bar.setVisible(False)
 
     def _initialize_contrast_for_loaded_volume(self) -> None:
-        if self.state.volume is None:
-            self.contrast_state.clear()
-            return
-
-        range_min, range_max = volume_intensity_range(self.state.volume.data)
-        self.contrast_state.set_available_range(range_min, range_max)
-        self.contrast_state.set_window(range_min, range_max, force_emit=True)
+        initialize_contrast_state(self.contrast_state, self.state.volume)
 
     def _on_auto_contrast(self) -> None:
-        if self.state.volume is None or not self.contrast_state.is_enabled():
-            return
-        window_min, window_max = robust_auto_window(self.state.volume.data)
-        self.contrast_state.set_window(window_min, window_max)
+        apply_auto_contrast(
+            self.contrast_state,
+            None if self.state.volume is None else self.state.volume.data,
+        )
 
     def _on_patch_selection_toggled(self, enabled: bool) -> None:
         self.slice_viewer.set_patch_selection_enabled(enabled)
@@ -386,17 +368,13 @@ class MainWindow(QMainWindow):
             )
             return
 
-        parameters = resolve_tool_parameters(self, tool_id, self.state.volume.data)
-        if parameters is None:
-            self.statusBar().showMessage("Tool application canceled")
-            return
-
-        try:
-            transformed_data = apply_tool(tool_id, self.state.volume.data, parameters)
-            transformed_volume = derive_volume(self.state.volume, transformed_data)
-        except ValueError as exc:
-            QMessageBox.critical(self, "Tool Application Failed", str(exc))
-            self.statusBar().showMessage("Tool application failed")
+        transformed_volume, status_message = apply_tool_to_volume(
+            self,
+            tool_id,
+            self.state.volume,
+        )
+        if transformed_volume is None:
+            self.statusBar().showMessage(status_message)
             return
 
         self.state.volume = transformed_volume
@@ -621,6 +599,26 @@ class MainWindow(QMainWindow):
             return False
         event.acceptProposedAction()
         return True
+
+    def _handle_viewer_drop_event(self, watched: QObject, event: QEvent) -> bool:
+        if event.type() == QEvent.Type.DragEnter:
+            drag_enter_event = event if isinstance(event, QDragEnterEvent) else None
+            return (
+                drag_enter_event is not None
+                and self._accept_drop_for_viewer(drag_enter_event, watched)
+            )
+        if event.type() == QEvent.Type.DragMove:
+            drag_move_event = event if isinstance(event, QDragMoveEvent) else None
+            return (
+                drag_move_event is not None
+                and self._accept_drop_for_viewer(drag_move_event, watched)
+            )
+        if event.type() == QEvent.Type.Drop:
+            drop_event = event if isinstance(event, QDropEvent) else None
+            return drop_event is not None and self._handle_drop_for_viewer(
+                drop_event, watched
+            )
+        return False
 
     def _handle_drop_for_viewer(
         self,

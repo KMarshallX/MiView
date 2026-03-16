@@ -22,15 +22,20 @@ from miview.nifti_io import NiftiLoadResult
 from miview.patch_saver import build_patch_default_filename, save_patch_nifti
 from miview.patch_selector import PatchBounds
 from miview.state.contrast_state import ContrastState
-from miview.tools import apply_tool, derive_volume, get_tool
+from miview.tools import get_tool
+from miview.ui.contrast_helpers import (
+    apply_auto_contrast,
+    connect_contrast_controls,
+    initialize_contrast_state,
+)
 from miview.ui.contrast_control_bar import ContrastControlBar
 from miview.ui.cursor_panel import CursorInspectionPanel
-from miview.ui.tools_menu import build_tools_submenu, resolve_tool_parameters
+from miview.ui.tool_actions import apply_tool_to_volume
+from miview.ui.tools_menu import build_tools_submenu
 from miview.ui.window_styling import (
     ResponsiveFontScaler,
     apply_window_content_frame,
 )
-from miview.viewer.intensity import robust_auto_window, volume_intensity_range
 from miview.viewer.triplanar_viewer_widget import TriPlanarViewerWidget
 
 
@@ -87,14 +92,12 @@ class PatchViewerWindow(QMainWindow):
         self.slice_viewer.cursor_inspection_changed.connect(
             self.cursor_panel.set_cursor_values
         )
-        self.contrast_control_bar.window_changed.connect(self.contrast_state.set_window)
-        self.contrast_control_bar.auto_requested.connect(self._on_auto_contrast)
-        self.contrast_state.availability_changed.connect(
-            self.contrast_control_bar.set_enabled_state
+        connect_contrast_controls(
+            self.contrast_control_bar,
+            self.contrast_state,
+            self.slice_viewer,
+            self._on_auto_contrast,
         )
-        self.contrast_state.range_changed.connect(self.contrast_control_bar.set_available_range)
-        self.contrast_state.window_changed.connect(self.contrast_control_bar.set_window)
-        self.contrast_state.window_changed.connect(self.slice_viewer.set_contrast_window)
         self.slice_viewer.load_volume(patch_volume)
         if segmentation_volume is not None:
             self.slice_viewer.set_segmentation_overlay(
@@ -202,28 +205,19 @@ class PatchViewerWindow(QMainWindow):
         self.slice_viewer.set_projection_enabled(orientation, enabled)
 
     def _initialize_contrast(self, patch_volume: NiftiLoadResult) -> None:
-        range_min, range_max = volume_intensity_range(patch_volume.data)
-        self.contrast_state.set_available_range(range_min, range_max)
-        self.contrast_state.set_window(range_min, range_max, force_emit=True)
+        initialize_contrast_state(self.contrast_state, patch_volume)
 
     def _on_auto_contrast(self) -> None:
-        if not self.contrast_state.is_enabled():
-            return
-        window_min, window_max = robust_auto_window(self._patch_data)
-        self.contrast_state.set_window(window_min, window_max)
+        apply_auto_contrast(self.contrast_state, self._patch_data)
 
     def _on_apply_tool_to_patch_requested(self, tool_id: str) -> None:
-        parameters = resolve_tool_parameters(self, tool_id, self._patch_data)
-        if parameters is None:
-            self.statusBar().showMessage("Tool application canceled")
-            return
-
-        try:
-            transformed_data = apply_tool(tool_id, self._patch_data, parameters)
-            transformed_volume = derive_volume(self._patch_volume, transformed_data)
-        except ValueError as exc:
-            QMessageBox.critical(self, "Tool Application Failed", str(exc))
-            self.statusBar().showMessage("Tool application failed")
+        transformed_volume, status_message = apply_tool_to_volume(
+            self,
+            tool_id,
+            self._patch_volume,
+        )
+        if transformed_volume is None:
+            self.statusBar().showMessage(status_message)
             return
 
         self._patch_volume = transformed_volume
