@@ -195,6 +195,62 @@ def test_patch_window_builds_composite_image_from_current_views() -> None:
     _ = app
 
 
+def test_patch_window_export_computes_true_three_direction_projection_planes() -> None:
+    app = QApplication.instance() or QApplication([])
+    patch_volume = _build_test_volume((4, 5, 6))
+    window = PatchViewerWindow(patch_volume)
+
+    window.projection_mode_combo.setCurrentText("MIP")
+    computed_mip = window._compute_projection_planes_for_export()
+    assert computed_mip is not None
+    np.testing.assert_allclose(
+        computed_mip["axial"],
+        np.max(patch_volume.data, axis=2).T[::-1, ::-1],
+    )
+    np.testing.assert_allclose(
+        computed_mip["coronal"],
+        np.max(patch_volume.data, axis=1).T[::-1, ::-1],
+    )
+    np.testing.assert_allclose(
+        computed_mip["sagittal"],
+        np.max(patch_volume.data, axis=0).T[::-1, ::-1],
+    )
+
+    window.projection_mode_combo.setCurrentText("MinIP")
+    computed_minip = window._compute_projection_planes_for_export()
+    assert computed_minip is not None
+    np.testing.assert_allclose(
+        computed_minip["axial"],
+        np.min(patch_volume.data, axis=2).T[::-1, ::-1],
+    )
+
+    window.deleteLater()
+    _ = app
+
+
+def test_patch_window_export_size_scales_each_projection_panel() -> None:
+    app = QApplication.instance() or QApplication([])
+    patch_volume = _build_test_volume((4, 5, 6))
+    window = PatchViewerWindow(patch_volume)
+    window.projection_mode_combo.setCurrentText("MIP")
+
+    planes = window._compute_projection_planes_for_export()
+    assert planes is not None
+    axial_shape = planes["axial"].shape
+    composite = window._build_views_composite_image()
+    assert composite is not None
+
+    expected_scaled_panel_width = axial_shape[1] * window.VIEW_EXPORT_SCALE_FACTOR
+    expected_scaled_panel_height = axial_shape[0] * window.VIEW_EXPORT_SCALE_FACTOR
+    assert expected_scaled_panel_width >= axial_shape[1] * 3
+    assert expected_scaled_panel_height >= axial_shape[0] * 3
+    assert composite.width() >= expected_scaled_panel_width * 3
+    assert composite.height() >= expected_scaled_panel_height
+
+    window.deleteLater()
+    _ = app
+
+
 def test_patch_window_composite_export_saves_png_and_jpg(tmp_path: Path) -> None:
     app = QApplication.instance() or QApplication([])
     patch_volume = _build_test_volume((5, 5, 5))

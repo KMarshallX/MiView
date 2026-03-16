@@ -50,11 +50,14 @@ from miview.ui.window_styling import (
     ResponsiveFontScaler,
     apply_window_content_frame,
 )
+from miview.viewer.intensity import normalize_slice_to_uint8, window_slice_to_uint8
 from miview.viewer.triplanar_viewer_widget import TriPlanarViewerWidget
 
 
 class PatchViewerWindow(QMainWindow):
     """Secondary window for inspecting an extracted patch volume."""
+
+    VIEW_EXPORT_SCALE_FACTOR = 3
 
     def __init__(
         self,
@@ -387,22 +390,26 @@ class PatchViewerWindow(QMainWindow):
         return export_path.with_suffix(".png"), "PNG"
 
     def _build_views_composite_image(self) -> QImage | None:
-        view_planes: list[tuple[str, np.ndarray]] = []
-        for title, view in (
-            ("Axial", self.slice_viewer.axial_view),
-            ("Coronal", self.slice_viewer.coronal_view),
-            ("Sagittal", self.slice_viewer.sagittal_view),
-        ):
-            plane = view.current_display_plane_uint8()
-            if plane is None:
-                return None
-            view_planes.append((title, plane))
+        projection_planes = self._compute_projection_planes_for_export()
+        if projection_planes is None:
+            return None
+        view_planes = [
+            ("Axial", self._normalize_projection_plane_for_export(projection_planes["axial"])),
+            ("Coronal", self._normalize_projection_plane_for_export(projection_planes["coronal"])),
+            ("Sagittal", self._normalize_projection_plane_for_export(projection_planes["sagittal"])),
+        ]
 
         title_height = 24
         margin = 8
         panel_gap = 8
-        panel_widths = [int(plane.shape[1]) for _, plane in view_planes]
-        panel_heights = [int(plane.shape[0]) for _, plane in view_planes]
+        panel_widths = [
+            int(plane.shape[1]) * self.VIEW_EXPORT_SCALE_FACTOR
+            for _, plane in view_planes
+        ]
+        panel_heights = [
+            int(plane.shape[0]) * self.VIEW_EXPORT_SCALE_FACTOR
+            for _, plane in view_planes
+        ]
         canvas_width = margin * 2 + sum(panel_widths) + panel_gap * (len(view_planes) - 1)
         canvas_height = margin * 2 + title_height + max(panel_heights)
         canvas = QImage(canvas_width, canvas_height, QImage.Format.Format_RGB32)
@@ -419,13 +426,19 @@ class PatchViewerWindow(QMainWindow):
             for title, plane in view_planes:
                 contiguous = np.ascontiguousarray(plane)
                 height, width = contiguous.shape
-                image = QImage(
+                source_image = QImage(
                     contiguous.data,
                     width,
                     height,
                     width,
                     QImage.Format.Format_Grayscale8,
                 ).copy()
+                scaled_image = source_image.scaled(
+                    width * self.VIEW_EXPORT_SCALE_FACTOR,
+                    height * self.VIEW_EXPORT_SCALE_FACTOR,
+                    Qt.AspectRatioMode.IgnoreAspectRatio,
+                    Qt.TransformationMode.FastTransformation,
+                )
                 painter.drawText(
                     x_offset,
                     margin + 16,
@@ -434,13 +447,49 @@ class PatchViewerWindow(QMainWindow):
                 painter.drawImage(
                     x_offset,
                     margin + title_height,
-                    image,
+                    scaled_image,
                 )
-                x_offset += width + panel_gap
+                x_offset += scaled_image.width() + panel_gap
         finally:
             painter.end()
 
         return canvas
+
+    def _compute_projection_planes_for_export(self) -> dict[str, np.ndarray] | None:
+        if self._patch_data.ndim != 3:
+            return None
+        mode = self._current_projection_mode_for_export()
+        volume = np.asarray(self._patch_data)
+        return {
+            "axial": self._project_patch_volume(volume, "axial", mode),
+            "coronal": self._project_patch_volume(volume, "coronal", mode),
+            "sagittal": self._project_patch_volume(volume, "sagittal", mode),
+        }
+
+    def _current_projection_mode_for_export(self) -> str:
+        mode = self.projection_mode_combo.currentText().strip().upper()
+        return "MIP" if mode == "MIP" else "MINIP"
+
+    def _normalize_projection_plane_for_export(self, plane: np.ndarray) -> np.ndarray:
+        if self.contrast_state.is_enabled():
+            window_min, window_max = self.contrast_state.window()
+            return window_slice_to_uint8(plane, window_min, window_max)
+        return normalize_slice_to_uint8(plane)
+
+    @staticmethod
+    def _project_patch_volume(
+        volume: np.ndarray,
+        orientation: str,
+        mode: str,
+    ) -> np.ndarray:
+        reducer = np.max if mode == "MIP" else np.min
+        if orientation == "axial":
+            return reducer(volume, axis=2).T[::-1, ::-1]
+        if orientation == "coronal":
+            return reducer(volume, axis=1).T[::-1, ::-1]
+        if orientation == "sagittal":
+            return reducer(volume, axis=0).T[::-1, ::-1]
+        raise ValueError(f"Unsupported orientation: {orientation}")
 
     def source_image_path(self) -> Path | None:
         return self._source_image_path
