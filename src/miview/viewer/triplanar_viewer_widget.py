@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import logging
 import os
+from pathlib import Path
 
 import numpy as np
-from PySide6.QtCore import Signal
+from PySide6.QtCore import QEvent, QObject, Qt, Signal
+from PySide6.QtGui import QDragEnterEvent, QDragMoveEvent, QDropEvent
 from PySide6.QtWidgets import QGridLayout, QWidget
 
+from miview.ui.drop_loading import first_supported_local_nifti_path
 from miview.state.cursor_state import CursorState
 from miview.state.zoom_state import ZoomState
 from miview.nifti_io import NiftiLoadResult
@@ -36,6 +39,7 @@ class TriPlanarViewerWidget(QWidget):
 
     cursor_inspection_changed = Signal(object, object, object, object)
     patch_selection_changed = Signal(object)
+    nifti_file_dropped = Signal(object)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -53,11 +57,13 @@ class TriPlanarViewerWidget(QWidget):
         self.zoom_state = ZoomState(self)
         self.patch_selector = PatchSelector(DEFAULT_PATCH_SIZE)
         self._projection_mode = "MIP"
+        self._drop_loading_enabled = False
         self._projection_enabled: dict[str, bool] = {
             "axial": False,
             "sagittal": False,
             "coronal": False,
         }
+        self.setAcceptDrops(False)
 
         self.axial_view = SliceViewerWidget("axial", self)
         self.coronal_view = SliceViewerWidget("coronal", self)
@@ -67,6 +73,15 @@ class TriPlanarViewerWidget(QWidget):
             self.coronal_view,
             self.sagittal_view,
         )
+        self._drop_event_sources = (
+            self,
+            self.axial_view,
+            self.axial_view.image_label,
+            self.coronal_view,
+            self.coronal_view.image_label,
+            self.sagittal_view,
+            self.sagittal_view.image_label,
+        )
 
         for view in self._views:
             view.cursor_position_selected.connect(self._on_cursor_selected)
@@ -74,6 +89,8 @@ class TriPlanarViewerWidget(QWidget):
             view.zoom_factor_requested.connect(self.zoom_state.set_zoom_factor)
             view.patch_axis_size_requested.connect(self._on_patch_axis_size_requested)
             view.viewport_resized.connect(self._update_shared_base_scale)
+        for widget in self._drop_event_sources:
+            widget.installEventFilter(self)
         self.cursor_state.cursor_changed.connect(self._on_cursor_changed)
         self.zoom_state.zoom_changed.connect(self._on_zoom_changed)
 
@@ -241,6 +258,11 @@ class TriPlanarViewerWidget(QWidget):
         self._projection_enabled[orientation] = enabled
         self._update_projection_overrides()
 
+    def set_drop_loading_enabled(self, enabled: bool) -> None:
+        self._drop_loading_enabled = enabled
+        for widget in self._drop_event_sources:
+            widget.setAcceptDrops(enabled)
+
     def set_segmentation_overlay(
         self, segmentation_volume: NiftiLoadResult | None, opacity: float | None = None
     ) -> None:
@@ -269,6 +291,44 @@ class TriPlanarViewerWidget(QWidget):
     def set_segmentation_overlay_opacity(self, opacity: float) -> None:
         self._segmentation_opacity = min(max(opacity, 0.0), 1.0)
         self._apply_segmentation_overlay_to_views()
+
+    def dragEnterEvent(self, event: QDragEnterEvent) -> None:
+        if self._accept_drop_event(event):
+            return
+        super().dragEnterEvent(event)
+
+    def dragMoveEvent(self, event: QDragMoveEvent) -> None:
+        if self._accept_drop_event(event):
+            return
+        super().dragMoveEvent(event)
+
+    def dropEvent(self, event: QDropEvent) -> None:
+        dropped_path = self._dropped_nifti_path(event)
+        if dropped_path is None:
+            event.ignore()
+            return
+        event.acceptProposedAction()
+        self.nifti_file_dropped.emit(dropped_path)
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+        if watched in self._drop_event_sources:
+            if event.type() == QEvent.Type.DragEnter:
+                drag_enter_event = event if isinstance(event, QDragEnterEvent) else None
+                if drag_enter_event is not None and self._accept_drop_event(drag_enter_event):
+                    return True
+            elif event.type() == QEvent.Type.DragMove:
+                drag_move_event = event if isinstance(event, QDragMoveEvent) else None
+                if drag_move_event is not None and self._accept_drop_event(drag_move_event):
+                    return True
+            elif event.type() == QEvent.Type.Drop:
+                drop_event = event if isinstance(event, QDropEvent) else None
+                if drop_event is not None:
+                    dropped_path = self._dropped_nifti_path(drop_event)
+                    if dropped_path is not None:
+                        drop_event.acceptProposedAction()
+                        self.nifti_file_dropped.emit(dropped_path)
+                        return True
+        return super().eventFilter(watched, event)
 
     def _on_cursor_selected(self, x: int, y: int, z: int) -> None:
         self.cursor_state.set_cursor_position((x, y, z))
@@ -440,6 +500,23 @@ class TriPlanarViewerWidget(QWidget):
                 self._segmentation_opacity,
             )
         self._update_projection_overrides()
+
+    def _accept_drop_event(self, event: QDragEnterEvent | QDragMoveEvent) -> bool:
+        if self._dropped_nifti_path(event) is None:
+            event.ignore()
+            return False
+        event.acceptProposedAction()
+        return True
+
+    def _dropped_nifti_path(
+        self, event: QDragEnterEvent | QDragMoveEvent | QDropEvent
+    ) -> Path | None:
+        if not self._drop_loading_enabled:
+            return None
+        mime_data = event.mimeData()
+        if mime_data is None or not mime_data.hasUrls():
+            return None
+        return first_supported_local_nifti_path(mime_data.urls())
 
 
 def _project_oriented_volume(

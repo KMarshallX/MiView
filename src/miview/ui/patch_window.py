@@ -52,6 +52,7 @@ class PatchViewerWindow(QMainWindow):
         super().__init__(parent)
         self.setWindowTitle("Selected Patch")
         self.resize(900, 560)
+        self.setAcceptDrops(False)
 
         self._source_image_name = source_image_name
         self._source_image_path = source_image_path

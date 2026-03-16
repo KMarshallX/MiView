@@ -3,8 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 from uuid import uuid4
 
-from PySide6.QtCore import QTimer, Qt
-from PySide6.QtGui import QAction, QResizeEvent
+from PySide6.QtCore import QEvent, QObject, QPoint, QTimer, Qt
+from PySide6.QtGui import QAction, QDragEnterEvent, QDragMoveEvent, QDropEvent, QResizeEvent
 from PySide6.QtWidgets import (
     QApplication,
     QFileDialog,
@@ -27,6 +27,8 @@ from miview.state.contrast_state import ContrastState
 from miview.tools import apply_tool, derive_volume, get_tool
 from miview.ui.contrast_control_bar import ContrastControlBar
 from miview.ui.cursor_panel import CursorInspectionPanel
+from miview.ui.drop_load_choice_dialog import DropLoadChoice, DropLoadChoiceDialog
+from miview.ui.drop_loading import first_supported_local_nifti_path
 from miview.ui.patch_window import PatchViewerWindow
 from miview.ui.segmentation_config_window import SegmentationConfigWindow
 from miview.ui.tools_menu import build_tools_submenu, resolve_tool_parameters
@@ -62,7 +64,10 @@ class MainWindow(QMainWindow):
         self.loading_progress_bar = QProgressBar(self)
         self._loading_hide_timer = QTimer(self)
         self._patch_windows: list[PatchViewerWindow] = []
+        self._content_widget: QWidget | None = None
+        self._main_splitter: QSplitter | None = None
         self.segmentation_config_window = SegmentationConfigWindow(self)
+        self.setAcceptDrops(True)
         self._loading_hide_timer.setSingleShot(True)
         self._loading_hide_timer.timeout.connect(self._hide_loading_progress)
         self.segmentation_config_window.active_segmentation_changed.connect(
@@ -74,6 +79,7 @@ class MainWindow(QMainWindow):
         self.slice_viewer.cursor_inspection_changed.connect(
             self.cursor_panel.set_cursor_values
         )
+        self.slice_viewer.nifti_file_dropped.connect(self._on_viewer_nifti_file_dropped)
         self.slice_viewer.cursor_state.cursor_changed.connect(self._update_cursor_position)
         self.slice_viewer.patch_selection_changed.connect(self._on_patch_selection_changed)
         self.contrast_control_bar.window_changed.connect(self.contrast_state.set_window)
@@ -91,6 +97,7 @@ class MainWindow(QMainWindow):
 
         self._setup_central_layout()
         self._setup_menu()
+        self.slice_viewer.set_drop_loading_enabled(True)
         self.cursor_panel.set_patch_opacity(self.slice_viewer.patch_overlay_opacity())
         self.cursor_panel.set_patch_size_xyz(self.slice_viewer.patch_size_xyz())
         self.segmentation_config_window.set_opacity(self.state.segmentation_opacity)
@@ -109,6 +116,12 @@ class MainWindow(QMainWindow):
         splitter.addWidget(self.cursor_panel)
         splitter.setStretchFactor(0, 4)
         splitter.setStretchFactor(1, 1)
+        content_widget.setAcceptDrops(True)
+        splitter.setAcceptDrops(True)
+        content_widget.installEventFilter(self)
+        splitter.installEventFilter(self)
+        self._content_widget = content_widget
+        self._main_splitter = splitter
 
         content_layout.addWidget(self.contrast_control_bar)
         content_layout.addWidget(splitter, 1)
@@ -192,6 +205,43 @@ class MainWindow(QMainWindow):
         super().resizeEvent(event)
         self._font_scaler.apply()
 
+    def dragEnterEvent(self, event: QDragEnterEvent) -> None:
+        if self._accept_drop_for_viewer(event, self):
+            return
+        super().dragEnterEvent(event)
+
+    def dragMoveEvent(self, event: QDragMoveEvent) -> None:
+        if self._accept_drop_for_viewer(event, self):
+            return
+        super().dragMoveEvent(event)
+
+    def dropEvent(self, event: QDropEvent) -> None:
+        if self._handle_drop_for_viewer(event, self):
+            return
+        super().dropEvent(event)
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+        if watched in {self._content_widget, self._main_splitter}:
+            if event.type() == QEvent.Type.DragEnter:
+                drag_enter_event = event if isinstance(event, QDragEnterEvent) else None
+                if drag_enter_event is not None and self._accept_drop_for_viewer(
+                    drag_enter_event, watched
+                ):
+                    return True
+            elif event.type() == QEvent.Type.DragMove:
+                drag_move_event = event if isinstance(event, QDragMoveEvent) else None
+                if drag_move_event is not None and self._accept_drop_for_viewer(
+                    drag_move_event, watched
+                ):
+                    return True
+            elif event.type() == QEvent.Type.Drop:
+                drop_event = event if isinstance(event, QDropEvent) else None
+                if drop_event is not None and self._handle_drop_for_viewer(
+                    drop_event, watched
+                ):
+                    return True
+        return super().eventFilter(watched, event)
+
     def _on_open(self) -> None:
         file_filter = "NIfTI Files (*.nii *.nii.gz);;All Files (*)"
         selected_file, _ = QFileDialog.getOpenFileName(
@@ -204,42 +254,7 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("Open canceled")
             return
 
-        self._show_loading_progress()
-
-        try:
-            loaded = load_nifti(selected_file)
-        except (FileNotFoundError, ValueError) as exc:
-            QMessageBox.critical(self, "Open Failed", str(exc))
-            self.statusBar().showMessage("Open failed")
-            self._schedule_loading_progress_hide()
-            return
-
-        loaded_path = Path(selected_file)
-        try:
-            self.slice_viewer.load_volume(loaded)
-        except ValueError as exc:
-            QMessageBox.critical(self, "Open Failed", str(exc))
-            self.statusBar().showMessage("Open failed")
-            self._schedule_loading_progress_hide()
-            return
-
-        self.state.loaded_file_path = loaded_path
-        self.state.volume = loaded
-        self.state.cursor_position = self.slice_viewer.current_cursor_position()
-        self.state.selected_patch_bounds = None
-        self.state.selected_patch_data = None
-        cleared_count = self._reset_segmentation_session_for_loaded_image(loaded_path)
-        self._initialize_contrast_for_loaded_volume()
-
-        status_message = (
-            f"Loaded {loaded_path.name} | shape={loaded.shape} | dtype={loaded.dtype}"
-        )
-        if cleared_count > 0:
-            status_message = (
-                f"{status_message} | cleared {cleared_count} segmentation(s) from previous image"
-            )
-        self.statusBar().showMessage(status_message)
-        self._schedule_loading_progress_hide()
+        self._load_base_image_from_path(Path(selected_file))
 
     def _on_unload(self) -> None:
         self.slice_viewer.unload_volume()
@@ -437,41 +452,23 @@ class MainWindow(QMainWindow):
 
         loaded_count = 0
         for selected_file in selected_files:
-            seg_path = Path(selected_file)
-            try:
-                segmentation = load_nifti(seg_path)
-            except (FileNotFoundError, ValueError) as exc:
-                QMessageBox.warning(
-                    self,
-                    "Segmentation Load Failed",
-                    f"{seg_path.name}: {exc}",
-                )
-                continue
-
-            validation = validate_segmentation_compatibility(self.state.volume, segmentation)
-            if not validation.is_valid:
-                QMessageBox.warning(
-                    self,
-                    "Segmentation Metadata Mismatch",
-                    f"{seg_path.name}: {validation.message}",
-                )
-                continue
-
-            loaded_segmentation = LoadedSegmentation(
-                id=uuid4().hex,
-                path=seg_path,
-                volume=segmentation,
-            )
-            self.state.loaded_segmentations.append(loaded_segmentation)
-            loaded_count += 1
-
-            if self.state.active_segmentation_id is None:
-                self.state.active_segmentation_id = loaded_segmentation.id
+            if self._load_segmentation_from_path(Path(selected_file)):
+                loaded_count += 1
 
         self._apply_active_segmentation_overlay()
         self._refresh_segmentation_ui()
         if loaded_count > 0:
             self.statusBar().showMessage(f"Loaded {loaded_count} segmentation file(s)")
+
+    def _on_viewer_nifti_file_dropped(self, dropped_path: Path) -> None:
+        choice = self._prompt_drop_load_choice()
+        if choice is None:
+            self.statusBar().showMessage("Dropped file load canceled")
+            return
+        if choice == DropLoadChoice.BASE_IMAGE:
+            self._load_base_image_from_path(dropped_path)
+            return
+        self._load_segmentation_from_path(dropped_path)
 
     def _on_unload_current_segmentation(self) -> None:
         if self.state.active_segmentation_id is None:
@@ -613,3 +610,141 @@ class MainWindow(QMainWindow):
             patch_window.sync_patch_from_parent(
                 extract_patch(self.state.volume, bounds)
             )
+
+    def _accept_drop_for_viewer(
+        self,
+        event: QDragEnterEvent | QDragMoveEvent,
+        source_widget: QObject,
+    ) -> bool:
+        if self._dropped_nifti_path_for_viewer(event, source_widget) is None:
+            event.ignore()
+            return False
+        event.acceptProposedAction()
+        return True
+
+    def _handle_drop_for_viewer(
+        self,
+        event: QDropEvent,
+        source_widget: QObject,
+    ) -> bool:
+        dropped_path = self._dropped_nifti_path_for_viewer(event, source_widget)
+        if dropped_path is None:
+            event.ignore()
+            return False
+        event.acceptProposedAction()
+        self._on_viewer_nifti_file_dropped(dropped_path)
+        return True
+
+    def _dropped_nifti_path_for_viewer(
+        self,
+        event: QDragEnterEvent | QDragMoveEvent | QDropEvent,
+        source_widget: QObject,
+    ) -> Path | None:
+        if self._event_point_hits_slice_viewer(source_widget, event.position().toPoint()) is False:
+            return None
+        mime_data = event.mimeData()
+        if mime_data is None or not mime_data.hasUrls():
+            return None
+        return first_supported_local_nifti_path(mime_data.urls())
+
+    def _event_point_hits_slice_viewer(self, source_widget: QObject, point: QPoint) -> bool:
+        if not isinstance(source_widget, QWidget):
+            return False
+        viewer_top_left = self.slice_viewer.mapFromGlobal(source_widget.mapToGlobal(point))
+        return self.slice_viewer.rect().contains(viewer_top_left)
+
+    def _prompt_drop_load_choice(self) -> DropLoadChoice | None:
+        dialog = DropLoadChoiceDialog(
+            allow_segmentation=self.state.volume is not None,
+            parent=self,
+        )
+        if dialog.exec() != dialog.DialogCode.Accepted:
+            return None
+        return dialog.selected_choice()
+
+    def _load_base_image_from_path(self, image_path: Path) -> bool:
+        self._show_loading_progress()
+
+        try:
+            loaded = load_nifti(image_path)
+        except (FileNotFoundError, ValueError) as exc:
+            QMessageBox.critical(self, "Open Failed", str(exc))
+            self.statusBar().showMessage("Open failed")
+            self._schedule_loading_progress_hide()
+            return False
+
+        try:
+            self.slice_viewer.load_volume(loaded)
+        except ValueError as exc:
+            QMessageBox.critical(self, "Open Failed", str(exc))
+            self.statusBar().showMessage("Open failed")
+            self._schedule_loading_progress_hide()
+            return False
+
+        self.state.loaded_file_path = image_path
+        self.state.volume = loaded
+        self.state.cursor_position = self.slice_viewer.current_cursor_position()
+        self.state.selected_patch_bounds = None
+        self.state.selected_patch_data = None
+        cleared_count = self._reset_segmentation_session_for_loaded_image(image_path)
+        self._initialize_contrast_for_loaded_volume()
+
+        status_message = (
+            f"Loaded {image_path.name} | shape={loaded.shape} | dtype={loaded.dtype}"
+        )
+        if cleared_count > 0:
+            status_message = (
+                f"{status_message} | cleared {cleared_count} segmentation(s) from previous image"
+            )
+        self.statusBar().showMessage(status_message)
+        self._schedule_loading_progress_hide()
+        return True
+
+    def _load_segmentation_from_path(self, seg_path: Path) -> bool:
+        if self.state.volume is None or self.state.loaded_file_path is None:
+            QMessageBox.warning(
+                self,
+                "No Image Loaded",
+                "Load a base image before loading segmentations.",
+            )
+            self.statusBar().showMessage("Segmentation load failed")
+            return False
+
+        if self.state.segmentation_image_path != self.state.loaded_file_path:
+            self._reset_segmentation_session_for_loaded_image(self.state.loaded_file_path)
+
+        try:
+            segmentation = load_nifti(seg_path)
+        except (FileNotFoundError, ValueError) as exc:
+            QMessageBox.warning(
+                self,
+                "Segmentation Load Failed",
+                f"{seg_path.name}: {exc}",
+            )
+            self.statusBar().showMessage("Segmentation load failed")
+            return False
+
+        validation = validate_segmentation_compatibility(self.state.volume, segmentation)
+        if not validation.is_valid:
+            QMessageBox.warning(
+                self,
+                "Segmentation Metadata Mismatch",
+                f"{seg_path.name}: {validation.message}",
+            )
+            self.statusBar().showMessage("Segmentation load failed")
+            return False
+
+        loaded_segmentation = LoadedSegmentation(
+            id=uuid4().hex,
+            path=seg_path,
+            volume=segmentation,
+        )
+        self.state.loaded_segmentations.append(loaded_segmentation)
+
+        if self.state.active_segmentation_id is None:
+            self.state.active_segmentation_id = loaded_segmentation.id
+
+        self._apply_active_segmentation_overlay()
+        self._refresh_segmentation_ui()
+        self.statusBar().showMessage(f"Loaded segmentation {seg_path.name}")
+        return True
