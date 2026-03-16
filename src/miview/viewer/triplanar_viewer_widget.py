@@ -111,6 +111,9 @@ class TriPlanarViewerWidget(QWidget):
             )
 
         self._display_volume = build_oriented_volume(volume.data, volume.affine)
+        # Reset cursor state before reloading the views so the initial cursor
+        # is always re-emitted into the freshly cleared slice widgets.
+        self.cursor_state.clear()
         self.cursor_state.set_volume_shape(self._display_volume.source_shape)
         self.patch_selector.set_volume_shape(self._display_volume.source_shape)
         for view in self._views:
