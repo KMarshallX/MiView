@@ -1,0 +1,130 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  sanity:
+    name: Sanity Checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Verify wrapper scripts
+        run: |
+          test -f setup.sh
+          test -f run.sh
+          bash -n setup.sh
+          bash -n run.sh
+
+      - name: Validate requirements consistency
+        run: |
+          python - <<'PY'
+          import tomllib
+          from pathlib import Path
+
+          pyproject = tomllib.loads(Path('pyproject.toml').read_text())
+          pyproject_deps = set(pyproject['project']['dependencies'])
+          requirements_deps = {
+              line.strip()
+              for line in Path('requirements.txt').read_text().splitlines()
+              if line.strip() and not line.strip().startswith('#')
+          }
+
+          missing = pyproject_deps - requirements_deps
+          extra = requirements_deps - pyproject_deps
+          if missing or extra:
+              raise SystemExit(
+                  f"Dependency mismatch. Missing in requirements.txt: {sorted(missing)}; "
+                  f"extra in requirements.txt: {sorted(extra)}"
+              )
+          print('Dependency declarations are consistent.')
+          PY
+
+      - name: Python syntax compile smoke
+        run: python -m compileall -q src/miview
+
+  install-paths:
+    name: Install Path - ${{ matrix.path }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        path: [setup_sh, pyproject, requirements]
+    env:
+      QT_QPA_PLATFORM: offscreen
+      MIVIEW_SMOKE_TEST: "1"
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install using selected path
+        run: |
+          case "${{ matrix.path }}" in
+            setup_sh)
+              chmod +x setup.sh run.sh
+              bash setup.sh
+              ;;
+            pyproject)
+              python -m venv .venv-pyproject
+              .venv-pyproject/bin/python -m pip install --upgrade pip
+              .venv-pyproject/bin/python -m pip install -e .
+              ;;
+            requirements)
+              python -m venv .venv-requirements
+              .venv-requirements/bin/python -m pip install --upgrade pip
+              .venv-requirements/bin/python -m pip install -r requirements.txt
+              ;;
+            *)
+              echo "Unknown install path: ${{ matrix.path }}" >&2
+              exit 1
+              ;;
+          esac
+
+      - name: Import smoke test
+        run: |
+          case "${{ matrix.path }}" in
+            setup_sh)
+              PYTHON_BIN=".venv/bin/python"
+              ;;
+            pyproject)
+              PYTHON_BIN=".venv-pyproject/bin/python"
+              ;;
+            requirements)
+              PYTHON_BIN=".venv-requirements/bin/python"
+              ;;
+          esac
+
+          PYTHONPATH="src${PYTHONPATH:+:$PYTHONPATH}" "$PYTHON_BIN" - <<'PY'
+          import miview.main
+          import miview.ui.main_window
+          import miview.tools.processing
+          print('Key module imports succeeded.')
+          PY
+
+      - name: Runtime smoke test (app runnable)
+        run: |
+          case "${{ matrix.path }}" in
+            setup_sh)
+              bash run.sh
+              ;;
+            pyproject)
+              .venv-pyproject/bin/python -m miview
+              ;;
+            requirements)
+              PYTHONPATH="src${PYTHONPATH:+:$PYTHONPATH}" .venv-requirements/bin/python -m miview
+              ;;
+          esac
