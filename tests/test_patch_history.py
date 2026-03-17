@@ -10,7 +10,7 @@ from miview.tools import apply_tool, get_tool
 def _apply_operation(
     patch_state: np.ndarray,
     operation_type: str,
-    parameters: dict[str, int | float],
+    parameters: dict[str, int | float | bool | str],
 ) -> np.ndarray:
     return apply_tool(operation_type, patch_state, parameters)
 
@@ -19,7 +19,7 @@ def _record_result(
     manager: PatchHistoryManager,
     current: np.ndarray,
     operation_type: str,
-    parameters: dict[str, int | float],
+    parameters: dict[str, int | float | bool | str],
 ) -> tuple[np.ndarray, str]:
     tool = get_tool(operation_type)
     new_state = apply_tool(operation_type, current, parameters)

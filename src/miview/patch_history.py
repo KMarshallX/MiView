@@ -7,7 +7,7 @@ from uuid import uuid4
 
 import numpy as np
 
-PatchApplyOperation = Callable[[np.ndarray, str, dict[str, int | float]], np.ndarray]
+PatchApplyOperation = Callable[[np.ndarray, str, dict[str, int | float | bool | str]], np.ndarray]
 
 
 @dataclass
@@ -19,7 +19,7 @@ class PatchHistoryNode:
     timestamp: datetime
     operation_type: str
     operation_label: str
-    operation_parameters: dict[str, int | float]
+    operation_parameters: dict[str, int | float | bool | str]
     parameter_summary: str
     is_checkpoint: bool
     checkpoint_patch: np.ndarray | None = None
@@ -142,7 +142,7 @@ class PatchHistoryManager:
         self,
         operation_type: str,
         operation_label: str,
-        operation_parameters: dict[str, int | float],
+        operation_parameters: dict[str, int | float | bool | str],
         resulting_patch: np.ndarray,
         *,
         parameter_summary: str = "",

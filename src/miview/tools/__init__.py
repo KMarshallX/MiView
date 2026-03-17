@@ -1,4 +1,5 @@
 from .registry import (
+    ParameterValue,
     ToolDefinition,
     ToolParameter,
     all_tools,
@@ -9,6 +10,7 @@ from .registry import (
 from .volume import derive_volume
 
 __all__ = [
+    "ParameterValue",
     "ToolDefinition",
     "ToolParameter",
     "all_tools",

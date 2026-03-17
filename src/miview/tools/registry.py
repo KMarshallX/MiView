@@ -6,6 +6,9 @@ from typing import Callable, Literal
 import numpy as np
 
 from miview.tools.processing import (
+    frangi_filter,
+    gaussian_filter,
+    hessian_filter,
     invert_divide,
     invert_minus,
     local_normalize,
@@ -13,7 +16,8 @@ from miview.tools.processing import (
     standardize,
 )
 
-ParameterType = Literal["int", "float"]
+ParameterType = Literal["int", "float", "bool", "string"]
+ParameterValue = int | float | bool | str
 
 
 @dataclass(frozen=True)
@@ -21,13 +25,15 @@ class ToolParameter:
     key: str
     label: str
     type: ParameterType
-    default: int | float
+    default: ParameterValue
     prompt: bool = True
     minimum: int | float | None = None
     maximum: int | float | None = None
     decimals: int = 3
     require_odd: bool = False
     default_from_data: Literal["none", "min", "max"] = "none"
+    choices: tuple[str, ...] = ()
+    help_text: str = ""
 
 
 @dataclass(frozen=True)
@@ -36,7 +42,7 @@ class ToolDefinition:
     label: str
     description: str
     parameters: tuple[ToolParameter, ...]
-    apply: Callable[[np.ndarray, dict[str, int | float]], np.ndarray]
+    apply: Callable[[np.ndarray, dict[str, ParameterValue]], np.ndarray]
 
 
 def all_tools() -> tuple[ToolDefinition, ...]:
@@ -53,7 +59,7 @@ def get_tool(tool_id: str) -> ToolDefinition:
 def apply_tool(
     tool_id: str,
     data: np.ndarray,
-    parameters: dict[str, int | float],
+    parameters: dict[str, ParameterValue],
 ) -> np.ndarray:
     tool = get_tool(tool_id)
     return np.asarray(tool.apply(data, parameters), dtype=np.float32)
@@ -62,12 +68,12 @@ def apply_tool(
 def default_parameters_for_data(
     tool: ToolDefinition,
     data: np.ndarray,
-) -> dict[str, int | float]:
+) -> dict[str, ParameterValue]:
     source = np.asarray(data)
     source_min = float(np.min(source))
     source_max = float(np.max(source))
 
-    defaults: dict[str, int | float] = {}
+    defaults: dict[str, ParameterValue] = {}
     for parameter in tool.parameters:
         if parameter.default_from_data == "min":
             defaults[parameter.key] = (
@@ -150,6 +156,101 @@ _TOOL_DEFINITIONS: tuple[ToolDefinition, ...] = (
         apply=lambda data, params: invert_divide(
             data,
             numerator=float(params["numerator"]),
+        ),
+    ),
+    ToolDefinition(
+        id="gaussian_filter",
+        label="Gaussian Filter",
+        description="Smooth intensities with Gaussian filtering.",
+        parameters=(
+            ToolParameter(
+                key="sigma",
+                label="Sigma",
+                type="string",
+                default="1.0",
+                help_text=(
+                    "Use a single value like 1.0, or comma-separated values "
+                    "like 1.0,1.5,2.0 for per-axis sigma."
+                ),
+            ),
+            ToolParameter(
+                key="mode",
+                label="Border mode",
+                type="string",
+                default="reflect",
+                choices=("reflect", "constant", "nearest", "mirror", "wrap"),
+            ),
+        ),
+        apply=lambda data, params: gaussian_filter(
+            data,
+            sigma=str(params["sigma"]),
+            mode=str(params["mode"]),
+        ),
+    ),
+    ToolDefinition(
+        id="hessian_filter",
+        label="Hessian Filter",
+        description="Enhance ridge-like structures with Hessian vesselness.",
+        parameters=(
+            ToolParameter(
+                key="sigma",
+                label="Sigma",
+                type="float",
+                default=1.0,
+                minimum=0.001,
+            ),
+            ToolParameter(
+                key="gamma",
+                label="Gamma",
+                type="float",
+                default=15.0,
+                minimum=0.001,
+            ),
+            ToolParameter(
+                key="black_ridges",
+                label="Detect black ridges",
+                type="bool",
+                default=True,
+            ),
+        ),
+        apply=lambda data, params: hessian_filter(
+            data,
+            sigma=float(params["sigma"]),
+            gamma=float(params["gamma"]),
+            black_ridges=bool(params["black_ridges"]),
+        ),
+    ),
+    ToolDefinition(
+        id="frangi_filter",
+        label="Frangi Filter",
+        description="Enhance vessel-like structures with Frangi filtering.",
+        parameters=(
+            ToolParameter(
+                key="sigma",
+                label="Sigma",
+                type="float",
+                default=1.0,
+                minimum=0.001,
+            ),
+            ToolParameter(
+                key="gamma",
+                label="Gamma",
+                type="float",
+                default=15.0,
+                minimum=0.001,
+            ),
+            ToolParameter(
+                key="black_ridges",
+                label="Detect black ridges",
+                type="bool",
+                default=True,
+            ),
+        ),
+        apply=lambda data, params: frangi_filter(
+            data,
+            sigma=float(params["sigma"]),
+            gamma=float(params["gamma"]),
+            black_ridges=bool(params["black_ridges"]),
         ),
     ),
 )

@@ -536,7 +536,7 @@ class PatchViewerWindow(QMainWindow):
         self,
         patch_state: np.ndarray,
         operation_type: str,
-        parameters: dict[str, int | float],
+        parameters: dict[str, int | float | bool | str],
     ) -> np.ndarray:
         utility = patch_utility_from_tool(operation_type)
         return utility.apply(patch_state, parameters)

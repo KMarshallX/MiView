@@ -5,14 +5,14 @@ from dataclasses import dataclass
 from PySide6.QtWidgets import QMessageBox, QWidget
 
 from miview.nifti_io import NiftiLoadResult
-from miview.tools import apply_tool, derive_volume
+from miview.tools import ParameterValue, apply_tool, derive_volume
 from miview.ui.tools_menu import resolve_tool_parameters
 
 
 @dataclass(frozen=True)
 class ToolApplicationResult:
     transformed_volume: NiftiLoadResult
-    parameters: dict[str, int | float]
+    parameters: dict[str, ParameterValue]
 
 
 def apply_tool_to_volume(

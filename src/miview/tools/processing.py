@@ -76,6 +76,68 @@ def invert_divide(
     return np.float32(numerator) / safe_denominator
 
 
+def gaussian_filter(
+    data: np.ndarray,
+    sigma: str | float,
+    mode: str = "reflect",
+) -> np.ndarray:
+    """Apply a Gaussian filter with scalar or per-axis sigma."""
+    gaussian, _, _ = _require_skimage_filters()
+    sigmas = _parse_sigma_value(sigma)
+    validated_mode = _validate_border_mode(mode)
+    source = np.asarray(data, dtype=np.float32)
+    return np.asarray(
+        gaussian(source, sigma=sigmas, mode=validated_mode, preserve_range=True),
+        dtype=np.float32,
+    )
+
+
+def hessian_filter(
+    data: np.ndarray,
+    sigma: float,
+    gamma: float,
+    black_ridges: bool,
+) -> np.ndarray:
+    """Apply a Hessian-based vesselness filter at one scale."""
+    _, hessian, _ = _require_skimage_filters()
+    parsed_sigma = _validate_positive_float(sigma, "sigma")
+    parsed_gamma = _validate_positive_float(gamma, "gamma")
+    source = np.asarray(data, dtype=np.float32)
+    return np.asarray(
+        hessian(
+            source,
+            sigmas=[parsed_sigma],
+            gamma=parsed_gamma,
+            black_ridges=bool(black_ridges),
+            mode="reflect",
+        ),
+        dtype=np.float32,
+    )
+
+
+def frangi_filter(
+    data: np.ndarray,
+    sigma: float,
+    gamma: float,
+    black_ridges: bool,
+) -> np.ndarray:
+    """Apply a Frangi vesselness filter at one scale."""
+    _, _, frangi = _require_skimage_filters()
+    parsed_sigma = _validate_positive_float(sigma, "sigma")
+    parsed_gamma = _validate_positive_float(gamma, "gamma")
+    source = np.asarray(data, dtype=np.float32)
+    return np.asarray(
+        frangi(
+            source,
+            sigmas=[parsed_sigma],
+            gamma=parsed_gamma,
+            black_ridges=bool(black_ridges),
+            mode="reflect",
+        ),
+        dtype=np.float32,
+    )
+
+
 def _box_filter_mean_3d(padded: np.ndarray, window_size: int) -> np.ndarray:
     summed = _moving_sum_axis(_moving_sum_axis(_moving_sum_axis(
         padded,
@@ -97,3 +159,55 @@ def _moving_sum_axis(values: np.ndarray, window_size: int, axis: int) -> np.ndar
     upper[axis] = slice(window_size, None)
     lower[axis] = slice(None, -window_size)
     return cumsum[tuple(upper)] - cumsum[tuple(lower)]
+
+
+def _parse_sigma_value(sigma: str | float) -> float | tuple[float, ...]:
+    if isinstance(sigma, (float, int)):
+        return _validate_positive_float(float(sigma), "sigma")
+
+    sigma_text = str(sigma).strip()
+    if not sigma_text:
+        raise ValueError("Sigma must not be empty.")
+
+    parts = [part.strip() for part in sigma_text.split(",") if part.strip()]
+    if not parts:
+        raise ValueError("Sigma must be a float or comma-separated floats.")
+
+    parsed_values: list[float] = []
+    for part in parts:
+        try:
+            parsed_float = float(part)
+        except ValueError as exc:
+            raise ValueError(
+                "Sigma must be a float or comma-separated floats."
+            ) from exc
+        parsed_values.append(_validate_positive_float(parsed_float, "sigma"))
+    parsed = tuple(parsed_values)
+    return parsed[0] if len(parsed) == 1 else parsed
+
+
+def _validate_border_mode(mode: str) -> str:
+    valid_modes = {"reflect", "constant", "nearest", "mirror", "wrap"}
+    cleaned = str(mode).strip().lower()
+    if cleaned not in valid_modes:
+        raise ValueError(
+            "Border mode must be one of: reflect, constant, nearest, mirror, wrap."
+        )
+    return cleaned
+
+
+def _validate_positive_float(value: float, label: str) -> float:
+    parsed = float(value)
+    if parsed <= 0.0:
+        raise ValueError(f"{label} must be > 0.")
+    return parsed
+
+
+def _require_skimage_filters():
+    try:
+        from skimage.filters import frangi, gaussian, hessian
+    except ImportError as exc:
+        raise ValueError(
+            "This utility requires scikit-image. Install it with: pip install scikit-image"
+        ) from exc
+    return gaussian, hessian, frangi

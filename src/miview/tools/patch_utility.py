@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from miview.tools.registry import apply_tool, get_tool
+from miview.tools.registry import ParameterValue, apply_tool, get_tool
 
 
 @dataclass(frozen=True)
@@ -15,11 +15,11 @@ class RegistryPatchUtility:
     def apply(
         self,
         patch_state: np.ndarray,
-        params: dict[str, int | float],
+        params: dict[str, ParameterValue],
     ) -> np.ndarray:
         return apply_tool(self.utility_id, patch_state, params)
 
-    def summarize(self, params: dict[str, int | float]) -> str:
+    def summarize(self, params: dict[str, ParameterValue]) -> str:
         if not params:
             return "No parameters"
         ordered_items = sorted(params.items(), key=lambda item: item[0])

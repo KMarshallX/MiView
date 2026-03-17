@@ -15,7 +15,8 @@ authors = [
 dependencies = [
   "PySide6>=6.6",
   "nibabel>=5.2",
-  "numpy>=1.26"
+  "numpy>=1.26",
+  "scikit-image>=0.23"
 ]
 
 [project.optional-dependencies]
