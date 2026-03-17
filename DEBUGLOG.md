@@ -1,13 +1,13 @@
 # DEBUGLOG.md
 
 ## Purpose
-This file is a drag-and-drop debugging handoff for MiView.
+This file is a drag-and-drop debugging handoff for MipView.
 
 It is intended to help the next debugging session continue from the current state without repeating prior work or assuming the issue is solved.
 
 ## Scope
 Feature under investigation:
-- Dragging a local `.nii` or `.nii.gz` file onto the main window tri-planar viewer should trigger MiView's existing dropped-file flow.
+- Dragging a local `.nii` or `.nii.gz` file onto the main window tri-planar viewer should trigger MipView's existing dropped-file flow.
 - After drop, the user should see the minimal choice dialog:
   - `Base Image`
   - `Segmentation`
@@ -30,7 +30,7 @@ Important:
 
 ### 1. Added minimal drop-choice UI
 File:
-- `src/miview/ui/drop_load_choice_dialog.py`
+- `src/mipview/ui/drop_load_choice_dialog.py`
 
 What was added:
 - `DropLoadChoice`
@@ -43,7 +43,7 @@ Intent:
 
 ### 2. Added drop file helpers
 File:
-- `src/miview/ui/drop_loading.py`
+- `src/mipview/ui/drop_loading.py`
 
 What was added:
 - `is_supported_nifti_path(path)`
@@ -57,7 +57,7 @@ Current behavior:
 
 ### 3. Refactored main-window loading flow
 File:
-- `src/miview/ui/main_window.py`
+- `src/mipview/ui/main_window.py`
 
 What was added/refactored:
 - `self.slice_viewer.nifti_file_dropped.connect(self._on_viewer_nifti_file_dropped)`
@@ -76,7 +76,7 @@ This part is likely not the main issue:
 
 ### 4. Added drag/drop handling inside the tri-planar viewer
 File:
-- `src/miview/viewer/triplanar_viewer_widget.py`
+- `src/mipview/viewer/triplanar_viewer_widget.py`
 
 What was added:
 - Signal: `nifti_file_dropped`
@@ -100,7 +100,7 @@ Intent:
 
 ### 5. Added drag/drop handling at main-window/container level
 File:
-- `src/miview/ui/main_window.py`
+- `src/mipview/ui/main_window.py`
 
 What was added:
 - `self.setAcceptDrops(True)`
@@ -120,7 +120,7 @@ Intent:
 
 ### 6. Explicitly disabled drops in the patch window
 File:
-- `src/miview/ui/patch_window.py`
+- `src/mipview/ui/patch_window.py`
 
 What was added:
 - `self.setAcceptDrops(False)`
@@ -198,11 +198,11 @@ Even though the code now calls `acceptProposedAction()` in multiple places, the 
 ## Files, Classes, And Functions To Inspect Next
 
 ### Main drag/drop files
-- `src/miview/ui/main_window.py`
-- `src/miview/viewer/triplanar_viewer_widget.py`
-- `src/miview/viewer/slice_viewer_widget.py`
-- `src/miview/ui/drop_loading.py`
-- `src/miview/ui/patch_window.py`
+- `src/mipview/ui/main_window.py`
+- `src/mipview/viewer/triplanar_viewer_widget.py`
+- `src/mipview/viewer/slice_viewer_widget.py`
+- `src/mipview/ui/drop_loading.py`
+- `src/mipview/ui/patch_window.py`
 
 ### Key classes
 - `MainWindow`

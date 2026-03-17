@@ -2,7 +2,14 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$SCRIPT_DIR"
+COMMON_HELPERS="$SCRIPT_DIR/scripts/bootstrap_helpers.sh"
+if [[ ! -f "$COMMON_HELPERS" ]]; then
+  echo "Error: Missing bootstrap helpers at $COMMON_HELPERS" >&2
+  exit 1
+fi
+source "$COMMON_HELPERS"
+
+PROJECT_ROOT="$(resolve_project_root_from_script "${BASH_SOURCE[0]}")"
 PYPROJECT_PATH="$PROJECT_ROOT/pyproject.toml"
 VENV_DIR="$PROJECT_ROOT/.venv"
 
@@ -15,25 +22,17 @@ if [[ ! -f "$PYPROJECT_PATH" ]]; then
   fail "Missing dependency definition: $PYPROJECT_PATH"
 fi
 
-if command -v python3 >/dev/null 2>&1; then
-  SYSTEM_PYTHON="python3"
-elif command -v python >/dev/null 2>&1; then
-  SYSTEM_PYTHON="python"
-else
+if ! SYSTEM_PYTHON="$(detect_python_bin)"; then
   fail "Python is not installed or not on PATH. Install Python 3.11+ first."
 fi
 
-if ! "$SYSTEM_PYTHON" - <<'PY' >/dev/null 2>&1
-import sys
-raise SystemExit(0 if sys.version_info >= (3, 11) else 1)
-PY
-then
-  fail "MiView requires Python 3.11 or newer."
+if ! require_python_min_version "$SYSTEM_PYTHON" 3 11; then
+  fail "MipView requires Python 3.11 or newer."
 fi
 
 cd "$PROJECT_ROOT"
 
-echo "Setting up MiView in $PROJECT_ROOT"
+echo "Setting up MipView in $PROJECT_ROOT"
 
 if [[ ! -d "$VENV_DIR" ]]; then
   echo "Creating virtual environment at $VENV_DIR"

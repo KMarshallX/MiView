@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from miview.tools.processing import (
+from mipview.tools.processing import (
     frangi_filter,
     gaussian_filter,
     hessian_filter,
@@ -13,7 +13,7 @@ from miview.tools.processing import (
     normalize,
     standardize,
 )
-from miview.tools.registry import all_tools, apply_tool
+from mipview.tools.registry import all_tools, apply_tool
 
 
 def test_normalize_maps_data_to_zero_one() -> None:
@@ -63,7 +63,7 @@ def test_gaussian_filter_accepts_scalar_or_sequence_sigma(monkeypatch: pytest.Mo
         return np.asarray(data, dtype=np.float32) + np.float32(1.0)
 
     monkeypatch.setattr(
-        "miview.tools.processing._require_skimage_filters",
+        "mipview.tools.processing._require_skimage_filters",
         lambda: (fake_gaussian, None, None),
     )
 
@@ -102,7 +102,7 @@ def test_hessian_and_frangi_filters_use_expected_arguments(
         return np.asarray(data, dtype=np.float32) + np.float32(3.0)
 
     monkeypatch.setattr(
-        "miview.tools.processing._require_skimage_filters",
+        "mipview.tools.processing._require_skimage_filters",
         lambda: (None, fake_hessian, fake_frangi),
     )
 

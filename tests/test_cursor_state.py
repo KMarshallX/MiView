@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from miview.state.cursor_state import CursorState
+from mipview.state.cursor_state import CursorState
 
 
 def test_cursor_state_clamps_and_emits_once() -> None:

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from miview.state.contrast_state import ContrastState
+from mipview.state.contrast_state import ContrastState
 
 
 def test_contrast_state_window_clamps_to_available_range() -> None:

@@ -3,8 +3,8 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from miview.patch_history import PatchHistoryManager
-from miview.tools import apply_tool, get_tool
+from mipview.patch_history import PatchHistoryManager
+from mipview.tools import apply_tool, get_tool
 
 
 def _apply_operation(

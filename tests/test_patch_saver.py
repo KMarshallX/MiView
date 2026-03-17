@@ -3,8 +3,8 @@ from __future__ import annotations
 import nibabel as nib
 import numpy as np
 
-from miview.nifti_io import NiftiLoadResult
-from miview.patch_saver import build_patch_default_filename, save_patch_nifti
+from mipview.nifti_io import NiftiLoadResult
+from mipview.patch_saver import build_patch_default_filename, save_patch_nifti
 
 
 def test_build_patch_default_filename_includes_source_center_size() -> None:

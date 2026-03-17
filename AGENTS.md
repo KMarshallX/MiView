@@ -1,7 +1,7 @@
 # AGENTS.md
 
 ## Project
-**MiView** is a lightweight Linux-first desktop visualization tool for `.nii` / `.nii.gz` medical images.
+**MipView** is a lightweight Linux-first desktop visualization tool for `.nii` / `.nii.gz` medical images.
 
 Its primary purpose is to support:
 1. image visualization in an ITK-SNAP-inspired GUI layout,
@@ -72,7 +72,7 @@ Do not introduce heavy additional dependencies unless clearly justified.
 ---
 
 ## Current Project Scope
-MiView should be developed in milestones.
+MipView should be developed in milestones.
 
 ### Milestone 1 — Core Viewer
 Implemented:
@@ -167,7 +167,7 @@ Do **not** add these unless explicitly requested:
 - radiomics frameworks
 - model training or inference pipelines under the viewer unless explicitly requested
 
-MiView is **not** intended to become a full medical imaging platform in the early stages.
+MipView is **not** intended to become a full medical imaging platform in the early stages.
 
 ---
 
@@ -433,7 +433,7 @@ When given a task:
 
 If a request is ambiguous, prefer the interpretation that:
 - preserves scope,
-- keeps MiView minimal,
+- keeps MipView minimal,
 - supports the current milestone,
 - and does not silently expand into editing or workflow automation features.
 
@@ -446,7 +446,7 @@ Act like a careful contributor to a focused research tool:
 - implementation-oriented,
 - and resistant to unnecessary scope growth.
 
-MiView should become a reliable small tool before it becomes a feature-rich one.
+MipView should become a reliable small tool before it becomes a feature-rich one.
 
 ## Important
 - Do not implement features that were not explicitly requested.

@@ -9,15 +9,15 @@ import nibabel as nib
 import numpy as np
 import pytest
 
-from miview.nifti_io import NiftiLoadResult
-from miview.tools import derive_volume
-from miview.ui.drop_loading import (
+from mipview.nifti_io import NiftiLoadResult
+from mipview.tools import derive_volume
+from mipview.ui.drop_loading import (
     first_supported_local_nifti_path,
     is_supported_nifti_path,
 )
-from miview.ui.main_window import MainWindow
-from miview.ui.patch_window import PatchViewerWindow
-from miview.viewer.triplanar_viewer_widget import TriPlanarViewerWidget
+from mipview.ui.main_window import MainWindow
+from mipview.ui.patch_window import PatchViewerWindow
+from mipview.viewer.triplanar_viewer_widget import TriPlanarViewerWidget
 
 
 def _build_test_volume(shape: tuple[int, int, int] = (3, 3, 3)) -> NiftiLoadResult:

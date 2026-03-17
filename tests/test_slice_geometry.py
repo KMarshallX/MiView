@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from miview.viewer.slice_geometry import (
+from mipview.viewer.slice_geometry import (
     compute_display_rect,
     compute_shared_base_scale,
     center_cursor_for_volume,

@@ -3,9 +3,9 @@ from __future__ import annotations
 import nibabel as nib
 import numpy as np
 
-from miview.nifti_io import NiftiLoadResult
-from miview.patch_extractor import extract_patch
-from miview.patch_selector import PatchBounds
+from mipview.nifti_io import NiftiLoadResult
+from mipview.patch_extractor import extract_patch
+from mipview.patch_selector import PatchBounds
 
 
 def test_extract_patch_returns_data_and_shifted_affine() -> None:

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from miview.patch_selector import (
+from mipview.patch_selector import (
     PatchBounds,
     PatchSelector,
     axis_for_resize_edge,
@@ -12,7 +12,7 @@ from miview.patch_selector import (
     resized_axis_size_from_edge,
     source_bounds_to_display_bounds,
 )
-from miview.viewer.oriented_volume import build_oriented_volume
+from mipview.viewer.oriented_volume import build_oriented_volume
 
 
 def test_compute_patch_bounds_uses_centered_clipped_half_open_intervals() -> None:

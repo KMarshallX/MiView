@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from miview.state.zoom_state import ZoomState
+from mipview.state.zoom_state import ZoomState
 
 
 def test_zoom_state_clamps_and_emits() -> None:

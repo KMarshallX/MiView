@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from miview.viewer.oriented_volume import build_oriented_volume
+from mipview.viewer.oriented_volume import build_oriented_volume
 
 
 def test_build_oriented_volume_reorients_to_canonical_ras() -> None:

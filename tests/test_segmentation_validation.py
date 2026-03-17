@@ -3,8 +3,8 @@ from __future__ import annotations
 import nibabel as nib
 import numpy as np
 
-from miview.nifti_io import NiftiLoadResult
-from miview.segmentation_validation import validate_segmentation_compatibility
+from mipview.nifti_io import NiftiLoadResult
+from mipview.segmentation_validation import validate_segmentation_compatibility
 
 
 def _make_volume(

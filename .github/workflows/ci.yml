@@ -49,7 +49,7 @@ jobs:
           PY
 
       - name: Python syntax compile smoke
-        run: python -m compileall -q src/miview
+        run: python -m compileall -q src/mipview
 
   install-paths:
     name: Install Path - ${{ matrix.path }}
@@ -60,7 +60,7 @@ jobs:
         path: [setup_sh, pyproject, requirements]
     env:
       QT_QPA_PLATFORM: offscreen
-      MIVIEW_SMOKE_TEST: "1"
+      MIPVIEW_SMOKE_TEST: "1"
       PIP_DISABLE_PIP_VERSION_CHECK: "1"
     steps:
       - name: Checkout
@@ -109,9 +109,9 @@ jobs:
           esac
 
           PYTHONPATH="src${PYTHONPATH:+:$PYTHONPATH}" "$PYTHON_BIN" - <<'PY'
-          import miview.main
-          import miview.ui.main_window
-          import miview.tools.processing
+          import mipview.main
+          import mipview.ui.main_window
+          import mipview.tools.processing
           print('Key module imports succeeded.')
           PY
 
@@ -122,9 +122,9 @@ jobs:
               bash run.sh
               ;;
             pyproject)
-              .venv-pyproject/bin/python -m miview
+              .venv-pyproject/bin/python -m mipview
               ;;
             requirements)
-              PYTHONPATH="src${PYTHONPATH:+:$PYTHONPATH}" .venv-requirements/bin/python -m miview
+              PYTHONPATH="src${PYTHONPATH:+:$PYTHONPATH}" .venv-requirements/bin/python -m mipview
               ;;
           esac

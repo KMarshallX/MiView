@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from miview.viewer.intensity import (
+from mipview.viewer.intensity import (
     normalize_slice_to_uint8,
     robust_auto_window,
     volume_intensity_range,
