@@ -59,6 +59,12 @@ For Docker-oriented flow:
 CI note:
 - GitHub Actions validates three install paths (`setup.sh`, `pip install -e .`, and `pip install -r requirements.txt`) and runs a headless startup smoke test for each.
 
+## Branch And Release Workflow
+
+- `development`: active feature development and testing branch.
+- `master`: stable source branch for releases.
+- Pull requests should be merged from `development` into `master` for stable releases.
+
 ## Code Structure
 
 The current codebase is organized around a small top-level `mipview` package:

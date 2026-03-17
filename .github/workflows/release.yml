@@ -1,0 +1,54 @@
+name: Release
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Validate Version And Publish Release
+    if: >
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'master'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout master commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Validate patch-only release version
+        id: version_check
+        run: |
+          output="$(python scripts/validate_release_version.py)"
+          echo "$output"
+          version="$(echo "$output" | awk -F= '/^VERSION=/{print $2}')"
+          tag="$(echo "$output" | awk -F= '/^TAG=/{print $2}')"
+
+          if [ -z "$version" ] || [ -z "$tag" ]; then
+            echo "Failed to parse validated version/tag output." >&2
+            exit 1
+          fi
+
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version_check.outputs.tag }}
+          target_commitish: ${{ github.event.workflow_run.head_sha }}
+          generate_release_notes: true
+          name: Release ${{ steps.version_check.outputs.tag }}
