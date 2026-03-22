@@ -6,4 +6,7 @@ sample_data/
 *.pyo
 *.pyd
 
+.venv
+/src/mipview.egg-info
+
 debug.ipynb
