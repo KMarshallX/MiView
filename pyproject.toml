@@ -26,7 +26,6 @@ dev = [
 
 [project.scripts]
 mipview = "mipview.main:main"
-miview = "mipview.main:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
