@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
 class CursorInspectionPanel(QWidget):
     """Right-side panel for cursor/voxel readouts."""
 
+    patch_activation_toggled = Signal(bool)
     patch_opacity_changed = Signal(float)
     patch_size_changed = Signal(int, int, int)
     select_patch_requested = Signal()
@@ -43,6 +44,9 @@ class CursorInspectionPanel(QWidget):
 
         self.patch_group = QGroupBox("Patch Selection", self)
         patch_form = QFormLayout(self.patch_group)
+        self.patch_activation_button = QPushButton("Enable", self.patch_group)
+        self.patch_activation_button.setCheckable(True)
+        self.patch_activation_button.toggled.connect(self._on_patch_activation_toggled)
         self.patch_opacity_slider = QSlider(Qt.Orientation.Horizontal, self.patch_group)
         self.patch_opacity_slider.setRange(0, 100)
         self.patch_opacity_slider.setValue(50)
@@ -70,6 +74,7 @@ class CursorInspectionPanel(QWidget):
         self.select_patch_button.clicked.connect(self.select_patch_requested.emit)
         self.find_patch_box_button = QPushButton("Find Patch Box", self.patch_group)
         self.find_patch_box_button.clicked.connect(self.find_patch_box_requested.emit)
+        patch_form.addRow(self.patch_activation_button)
         patch_form.addRow("Opacity:", self.patch_opacity_slider)
         patch_form.addRow("Width (LR / X):", self.patch_width_spinbox)
         patch_form.addRow("Height (AP / Y):", self.patch_height_spinbox)
@@ -83,7 +88,9 @@ class CursorInspectionPanel(QWidget):
         layout.addStretch(1)
         layout.setContentsMargins(8, 8, 8, 8)
 
-        self.set_patch_controls_visible(False)
+        self.set_patch_controls_enabled(False)
+        self.set_patch_selection_active(False)
+        self.set_patch_activation_available(False)
 
     def set_cursor_values(
         self, x: int | None, y: int | None, z: int | None, intensity: float | int | None
@@ -106,14 +113,29 @@ class CursorInspectionPanel(QWidget):
 
     def set_patch_controls_visible(self, visible: bool) -> None:
         self.patch_group.setVisible(visible)
+
+    def set_patch_controls_enabled(self, enabled: bool) -> None:
         for widget in self._patch_control_widgets():
-            widget.setEnabled(visible)
+            widget.setEnabled(enabled)
+
+    def set_patch_activation_available(self, available: bool) -> None:
+        self.patch_activation_button.setEnabled(available)
+
+    def set_patch_selection_active(self, active: bool) -> None:
+        was_blocked = self.patch_activation_button.blockSignals(True)
+        self.patch_activation_button.setChecked(active)
+        self.patch_activation_button.setText("Disable" if active else "Enable")
+        self.patch_activation_button.blockSignals(was_blocked)
 
     def set_patch_opacity(self, opacity: float) -> None:
         slider_value = int(round(min(max(opacity, 0.0), 1.0) * 100))
         was_blocked = self.patch_opacity_slider.blockSignals(True)
         self.patch_opacity_slider.setValue(slider_value)
         self.patch_opacity_slider.blockSignals(was_blocked)
+
+    def _on_patch_activation_toggled(self, active: bool) -> None:
+        self.patch_activation_button.setText("Disable" if active else "Enable")
+        self.patch_activation_toggled.emit(active)
 
     def _on_opacity_slider_changed(self, slider_value: int) -> None:
         self.patch_opacity_changed.emit(slider_value / 100.0)
