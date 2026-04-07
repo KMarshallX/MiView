@@ -8,5 +8,6 @@ sample_data/
 
 .venv
 /src/mipview.egg-info
+/tests/
 
 debug.ipynb

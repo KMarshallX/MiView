@@ -87,6 +87,9 @@ class MainWindow(QMainWindow):
         self.slice_viewer.nifti_file_dropped.connect(self._on_viewer_nifti_file_dropped)
         self.slice_viewer.cursor_state.cursor_changed.connect(self._update_cursor_position)
         self.slice_viewer.patch_selection_changed.connect(self._on_patch_selection_changed)
+        self.cursor_panel.patch_activation_toggled.connect(
+            self._on_patch_activation_button_toggled
+        )
         self.cursor_panel.patch_opacity_changed.connect(self.slice_viewer.set_patch_overlay_opacity)
         self.cursor_panel.patch_size_changed.connect(self._on_patch_size_changed)
         self.cursor_panel.select_patch_requested.connect(self._on_select_patch)
@@ -105,6 +108,7 @@ class MainWindow(QMainWindow):
         self.cursor_panel.set_patch_size_xyz(self.slice_viewer.patch_size_xyz())
         self.segmentation_config_window.set_opacity(self.state.segmentation_opacity)
         self._refresh_segmentation_ui()
+        self._refresh_patch_selection_ui()
         self._font_scaler.apply()
         self.statusBar().showMessage("Ready")
 
@@ -173,7 +177,7 @@ class MainWindow(QMainWindow):
 
         self.patch_toggle_action = QAction("&Patch Selection", self)
         self.patch_toggle_action.setCheckable(True)
-        self.patch_toggle_action.setChecked(False)
+        self.patch_toggle_action.setChecked(True)
         self.patch_toggle_action.toggled.connect(self._on_patch_selection_toggled)
         tools_menu.addAction(self.patch_toggle_action)
         build_tools_submenu(
@@ -253,16 +257,12 @@ class MainWindow(QMainWindow):
         self.state.selected_patch_bounds = None
         self.state.selected_patch_data = None
         self._clear_segmentation_session()
-        if self.patch_toggle_action is not None:
-            was_blocked = self.patch_toggle_action.blockSignals(True)
-            self.patch_toggle_action.setChecked(False)
-            self.patch_toggle_action.blockSignals(was_blocked)
-        self.slice_viewer.set_patch_selection_enabled(False)
+        self._set_patch_selection_active(False)
         if self.cursor_overlay_action is not None:
             self.cursor_overlay_action.setEnabled(True)
             self.slice_viewer.set_cursor_overlay_visible(self.cursor_overlay_action.isChecked())
-        self.cursor_panel.set_patch_controls_visible(False)
         self.cursor_panel.set_cursor_values(None, None, None, None)
+        self._refresh_patch_selection_ui()
         self.statusBar().showMessage("Ready")
 
     def _update_cursor_position(
@@ -292,18 +292,44 @@ class MainWindow(QMainWindow):
         )
 
     def _on_patch_selection_toggled(self, enabled: bool) -> None:
-        self.slice_viewer.set_patch_selection_enabled(enabled)
         self.cursor_panel.set_patch_controls_visible(enabled)
+        if enabled:
+            self._refresh_patch_selection_ui()
+
+    def _on_patch_activation_button_toggled(self, enabled: bool) -> None:
+        self._set_patch_selection_active(enabled)
+
+    def _set_patch_selection_active(self, enabled: bool) -> None:
+        has_image = self.state.volume is not None
+        effective_enabled = enabled and has_image
+        was_enabled = self.slice_viewer.patch_selection_enabled()
+        self.slice_viewer.set_patch_selection_enabled(effective_enabled)
         if self.cursor_overlay_action is not None:
-            if enabled:
+            if effective_enabled and not was_enabled:
                 self._cursor_overlay_checked_before_patch = self.cursor_overlay_action.isChecked()
                 self.cursor_overlay_action.setChecked(False)
                 self.cursor_overlay_action.setEnabled(False)
                 self.slice_viewer.set_cursor_overlay_visible(False)
-            else:
+            elif not effective_enabled and was_enabled:
                 self.cursor_overlay_action.setEnabled(True)
                 self.cursor_overlay_action.setChecked(self._cursor_overlay_checked_before_patch)
-        if enabled:
+        self._refresh_patch_selection_ui()
+
+    def _refresh_patch_selection_ui(self) -> None:
+        panel_visible = (
+            self.patch_toggle_action.isChecked()
+            if self.patch_toggle_action is not None
+            else True
+        )
+        has_image = self.state.volume is not None
+        patch_active = has_image and self.slice_viewer.patch_selection_enabled()
+
+        self.cursor_panel.set_patch_controls_visible(panel_visible)
+        self.cursor_panel.set_patch_selection_active(patch_active)
+        self.cursor_panel.set_patch_activation_available(has_image)
+        self.cursor_panel.set_patch_controls_enabled(has_image and patch_active)
+
+        if has_image:
             self.cursor_panel.set_patch_opacity(self.slice_viewer.patch_overlay_opacity())
             self.cursor_panel.set_patch_size_xyz(self.slice_viewer.patch_size_xyz())
 
@@ -686,6 +712,7 @@ class MainWindow(QMainWindow):
         self.state.selected_patch_data = None
         cleared_count = self._reset_segmentation_session_for_loaded_image(image_path)
         self._initialize_contrast_for_loaded_volume()
+        self._refresh_patch_selection_ui()
 
         status_message = (
             f"Loaded {image_path.name} | shape={loaded.shape} | dtype={loaded.dtype}"

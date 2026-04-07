@@ -55,4 +55,6 @@ if ! PIP_DISABLE_PIP_VERSION_CHECK=1 "$VENV_PYTHON" -m pip install -e .; then
 fi
 
 echo "Setup complete."
-echo "Next step: bash run.sh"
+echo "Development helper only: this script bootstraps a local repo .venv."
+echo "Next step for repository use: bash run.sh"
+echo "Installed/container usage should launch MipView with: mipview"

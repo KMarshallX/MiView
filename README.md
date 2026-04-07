@@ -19,23 +19,32 @@ MipView is intentionally minimal. The goal is to build a small, reliable viewer 
 MipView is under active development, but the prototype is already here! Please have a try and share your feedback through [GitHub issues](https://github.com/KMarshallX/MipView/issues).
 
 
-### Deploy Locally
-First-time setup from repository root:
+### Launching MipView
+
+Installed or packaged usage:
+```bash
+mipview
+```
+
+This is the primary end-user launch command and the expected launch path for container and Neurodesk-style environments.
+
+Local development from a repository checkout:
 ```bash
 bash setup.sh
+bash run.sh
 ```
-This creates or reuses a local `.venv` and installs dependencies from `pyproject.toml`.
 
-Container / pip-based dependency install:
-```bash
-pip install -r requirements.txt
-```
-This `requirements.txt` mirrors the runtime dependencies used by the app and is intended for Docker-style installs.
+`setup.sh` is a development bootstrap helper. It creates or reuses a local `.venv` and installs the project from `pyproject.toml`. It is not the canonical container installation path.
 
-Quick launcher from repository root:
+Repository compatibility wrapper:
 ```bash
 bash run.sh
 ```
+
+`run.sh` is a simple repository/dev wrapper. It tries the launch commands in this order:
+- repo-local `.venv/bin/mipview`
+- `mipview` on `PATH`
+- `PYTHONPATH=src python -m mipview` for source checkouts
 
 Or make it executable once:
 ```bash
@@ -43,18 +52,24 @@ chmod +x run.sh
 ./run.sh
 ```
 
-Direct module entrypoint:
-```
+Source-checkout fallback:
+```bash
 PYTHONPATH=src python -m mipview
 ```
 
-Expected first-run flow:
+Expected local development flow:
 1. `bash setup.sh`
 2. `bash run.sh`
 
-For Docker-oriented flow:
-1. `pip install -r requirements.txt`
-2. `PYTHONPATH=src python -m mipview` (or `bash run.sh`)
+Expected installed/container/Neurodesk flow:
+1. Install the package into the environment
+2. Launch with `mipview`
+
+Container / pip-based dependency install:
+```bash
+pip install -r requirements.txt
+```
+This `requirements.txt` mirrors the runtime dependencies used by the app and is intended for Docker-style installs. In installed/container environments, the intended launch command remains `mipview`.
 
 CI note:
 - GitHub Actions validates three install paths (`setup.sh`, `pip install -e .`, and `pip install -r requirements.txt`) and runs a headless startup smoke test for each.
