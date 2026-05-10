@@ -15,6 +15,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import QLabel, QSlider, QVBoxLayout, QWidget
 
+from mipview.annotation.annotation_overlay import build_annotation_overlay_rgba
 from mipview.viewer.intensity import normalize_slice_to_uint8, window_slice_to_uint8
 from mipview.viewer.oriented_volume import OrientedVolume
 from mipview.patch_selector import (
@@ -70,6 +71,10 @@ class SliceViewerWidget(QWidget):
         self._patch_center_source: tuple[int, int, int] | None = None
         self._segmentation_display_data: np.ndarray | None = None
         self._segmentation_overlay_opacity = 0.5
+        self._annotation_display_data: np.ndarray | None = None
+        self._annotation_overlay_opacity = 0.5
+        self._annotation_overlay_visible = True
+        self._annotation_active_label = 1
         self._projection_slice_2d: np.ndarray | None = None
         self._projection_segmentation_slice_2d: np.ndarray | None = None
         self._projection_label: str | None = None
@@ -128,6 +133,7 @@ class SliceViewerWidget(QWidget):
         self._contrast_window = None
         self._current_pixmap = None
         self._segmentation_display_data = None
+        self._annotation_display_data = None
         self._pan_offset = (0.0, 0.0)
         self._interaction_mode = None
         self._last_drag_position = None
@@ -189,6 +195,27 @@ class SliceViewerWidget(QWidget):
             else None
         )
         self._segmentation_overlay_opacity = min(max(opacity, 0.0), 1.0)
+        if self._display_volume is not None and self._source_cursor_position is not None:
+            self._render_current_slice()
+        else:
+            self._update_scaled_pixmap()
+
+    def set_annotation_overlay(
+        self,
+        annotation_display_data: np.ndarray | None,
+        *,
+        opacity: float,
+        visible: bool,
+        active_label: int,
+    ) -> None:
+        self._annotation_display_data = (
+            np.asarray(annotation_display_data)
+            if annotation_display_data is not None
+            else None
+        )
+        self._annotation_overlay_opacity = min(max(float(opacity), 0.0), 1.0)
+        self._annotation_overlay_visible = bool(visible)
+        self._annotation_active_label = max(int(active_label), 0)
         if self._display_volume is not None and self._source_cursor_position is not None:
             self._render_current_slice()
         else:
@@ -259,7 +286,9 @@ class SliceViewerWidget(QWidget):
         if self._display_volume is None or self._source_cursor_position is None:
             return
 
-        display_cursor = self._display_volume.source_to_display(self._source_cursor_position)
+        display_cursor = self._display_volume.source_to_display(
+            self._source_cursor_position
+        )
         slice_8bit = self.current_display_plane_uint8()
         if slice_8bit is None:
             return
@@ -295,7 +324,9 @@ class SliceViewerWidget(QWidget):
         if self._display_volume is None or self._source_cursor_position is None:
             return None
 
-        display_cursor = self._display_volume.source_to_display(self._source_cursor_position)
+        display_cursor = self._display_volume.source_to_display(
+            self._source_cursor_position
+        )
         if self._projection_slice_2d is not None:
             slice_2d = self._projection_slice_2d
         else:
@@ -379,6 +410,7 @@ class SliceViewerWidget(QWidget):
             self._current_pixmap,
         )
         self._draw_segmentation_overlay(painter, display_rect)
+        self._draw_annotation_overlay(painter, display_rect)
         self._draw_orientation_indicators(painter)
 
         if (
@@ -438,6 +470,51 @@ class SliceViewerWidget(QWidget):
             segmentation_mask.astype(np.uint8)
             * int(round(self._segmentation_overlay_opacity * 255.0))
         )
+        overlay_contiguous = np.ascontiguousarray(overlay)
+        overlay_image = QImage(
+            overlay_contiguous.data,
+            width,
+            height,
+            width * 4,
+            QImage.Format.Format_RGBA8888,
+        )
+        painter.drawImage(
+            QRectF(
+                display_rect.left,
+                display_rect.top,
+                display_rect.width,
+                display_rect.height,
+            ),
+            overlay_image.copy(),
+        )
+
+    def _draw_annotation_overlay(
+        self, painter: QPainter, display_rect: DisplayRect
+    ) -> None:
+        if (
+            not self._annotation_overlay_visible
+            or self._annotation_display_data is None
+            or self._display_volume is None
+            or self._source_cursor_position is None
+            or self._projection_slice_2d is not None
+        ):
+            return
+
+        display_cursor = self._display_volume.source_to_display(self._source_cursor_position)
+        annotation_slice = extract_oriented_slice(
+            self._annotation_display_data,
+            self.orientation,
+            display_cursor,
+        )
+        overlay = build_annotation_overlay_rgba(
+            annotation_slice,
+            opacity=self._annotation_overlay_opacity,
+            active_label=self._annotation_active_label,
+        )
+        if not np.any(overlay[..., 3]):
+            return
+
+        height, width, _ = overlay.shape
         overlay_contiguous = np.ascontiguousarray(overlay)
         overlay_image = QImage(
             overlay_contiguous.data,

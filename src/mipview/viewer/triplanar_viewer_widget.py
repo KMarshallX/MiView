@@ -9,6 +9,7 @@ from PySide6.QtCore import QEvent, QObject, Qt, Signal
 from PySide6.QtGui import QDragEnterEvent, QDragMoveEvent, QDropEvent
 from PySide6.QtWidgets import QGridLayout, QWidget
 
+from mipview.annotation.annotation_mask import AnnotationMask
 from mipview.ui.drop_loading import first_supported_local_nifti_path
 from mipview.state.cursor_state import CursorState
 from mipview.state.zoom_state import ZoomState
@@ -46,6 +47,11 @@ class TriPlanarViewerWidget(QWidget):
         self._display_volume: OrientedVolume | None = None
         self._segmentation_display_volume: OrientedVolume | None = None
         self._segmentation_opacity: float = 0.5
+        self._annotation_mask: AnnotationMask | None = None
+        self._annotation_display_volume: OrientedVolume | None = None
+        self._annotation_opacity: float = 0.5
+        self._annotation_visible: bool = True
+        self._annotation_active_label: int = 1
         self._contrast_window: tuple[float, float] | None = None
         patch_debug_value = os.getenv("MIPVIEW_PATCH_DEBUG")
         if patch_debug_value is None:
@@ -126,6 +132,7 @@ class TriPlanarViewerWidget(QWidget):
                     self._contrast_window[0], self._contrast_window[1]
                 )
         self._apply_segmentation_overlay_to_views()
+        self._sync_annotation_overlay_for_loaded_volume()
 
         self._update_shared_base_scale()
         self.zoom_state.set_zoom_factor(1.0)
@@ -166,12 +173,20 @@ class TriPlanarViewerWidget(QWidget):
     def unload_volume(self) -> None:
         self._display_volume = None
         self._segmentation_display_volume = None
+        self._annotation_mask = None
+        self._annotation_display_volume = None
         self.cursor_state.clear()
         self.zoom_state.set_zoom_factor(1.0)
         self.patch_selector.clear()
         for view in self._views:
             view.unload_volume()
             view.set_segmentation_overlay(None, self._segmentation_opacity)
+            view.set_annotation_overlay(
+                None,
+                opacity=self._annotation_opacity,
+                visible=self._annotation_visible,
+                active_label=self._annotation_active_label,
+            )
             view.set_patch_overlay(
                 False,
                 None,
@@ -297,6 +312,63 @@ class TriPlanarViewerWidget(QWidget):
     def set_segmentation_overlay_opacity(self, opacity: float) -> None:
         self._segmentation_opacity = min(max(opacity, 0.0), 1.0)
         self._apply_segmentation_overlay_to_views()
+
+    def set_annotation_overlay(
+        self,
+        annotation_mask: AnnotationMask | None,
+        *,
+        opacity: float | None = None,
+        visible: bool | None = None,
+        active_label: int | None = None,
+    ) -> None:
+        if opacity is not None:
+            self._annotation_opacity = min(max(float(opacity), 0.0), 1.0)
+        if visible is not None:
+            self._annotation_visible = bool(visible)
+        if active_label is not None:
+            self._annotation_active_label = max(int(active_label), 0)
+
+        self._annotation_mask = annotation_mask
+        if annotation_mask is None:
+            self._annotation_display_volume = None
+            self._apply_annotation_overlay_to_views()
+            return
+
+        if annotation_mask.data.ndim != 3:
+            raise ValueError(
+                f"Annotation overlay expects a 3D mask, got {annotation_mask.data.ndim}D."
+            )
+        if (
+            self._display_volume is not None
+            and annotation_mask.shape != self._display_volume.source_shape
+        ):
+            raise ValueError("Annotation mask shape does not match the loaded image shape.")
+
+        self._annotation_display_volume = build_oriented_volume(
+            annotation_mask.data,
+            annotation_mask.affine,
+        )
+        self._apply_annotation_overlay_to_views()
+
+    def refresh_annotation_overlay(self) -> None:
+        if self._annotation_mask is not None:
+            self._annotation_display_volume = build_oriented_volume(
+                self._annotation_mask.data,
+                self._annotation_mask.affine,
+            )
+        self._apply_annotation_overlay_to_views()
+
+    def set_annotation_overlay_opacity(self, opacity: float) -> None:
+        self._annotation_opacity = min(max(float(opacity), 0.0), 1.0)
+        self._apply_annotation_overlay_to_views()
+
+    def set_annotation_overlay_visible(self, visible: bool) -> None:
+        self._annotation_visible = bool(visible)
+        self._apply_annotation_overlay_to_views()
+
+    def set_annotation_active_label(self, label: int) -> None:
+        self._annotation_active_label = max(int(label), 0)
+        self._apply_annotation_overlay_to_views()
 
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:
         if self._accept_drop_event(event):
@@ -491,6 +563,35 @@ class TriPlanarViewerWidget(QWidget):
                 self._segmentation_opacity,
             )
         self._update_projection_overrides()
+
+    def _apply_annotation_overlay_to_views(self) -> None:
+        annotation_data = (
+            None
+            if self._annotation_display_volume is None
+            else self._annotation_display_volume.display_data
+        )
+        for view in self._views:
+            view.set_annotation_overlay(
+                annotation_data,
+                opacity=self._annotation_opacity,
+                visible=self._annotation_visible,
+                active_label=self._annotation_active_label,
+            )
+
+    def _sync_annotation_overlay_for_loaded_volume(self) -> None:
+        if self._display_volume is None or self._annotation_mask is None:
+            self._apply_annotation_overlay_to_views()
+            return
+
+        if self._annotation_mask.shape != self._display_volume.source_shape:
+            self._annotation_mask = None
+            self._annotation_display_volume = None
+        else:
+            self._annotation_display_volume = build_oriented_volume(
+                self._annotation_mask.data,
+                self._annotation_mask.affine,
+            )
+        self._apply_annotation_overlay_to_views()
 
     def _accept_drop_event(self, event: QDragEnterEvent | QDragMoveEvent) -> bool:
         if self._dropped_nifti_path(event) is None:
