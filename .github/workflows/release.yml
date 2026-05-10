@@ -29,7 +29,7 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Validate patch-only release version
+      - name: Validate release version progression
         id: version_check
         run: |
           output="$(python scripts/validate_release_version.py)"
