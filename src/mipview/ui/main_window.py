@@ -20,8 +20,10 @@ from PySide6.QtWidgets import (
 from mipview.annotation import (
     AnnotationMask,
     AnnotationState,
+    annotation_metadata_path,
     create_empty_annotation_mask,
     load_annotation_mask,
+    save_annotation_metadata,
     save_annotation_mask,
 )
 from mipview.nifti_io import NiftiLoadResult, load_nifti
@@ -532,13 +534,47 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("Annotation save canceled")
             return
 
+        mask_path = Path(selected_path)
+        metadata_path = annotation_metadata_path(mask_path)
+        existing_outputs = [
+            path for path in (mask_path, metadata_path) if path.exists()
+        ]
+        if existing_outputs:
+            existing_names = "\n".join(str(path) for path in existing_outputs)
+            choice = QMessageBox.question(
+                self,
+                "Overwrite Annotation Output?",
+                (
+                    "The following annotation output file(s) already exist:\n\n"
+                    f"{existing_names}\n\nOverwrite them?"
+                ),
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if choice != QMessageBox.StandardButton.Yes:
+                self.statusBar().showMessage("Annotation save canceled")
+                return
+
         try:
-            saved_path = save_annotation_mask(annotation_mask, selected_path)
-        except ValueError as exc:
+            saved_path = save_annotation_mask(
+                annotation_mask,
+                mask_path,
+                overwrite=True,
+            )
+            saved_metadata_path = save_annotation_metadata(
+                annotation_mask,
+                saved_path,
+                metadata_path,
+                source_image_path=self.state.loaded_file_path,
+                overwrite=True,
+            )
+        except (FileExistsError, ValueError, OSError) as exc:
             QMessageBox.critical(self, "Annotation Save Failed", str(exc))
             self.statusBar().showMessage("Annotation save failed")
             return
-        self.statusBar().showMessage(f"Saved annotation {saved_path}")
+        self.statusBar().showMessage(
+            f"Saved annotation {saved_path} and metadata {saved_metadata_path}"
+        )
 
     def _on_annotation_visibility_changed(self, visible: bool) -> None:
         self.state.annotation.visible = bool(visible)

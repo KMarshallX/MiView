@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import nibabel as nib
 import numpy as np
@@ -121,11 +123,15 @@ def load_annotation_mask(
 def save_annotation_mask(
     annotation_mask: AnnotationMask,
     destination_path: str | Path,
+    *,
+    overwrite: bool = False,
 ) -> Path:
     """Save an annotation mask as NIfTI while preserving source-space metadata."""
     output_path = Path(destination_path)
     if not str(output_path).lower().endswith((".nii", ".nii.gz")):
         raise ValueError("Annotation mask path must end with .nii or .nii.gz.")
+    if output_path.exists() and not overwrite:
+        raise FileExistsError(f"Annotation mask already exists: {output_path}")
 
     header = annotation_mask.header.copy()
     header.set_data_shape(annotation_mask.data.shape)
@@ -142,4 +148,71 @@ def save_annotation_mask(
     image.header.set_qform(affine, code=q_code)
     image.header.set_sform(affine, code=s_code)
     nib.save(image, str(output_path))
+    return output_path
+
+
+def annotation_metadata_path(annotation_path: str | Path) -> Path:
+    """Return the default JSON sidecar path for a NIfTI annotation mask."""
+    output_path = Path(annotation_path)
+    name = output_path.name
+    if name.lower().endswith(".nii.gz"):
+        return output_path.with_name(f"{name[:-7]}.json")
+    if name.lower().endswith(".nii"):
+        return output_path.with_name(f"{name[:-4]}.json")
+    return output_path.with_suffix(".json")
+
+
+def build_annotation_metadata(
+    annotation_mask: AnnotationMask,
+    annotation_path: str | Path,
+    *,
+    source_image_path: str | Path | None = None,
+    notes: str = "",
+) -> dict[str, Any]:
+    """Build simple JSON metadata describing a saved annotation mask."""
+    labels = {
+        str(int(label)): name
+        for label, name in sorted(annotation_mask.labels.items())
+        if int(label) != 0
+    }
+    return {
+        "source_image": "" if source_image_path is None else str(source_image_path),
+        "annotation_mask": str(annotation_path),
+        "labels": labels,
+        "created_by": "MipView",
+        "shape": [int(dim) for dim in annotation_mask.shape],
+        "notes": notes,
+    }
+
+
+def save_annotation_metadata(
+    annotation_mask: AnnotationMask,
+    annotation_path: str | Path,
+    metadata_path: str | Path | None = None,
+    *,
+    source_image_path: str | Path | None = None,
+    notes: str = "",
+    overwrite: bool = False,
+) -> Path:
+    """Save a small JSON sidecar for a NIfTI annotation mask."""
+    output_path = (
+        annotation_metadata_path(annotation_path)
+        if metadata_path is None
+        else Path(metadata_path)
+    )
+    if output_path.suffix.lower() != ".json":
+        raise ValueError("Annotation metadata path must end with .json.")
+    if output_path.exists() and not overwrite:
+        raise FileExistsError(f"Annotation metadata already exists: {output_path}")
+
+    metadata = build_annotation_metadata(
+        annotation_mask,
+        annotation_path,
+        source_image_path=source_image_path,
+        notes=notes,
+    )
+    output_path.write_text(
+        json.dumps(metadata, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
     return output_path
