@@ -15,6 +15,7 @@ class AnnotationState:
     visible: bool = True
     brush_radius: int = 1
     brush_mode: str = "paint"
+    editing_enabled: bool = False
     undo_stack: AnnotationUndoStack = field(default_factory=AnnotationUndoStack)
 
     def __post_init__(self) -> None:
@@ -24,5 +25,7 @@ class AnnotationState:
             raise ValueError("Annotation opacity must be between 0.0 and 1.0.")
         if self.brush_radius < 0:
             raise ValueError("Annotation brush radius must be non-negative.")
-        if self.brush_mode not in {"paint", "erase"}:
-            raise ValueError("Annotation brush mode must be 'paint' or 'erase'.")
+        if self.brush_mode not in {"paint", "cursor", "erase"}:
+            raise ValueError(
+                "Annotation brush mode must be 'paint', 'cursor', or 'erase'."
+            )

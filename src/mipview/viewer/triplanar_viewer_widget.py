@@ -56,6 +56,7 @@ class TriPlanarViewerWidget(QWidget):
         self._annotation_opacity: float = 0.5
         self._annotation_visible: bool = True
         self._annotation_active_label: int = 1
+        self._annotation_editing_enabled: bool = False
         self._annotation_brush_radius: int = 1
         self._annotation_brush_mode: str = "paint"
         self._annotation_undo_stack = AnnotationUndoStack()
@@ -183,6 +184,7 @@ class TriPlanarViewerWidget(QWidget):
         self._segmentation_display_volume = None
         self._annotation_mask = None
         self._annotation_display_volume = None
+        self._annotation_editing_enabled = False
         self.cursor_state.clear()
         self.zoom_state.set_zoom_factor(1.0)
         self.patch_selector.clear()
@@ -195,6 +197,7 @@ class TriPlanarViewerWidget(QWidget):
                 visible=self._annotation_visible,
                 active_label=self._annotation_active_label,
             )
+            view.set_annotation_editing_enabled(False)
             view.set_patch_overlay(
                 False,
                 None,
@@ -342,6 +345,7 @@ class TriPlanarViewerWidget(QWidget):
         self._annotation_mask = annotation_mask
         if annotation_mask is None:
             self._annotation_display_volume = None
+            self._annotation_editing_enabled = False
             self._annotation_undo_stack.clear()
             self._apply_annotation_overlay_to_views()
             self.annotation_undo_availability_changed.emit(False)
@@ -385,13 +389,24 @@ class TriPlanarViewerWidget(QWidget):
         self._annotation_active_label = max(int(label), 0)
         self._apply_annotation_overlay_to_views()
 
+    def set_annotation_editing_enabled(self, enabled: bool) -> None:
+        self._annotation_editing_enabled = (
+            bool(enabled) and self._annotation_mask is not None
+        )
+        for view in self._views:
+            view.set_annotation_editing_enabled(self._annotation_editing_enabled)
+
     def set_annotation_brush_radius(self, radius: int) -> None:
         self._annotation_brush_radius = max(int(radius), 0)
+        for view in self._views:
+            view.set_annotation_brush_radius(self._annotation_brush_radius)
 
     def set_annotation_brush_mode(self, mode: str) -> None:
-        if mode not in {"paint", "erase"}:
+        if mode not in {"paint", "cursor", "erase"}:
             return
         self._annotation_brush_mode = mode
+        for view in self._views:
+            view.set_annotation_brush_mode(mode)
 
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:
         if self._accept_drop_event(event):
@@ -438,7 +453,11 @@ class TriPlanarViewerWidget(QWidget):
     def _on_annotation_voxel_selected(
         self, orientation: str, x: int, y: int, z: int
     ) -> None:
-        if self._annotation_mask is None:
+        if (
+            self._annotation_mask is None
+            or not self._annotation_editing_enabled
+            or self._annotation_brush_mode == "cursor"
+        ):
             return
 
         undo_snapshot = self._annotation_undo_stack.snapshot_disk(
@@ -657,6 +676,9 @@ class TriPlanarViewerWidget(QWidget):
                 visible=self._annotation_visible,
                 active_label=self._annotation_active_label,
             )
+            view.set_annotation_editing_enabled(self._annotation_editing_enabled)
+            view.set_annotation_brush_radius(self._annotation_brush_radius)
+            view.set_annotation_brush_mode(self._annotation_brush_mode)
 
     def _sync_annotation_overlay_for_loaded_volume(self) -> None:
         if self._display_volume is None or self._annotation_mask is None:

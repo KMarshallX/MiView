@@ -425,6 +425,10 @@ class MainWindow(QMainWindow):
         self.slice_viewer.recenter_views_on_patch_box()
 
     def _on_create_annotation(self) -> None:
+        if self.state.annotation.editing_enabled:
+            self._exit_annotation_mode()
+            return
+
         if self.state.volume is None:
             QMessageBox.warning(
                 self,
@@ -433,19 +437,28 @@ class MainWindow(QMainWindow):
             )
             return
 
-        annotation_mask = create_empty_annotation_mask(self.state.volume)
-        self.state.annotation.active_mask = annotation_mask
-        self.state.annotation.undo_stack.clear()
-        self.slice_viewer.set_annotation_overlay(
-            annotation_mask,
-            opacity=self.state.annotation.opacity,
-            visible=self.state.annotation.visible,
-            active_label=self.state.annotation.active_label,
-            undo_stack=self.state.annotation.undo_stack,
-        )
+        created_new_mask = self.state.annotation.active_mask is None
+        if created_new_mask:
+            annotation_mask = create_empty_annotation_mask(self.state.volume)
+            self.state.annotation.active_mask = annotation_mask
+            self.state.annotation.undo_stack.clear()
+        else:
+            annotation_mask = self.state.annotation.active_mask
+        self.state.annotation.editing_enabled = True
+        if created_new_mask:
+            self.slice_viewer.set_annotation_overlay(
+                annotation_mask,
+                opacity=self.state.annotation.opacity,
+                visible=self.state.annotation.visible,
+                active_label=self.state.annotation.active_label,
+                undo_stack=self.state.annotation.undo_stack,
+            )
         self._sync_annotation_brush_settings()
         self._refresh_annotation_ui()
-        self.statusBar().showMessage("Created empty annotation mask")
+        if created_new_mask:
+            self.statusBar().showMessage("Created empty annotation mask")
+        else:
+            self.statusBar().showMessage("Entered annotation mode")
 
     def _on_load_annotation(self) -> None:
         if self.state.volume is None:
@@ -479,6 +492,7 @@ class MainWindow(QMainWindow):
 
         self.state.annotation.active_mask = annotation_mask
         self.state.annotation.undo_stack.clear()
+        self.state.annotation.editing_enabled = True
         self.slice_viewer.set_annotation_overlay(
             annotation_mask,
             opacity=self.state.annotation.opacity,
@@ -535,7 +549,7 @@ class MainWindow(QMainWindow):
         self.slice_viewer.set_annotation_brush_radius(self.state.annotation.brush_radius)
 
     def _on_annotation_brush_mode_changed(self, mode: str) -> None:
-        if mode not in {"paint", "erase"}:
+        if mode not in {"paint", "cursor", "erase"}:
             return
         self.state.annotation.brush_mode = mode
         self.slice_viewer.set_annotation_brush_mode(mode)
@@ -560,8 +574,12 @@ class MainWindow(QMainWindow):
         annotation_state = self.state.annotation
         has_image = self.state.volume is not None
         has_mask = annotation_state.active_mask is not None
+        editing_enabled = has_mask and annotation_state.editing_enabled
         self.annotation_panel.set_image_loaded(has_image)
-        self.annotation_panel.set_annotation_active(has_mask)
+        self.annotation_panel.set_annotation_active(
+            has_mask,
+            editing_enabled=editing_enabled,
+        )
         self.annotation_panel.set_visible_checked(annotation_state.visible)
         self.annotation_panel.set_opacity(annotation_state.opacity)
         self.annotation_panel.set_active_label(annotation_state.active_label)
@@ -578,7 +596,17 @@ class MainWindow(QMainWindow):
         )
         self._refresh_annotation_ui()
 
+    def _exit_annotation_mode(self) -> None:
+        self.state.annotation.editing_enabled = False
+        self.slice_viewer.set_annotation_editing_enabled(False)
+        self._refresh_annotation_ui()
+        self.statusBar().showMessage("Exited annotation mode")
+
     def _sync_annotation_brush_settings(self) -> None:
+        self.slice_viewer.set_annotation_editing_enabled(
+            self.state.annotation.editing_enabled
+            and self.state.annotation.active_mask is not None
+        )
         self.slice_viewer.set_annotation_brush_radius(self.state.annotation.brush_radius)
         self.slice_viewer.set_annotation_brush_mode(self.state.annotation.brush_mode)
 

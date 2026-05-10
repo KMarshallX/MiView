@@ -31,6 +31,7 @@ class AnnotationPanel(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setFixedWidth(self.PANEL_WIDTH)
+        self._annotation_editing_enabled = False
 
         group = QGroupBox("Annotation", self)
         form = QFormLayout(group)
@@ -74,20 +75,27 @@ class AnnotationPanel(QWidget):
         mode_layout.setContentsMargins(0, 0, 0, 0)
         self.paint_button = QPushButton("Paint", mode_row)
         self.paint_button.setCheckable(True)
+        self.cursor_button = QPushButton("Cursor", mode_row)
+        self.cursor_button.setCheckable(True)
         self.erase_button = QPushButton("Erase", mode_row)
         self.erase_button.setCheckable(True)
         self.mode_button_group = QButtonGroup(mode_row)
         self.mode_button_group.setExclusive(True)
         self.mode_button_group.addButton(self.paint_button)
+        self.mode_button_group.addButton(self.cursor_button)
         self.mode_button_group.addButton(self.erase_button)
         self.paint_button.setChecked(True)
         self.paint_button.toggled.connect(
             lambda checked: checked and self.brush_mode_changed.emit("paint")
         )
+        self.cursor_button.toggled.connect(
+            lambda checked: checked and self.brush_mode_changed.emit("cursor")
+        )
         self.erase_button.toggled.connect(
             lambda checked: checked and self.brush_mode_changed.emit("erase")
         )
         mode_layout.addWidget(self.paint_button)
+        mode_layout.addWidget(self.cursor_button)
         mode_layout.addWidget(self.erase_button)
 
         self.undo_button = QPushButton("Undo", group)
@@ -115,7 +123,16 @@ class AnnotationPanel(QWidget):
         if not loaded:
             self.set_annotation_active(False)
 
-    def set_annotation_active(self, active: bool, *, can_undo: bool = False) -> None:
+    def set_annotation_active(
+        self,
+        active: bool,
+        *,
+        editing_enabled: bool | None = None,
+        can_undo: bool = False,
+    ) -> None:
+        editing = active if editing_enabled is None else active and editing_enabled
+        self._annotation_editing_enabled = editing
+        self.create_button.setText("Exit..." if editing else "Create")
         for widget in (
             self.save_button,
             self.visible_checkbox,
@@ -123,13 +140,14 @@ class AnnotationPanel(QWidget):
             self.active_label_spinbox,
             self.brush_radius_spinbox,
             self.paint_button,
+            self.cursor_button,
             self.erase_button,
         ):
-            widget.setEnabled(active)
-        self.undo_button.setEnabled(active and can_undo)
+            widget.setEnabled(editing)
+        self.undo_button.setEnabled(editing and can_undo)
 
     def set_undo_available(self, available: bool) -> None:
-        self.undo_button.setEnabled(available)
+        self.undo_button.setEnabled(self._annotation_editing_enabled and available)
 
     def set_visible_checked(self, visible: bool) -> None:
         was_blocked = self.visible_checkbox.blockSignals(True)
@@ -153,11 +171,18 @@ class AnnotationPanel(QWidget):
         self.brush_radius_spinbox.blockSignals(was_blocked)
 
     def set_brush_mode(self, mode: str) -> None:
-        target = self.erase_button if mode == "erase" else self.paint_button
+        if mode == "erase":
+            target = self.erase_button
+        elif mode == "cursor":
+            target = self.cursor_button
+        else:
+            target = self.paint_button
         was_paint_blocked = self.paint_button.blockSignals(True)
+        was_cursor_blocked = self.cursor_button.blockSignals(True)
         was_erase_blocked = self.erase_button.blockSignals(True)
         target.setChecked(True)
         self.paint_button.blockSignals(was_paint_blocked)
+        self.cursor_button.blockSignals(was_cursor_blocked)
         self.erase_button.blockSignals(was_erase_blocked)
 
     def _on_opacity_changed(self, value: int) -> None:
