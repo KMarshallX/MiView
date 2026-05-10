@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from mipview.annotation import AnnotationMask
 from mipview.nifti_io import NiftiLoadResult
 from mipview.patch_history import PatchHistoryManager
 from mipview.patch_saver import build_patch_default_filename, save_patch_nifti
@@ -64,6 +65,10 @@ class PatchViewerWindow(QMainWindow):
         patch_volume: NiftiLoadResult,
         segmentation_volume: NiftiLoadResult | None = None,
         segmentation_opacity: float = 0.5,
+        annotation_mask: AnnotationMask | None = None,
+        annotation_opacity: float = 0.5,
+        annotation_visible: bool = True,
+        annotation_active_label: int = 1,
         parent: QMainWindow | None = None,
         source_image_name: str = "image.nii.gz",
         source_image_path: Path | None = None,
@@ -153,6 +158,12 @@ class PatchViewerWindow(QMainWindow):
                 segmentation_volume,
                 opacity=segmentation_opacity,
             )
+        self.slice_viewer.set_annotation_overlay(
+            annotation_mask,
+            opacity=annotation_opacity,
+            visible=annotation_visible,
+            active_label=annotation_active_label,
+        )
         self._initialize_contrast(patch_volume)
         self._sync_projection_controls()
         self._configure_scroll_region_constraints()
@@ -506,6 +517,32 @@ class PatchViewerWindow(QMainWindow):
 
     def update_segmentation_opacity(self, opacity: float) -> None:
         self.slice_viewer.set_segmentation_overlay_opacity(opacity)
+
+    def update_annotation_overlay(
+        self,
+        annotation_mask: AnnotationMask | None,
+        *,
+        opacity: float,
+        visible: bool,
+        active_label: int,
+    ) -> None:
+        self.slice_viewer.set_annotation_overlay(
+            annotation_mask,
+            opacity=opacity,
+            visible=visible,
+            active_label=active_label,
+        )
+
+    def update_annotation_display_options(
+        self,
+        *,
+        opacity: float,
+        visible: bool,
+        active_label: int,
+    ) -> None:
+        self.slice_viewer.set_annotation_overlay_opacity(opacity)
+        self.slice_viewer.set_annotation_overlay_visible(visible)
+        self.slice_viewer.set_annotation_active_label(active_label)
 
     def sync_patch_from_parent(self, patch_volume: NiftiLoadResult) -> None:
         """Replace local patch data from parent-image processing updates."""

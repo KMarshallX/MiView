@@ -4,6 +4,7 @@ import numpy as np
 from PySide6.QtCore import QEvent, QObject, QPointF, QRect, QRectF, Qt, Signal
 from PySide6.QtGui import (
     QColor,
+    QCursor,
     QFont,
     QImage,
     QMouseEvent,
@@ -15,6 +16,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import QLabel, QSlider, QVBoxLayout, QWidget
 
+from mipview.annotation.annotation_overlay import build_annotation_overlay_rgba
 from mipview.viewer.intensity import normalize_slice_to_uint8, window_slice_to_uint8
 from mipview.viewer.oriented_volume import OrientedVolume
 from mipview.patch_selector import (
@@ -42,6 +44,7 @@ class SliceViewerWidget(QWidget):
 
     cursor_position_selected = Signal(int, int, int)
     patch_center_position_selected = Signal(int, int, int)
+    annotation_voxel_selected = Signal(str, int, int, int)
     zoom_factor_requested = Signal(float)
     patch_axis_size_requested = Signal(int, int)
     viewport_resized = Signal()
@@ -70,8 +73,17 @@ class SliceViewerWidget(QWidget):
         self._patch_center_source: tuple[int, int, int] | None = None
         self._segmentation_display_data: np.ndarray | None = None
         self._segmentation_overlay_opacity = 0.5
+        self._annotation_display_data: np.ndarray | None = None
+        self._annotation_overlay_opacity = 0.5
+        self._annotation_overlay_visible = True
+        self._annotation_active_label = 1
+        self._annotation_editing_enabled = False
+        self._annotation_brush_radius = 1
+        self._annotation_brush_mode = "paint"
+        self._brush_cursor_cache: dict[int, QCursor] = {}
         self._projection_slice_2d: np.ndarray | None = None
         self._projection_segmentation_slice_2d: np.ndarray | None = None
+        self._projection_annotation_slice_2d: np.ndarray | None = None
         self._projection_label: str | None = None
         self._active_patch_resize_handle: str | None = None
         self._interaction_mode: str | None = None
@@ -116,6 +128,7 @@ class SliceViewerWidget(QWidget):
         self._last_drag_position = None
         self._projection_slice_2d = None
         self._projection_segmentation_slice_2d = None
+        self._projection_annotation_slice_2d = None
         self._projection_label = None
         self._configure_slice_slider()
         self.image_label.setText("Set cursor to view slices")
@@ -128,11 +141,15 @@ class SliceViewerWidget(QWidget):
         self._contrast_window = None
         self._current_pixmap = None
         self._segmentation_display_data = None
+        self._annotation_display_data = None
+        self._annotation_editing_enabled = False
+        self._brush_cursor_cache.clear()
         self._pan_offset = (0.0, 0.0)
         self._interaction_mode = None
         self._last_drag_position = None
         self._projection_slice_2d = None
         self._projection_segmentation_slice_2d = None
+        self._projection_annotation_slice_2d = None
         self._projection_label = None
         self.slice_slider.setEnabled(False)
         self.slice_slider.setRange(0, 0)
@@ -194,15 +211,52 @@ class SliceViewerWidget(QWidget):
         else:
             self._update_scaled_pixmap()
 
+    def set_annotation_overlay(
+        self,
+        annotation_display_data: np.ndarray | None,
+        *,
+        opacity: float,
+        visible: bool,
+        active_label: int,
+    ) -> None:
+        self._annotation_display_data = (
+            np.asarray(annotation_display_data)
+            if annotation_display_data is not None
+            else None
+        )
+        self._annotation_overlay_opacity = min(max(float(opacity), 0.0), 1.0)
+        self._annotation_overlay_visible = bool(visible)
+        self._annotation_active_label = max(int(active_label), 0)
+        if self._display_volume is not None and self._source_cursor_position is not None:
+            self._render_current_slice()
+        else:
+            self._update_scaled_pixmap()
+
+    def set_annotation_editing_enabled(self, enabled: bool) -> None:
+        self._annotation_editing_enabled = bool(enabled)
+        self._refresh_hover_cursor_from_global_pos()
+
+    def set_annotation_brush_radius(self, radius: int) -> None:
+        self._annotation_brush_radius = max(int(radius), 0)
+        self._refresh_hover_cursor_from_global_pos()
+
+    def set_annotation_brush_mode(self, mode: str) -> None:
+        if mode not in {"paint", "cursor", "erase"}:
+            return
+        self._annotation_brush_mode = mode
+        self._refresh_hover_cursor_from_global_pos()
+
     def set_projection_slice(
         self,
         slice_2d: np.ndarray | None,
         label: str | None = None,
         segmentation_slice_2d: np.ndarray | None = None,
+        annotation_slice_2d: np.ndarray | None = None,
     ) -> None:
         if slice_2d is None:
             self._projection_slice_2d = None
             self._projection_segmentation_slice_2d = None
+            self._projection_annotation_slice_2d = None
             self._projection_label = None
         else:
             projection = np.asarray(slice_2d)
@@ -220,6 +274,17 @@ class SliceViewerWidget(QWidget):
                         "Segmentation projection slice must match projection slice shape."
                     )
                 self._projection_segmentation_slice_2d = segmentation_projection
+            if annotation_slice_2d is None:
+                self._projection_annotation_slice_2d = None
+            else:
+                annotation_projection = np.asarray(annotation_slice_2d)
+                if annotation_projection.ndim != 2:
+                    raise ValueError("Annotation projection slice must be a 2D array.")
+                if annotation_projection.shape != projection.shape:
+                    raise ValueError(
+                        "Annotation projection slice must match projection slice shape."
+                    )
+                self._projection_annotation_slice_2d = annotation_projection
             self._projection_label = label
         if self._display_volume is not None and self._source_cursor_position is not None:
             self._render_current_slice()
@@ -259,7 +324,9 @@ class SliceViewerWidget(QWidget):
         if self._display_volume is None or self._source_cursor_position is None:
             return
 
-        display_cursor = self._display_volume.source_to_display(self._source_cursor_position)
+        display_cursor = self._display_volume.source_to_display(
+            self._source_cursor_position
+        )
         slice_8bit = self.current_display_plane_uint8()
         if slice_8bit is None:
             return
@@ -295,7 +362,9 @@ class SliceViewerWidget(QWidget):
         if self._display_volume is None or self._source_cursor_position is None:
             return None
 
-        display_cursor = self._display_volume.source_to_display(self._source_cursor_position)
+        display_cursor = self._display_volume.source_to_display(
+            self._source_cursor_position
+        )
         if self._projection_slice_2d is not None:
             slice_2d = self._projection_slice_2d
         else:
@@ -379,6 +448,7 @@ class SliceViewerWidget(QWidget):
             self._current_pixmap,
         )
         self._draw_segmentation_overlay(painter, display_rect)
+        self._draw_annotation_overlay(painter, display_rect)
         self._draw_orientation_indicators(painter)
 
         if (
@@ -456,6 +526,57 @@ class SliceViewerWidget(QWidget):
             overlay_image.copy(),
         )
 
+    def _draw_annotation_overlay(
+        self, painter: QPainter, display_rect: DisplayRect
+    ) -> None:
+        if (
+            not self._annotation_overlay_visible
+            or self._annotation_display_data is None
+            or self._display_volume is None
+            or self._source_cursor_position is None
+        ):
+            return
+
+        if self._projection_slice_2d is not None:
+            if self._projection_annotation_slice_2d is None:
+                return
+            annotation_slice = self._projection_annotation_slice_2d
+        else:
+            display_cursor = self._display_volume.source_to_display(
+                self._source_cursor_position
+            )
+            annotation_slice = extract_oriented_slice(
+                self._annotation_display_data,
+                self.orientation,
+                display_cursor,
+            )
+        overlay = build_annotation_overlay_rgba(
+            annotation_slice,
+            opacity=self._annotation_overlay_opacity,
+            active_label=self._annotation_active_label,
+        )
+        if not np.any(overlay[..., 3]):
+            return
+
+        height, width, _ = overlay.shape
+        overlay_contiguous = np.ascontiguousarray(overlay)
+        overlay_image = QImage(
+            overlay_contiguous.data,
+            width,
+            height,
+            width * 4,
+            QImage.Format.Format_RGBA8888,
+        )
+        painter.drawImage(
+            QRectF(
+                display_rect.left,
+                display_rect.top,
+                display_rect.width,
+                display_rect.height,
+            ),
+            overlay_image.copy(),
+        )
+
     def _handle_mouse_press(self, mouse_event: QMouseEvent) -> None:
         self._last_drag_position = mouse_event.position()
         if mouse_event.button() == Qt.MouseButton.LeftButton:
@@ -466,7 +587,7 @@ class SliceViewerWidget(QWidget):
                 self._interaction_mode = "left_patch_drag"
                 return
             self._interaction_mode = "left_cursor"
-            self._emit_cursor_from_label_position(mouse_event.position())
+            self._emit_cursor_and_annotation_from_label_position(mouse_event.position())
         elif mouse_event.button() == Qt.MouseButton.MiddleButton:
             self._interaction_mode = "middle_pan"
         elif mouse_event.button() == Qt.MouseButton.RightButton:
@@ -491,7 +612,9 @@ class SliceViewerWidget(QWidget):
 
         if self._interaction_mode == "left_cursor":
             if mouse_event.buttons() & Qt.MouseButton.LeftButton:
-                self._emit_cursor_from_label_position(mouse_event.position())
+                self._emit_cursor_and_annotation_from_label_position(
+                    mouse_event.position()
+                )
             return
 
         if self._last_drag_position is None:
@@ -556,20 +679,35 @@ class SliceViewerWidget(QWidget):
         self._last_drag_position = current_position
         self.zoom_factor_requested.emit(requested_zoom)
 
-    def _emit_cursor_from_label_position(self, label_position: QPointF) -> None:
-        if self._display_volume is None or self._source_cursor_position is None:
+    def _emit_cursor_and_annotation_from_label_position(
+        self, label_position: QPointF
+    ) -> None:
+        source_cursor = self._source_cursor_from_label_position(label_position)
+        if source_cursor is None:
             return
+        self.cursor_position_selected.emit(*source_cursor)
+        if (
+            self._annotation_editing_enabled
+            and self._annotation_brush_mode in {"paint", "erase"}
+        ):
+            self.annotation_voxel_selected.emit(self.orientation, *source_cursor)
+
+    def _source_cursor_from_label_position(
+        self, label_position: QPointF
+    ) -> tuple[int, int, int] | None:
+        if self._display_volume is None or self._source_cursor_position is None:
+            return None
 
         display_rect = self._display_rect()
         if display_rect is None:
-            return
+            return None
 
         plane_fraction = map_label_position_to_plane_fraction(
             (label_position.x(), label_position.y()),
             display_rect,
         )
         if plane_fraction is None:
-            return
+            return None
 
         cursor = map_plane_fraction_to_cursor(
             self.orientation,
@@ -578,8 +716,7 @@ class SliceViewerWidget(QWidget):
             plane_fraction[0],
             plane_fraction[1],
         )
-        source_cursor = self._display_volume.display_to_source(cursor)
-        self.cursor_position_selected.emit(*source_cursor)
+        return self._display_volume.display_to_source(cursor)
 
     def _crosshair_pixel_position(self, display_rect: DisplayRect) -> tuple[int, int]:
         assert self._display_volume is not None
@@ -933,34 +1070,94 @@ class SliceViewerWidget(QWidget):
 
     def _update_hover_cursor(self, label_position: QPointF) -> None:
         display_rect = self._display_rect()
-        if (
-            not self._patch_overlay_visible
-            or display_rect is None
-            or self._patch_plane_bounds is None
-        ):
+        if display_rect is None:
             self.image_label.setCursor(Qt.CursorShape.ArrowCursor)
             return
 
-        overlay_rect = self._overlay_display_rect(display_rect)
-        if overlay_rect is None:
-            self.image_label.setCursor(Qt.CursorShape.ArrowCursor)
-            return
+        if self._patch_overlay_visible and self._patch_plane_bounds is not None:
+            overlay_rect = self._overlay_display_rect(display_rect)
+            if overlay_rect is not None:
+                handle_name = self._resize_handle_at_position(
+                    label_position,
+                    overlay_rect,
+                )
+                if handle_name is not None:
+                    if handle_name in ("top_left", "bottom_right"):
+                        self.image_label.setCursor(Qt.CursorShape.SizeFDiagCursor)
+                    elif handle_name in ("top_right", "bottom_left"):
+                        self.image_label.setCursor(Qt.CursorShape.SizeBDiagCursor)
+                    else:
+                        self.image_label.setCursor(Qt.CursorShape.SizeVerCursor)
+                    return
 
-        handle_name = self._resize_handle_at_position(label_position, overlay_rect)
-        if handle_name is not None:
-            if handle_name in ("top_left", "bottom_right"):
-                self.image_label.setCursor(Qt.CursorShape.SizeFDiagCursor)
-            elif handle_name in ("top_right", "bottom_left"):
-                self.image_label.setCursor(Qt.CursorShape.SizeBDiagCursor)
-            else:
-                self.image_label.setCursor(Qt.CursorShape.SizeVerCursor)
-            return
+                if overlay_rect.contains(label_position):
+                    self.image_label.setCursor(Qt.CursorShape.SizeAllCursor)
+                    return
 
-        if overlay_rect.contains(label_position):
-            self.image_label.setCursor(Qt.CursorShape.SizeAllCursor)
+        if self._should_show_brush_cursor(label_position, display_rect):
+            self.image_label.setCursor(self._brush_cursor(display_rect))
             return
 
         self.image_label.setCursor(Qt.CursorShape.ArrowCursor)
+
+    def _refresh_hover_cursor_from_global_pos(self) -> None:
+        if self._display_volume is None:
+            return
+        label_position = self.image_label.mapFromGlobal(QCursor.pos())
+        if self.image_label.rect().contains(label_position):
+            self._update_hover_cursor(QPointF(label_position))
+
+    def _should_show_brush_cursor(
+        self, label_position: QPointF, display_rect: DisplayRect
+    ) -> bool:
+        if (
+            not self._annotation_editing_enabled
+            or self._annotation_brush_mode not in {"paint", "erase"}
+            or self._display_volume is None
+        ):
+            return False
+        return (
+            map_label_position_to_plane_fraction(
+                (label_position.x(), label_position.y()),
+                display_rect,
+            )
+            is not None
+        )
+
+    def _brush_cursor(self, display_rect: DisplayRect) -> QCursor:
+        size = self._brush_cursor_size(display_rect)
+        cached = self._brush_cursor_cache.get(size)
+        if cached is not None:
+            return cached
+
+        pixmap = QPixmap(size, size)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+        pen = QPen(QColor("#ffffff"), 2)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        inset = 1
+        side_length = max(size - 2 * inset - 1, 1)
+        painter.drawRect(inset, inset, side_length, side_length)
+        painter.end()
+
+        cursor = QCursor(pixmap, size // 2, size // 2)
+        self._brush_cursor_cache[size] = cursor
+        return cursor
+
+    def _brush_cursor_size(self, display_rect: DisplayRect) -> int:
+        if self._display_volume is None:
+            return 9
+        horizontal_axis, vertical_axis, _ = plane_axes_for_orientation(self.orientation)
+        horizontal_voxels = max(self._display_volume.display_shape[horizontal_axis], 1)
+        vertical_voxels = max(self._display_volume.display_shape[vertical_axis], 1)
+        pixel_per_voxel = max(
+            display_rect.width / horizontal_voxels,
+            display_rect.height / vertical_voxels,
+        )
+        footprint_voxels = (self._annotation_brush_radius * 2) + 1
+        return min(max(int(round(pixel_per_voxel * footprint_voxels)), 7), 127)
 
 
 def _edge_index_to_display_coordinate(

@@ -9,6 +9,9 @@ from PySide6.QtCore import QEvent, QObject, Qt, Signal
 from PySide6.QtGui import QDragEnterEvent, QDragMoveEvent, QDropEvent
 from PySide6.QtWidgets import QGridLayout, QWidget
 
+from mipview.annotation.annotation_mask import AnnotationMask
+from mipview.annotation.brush import erase_disk, paint_disk
+from mipview.annotation.undo import AnnotationUndoStack
 from mipview.ui.drop_loading import first_supported_local_nifti_path
 from mipview.state.cursor_state import CursorState
 from mipview.state.zoom_state import ZoomState
@@ -39,6 +42,8 @@ class TriPlanarViewerWidget(QWidget):
 
     cursor_inspection_changed = Signal(object, object, object, object)
     patch_selection_changed = Signal(object)
+    annotation_changed = Signal(object)
+    annotation_undo_availability_changed = Signal(bool)
     nifti_file_dropped = Signal(object)
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -46,6 +51,15 @@ class TriPlanarViewerWidget(QWidget):
         self._display_volume: OrientedVolume | None = None
         self._segmentation_display_volume: OrientedVolume | None = None
         self._segmentation_opacity: float = 0.5
+        self._annotation_mask: AnnotationMask | None = None
+        self._annotation_display_volume: OrientedVolume | None = None
+        self._annotation_opacity: float = 0.5
+        self._annotation_visible: bool = True
+        self._annotation_active_label: int = 1
+        self._annotation_editing_enabled: bool = False
+        self._annotation_brush_radius: int = 1
+        self._annotation_brush_mode: str = "paint"
+        self._annotation_undo_stack = AnnotationUndoStack()
         self._contrast_window: tuple[float, float] | None = None
         patch_debug_value = os.getenv("MIPVIEW_PATCH_DEBUG")
         if patch_debug_value is None:
@@ -89,6 +103,7 @@ class TriPlanarViewerWidget(QWidget):
         for view in self._views:
             view.cursor_position_selected.connect(self._on_cursor_selected)
             view.patch_center_position_selected.connect(self._on_patch_center_selected)
+            view.annotation_voxel_selected.connect(self._on_annotation_voxel_selected)
             view.zoom_factor_requested.connect(self.zoom_state.set_zoom_factor)
             view.patch_axis_size_requested.connect(self._on_patch_axis_size_requested)
             view.viewport_resized.connect(self._update_shared_base_scale)
@@ -126,6 +141,7 @@ class TriPlanarViewerWidget(QWidget):
                     self._contrast_window[0], self._contrast_window[1]
                 )
         self._apply_segmentation_overlay_to_views()
+        self._sync_annotation_overlay_for_loaded_volume()
 
         self._update_shared_base_scale()
         self.zoom_state.set_zoom_factor(1.0)
@@ -166,12 +182,22 @@ class TriPlanarViewerWidget(QWidget):
     def unload_volume(self) -> None:
         self._display_volume = None
         self._segmentation_display_volume = None
+        self._annotation_mask = None
+        self._annotation_display_volume = None
+        self._annotation_editing_enabled = False
         self.cursor_state.clear()
         self.zoom_state.set_zoom_factor(1.0)
         self.patch_selector.clear()
         for view in self._views:
             view.unload_volume()
             view.set_segmentation_overlay(None, self._segmentation_opacity)
+            view.set_annotation_overlay(
+                None,
+                opacity=self._annotation_opacity,
+                visible=self._annotation_visible,
+                active_label=self._annotation_active_label,
+            )
+            view.set_annotation_editing_enabled(False)
             view.set_patch_overlay(
                 False,
                 None,
@@ -298,6 +324,90 @@ class TriPlanarViewerWidget(QWidget):
         self._segmentation_opacity = min(max(opacity, 0.0), 1.0)
         self._apply_segmentation_overlay_to_views()
 
+    def set_annotation_overlay(
+        self,
+        annotation_mask: AnnotationMask | None,
+        *,
+        opacity: float | None = None,
+        visible: bool | None = None,
+        active_label: int | None = None,
+        undo_stack: AnnotationUndoStack | None = None,
+    ) -> None:
+        if opacity is not None:
+            self._annotation_opacity = min(max(float(opacity), 0.0), 1.0)
+        if visible is not None:
+            self._annotation_visible = bool(visible)
+        if active_label is not None:
+            self._annotation_active_label = max(int(active_label), 0)
+        if undo_stack is not None:
+            self._annotation_undo_stack = undo_stack
+
+        self._annotation_mask = annotation_mask
+        if annotation_mask is None:
+            self._annotation_display_volume = None
+            self._annotation_editing_enabled = False
+            self._annotation_undo_stack.clear()
+            self._apply_annotation_overlay_to_views()
+            self.annotation_undo_availability_changed.emit(False)
+            return
+
+        if annotation_mask.data.ndim != 3:
+            raise ValueError(
+                f"Annotation overlay expects a 3D mask, got {annotation_mask.data.ndim}D."
+            )
+        if (
+            self._display_volume is not None
+            and annotation_mask.shape != self._display_volume.source_shape
+        ):
+            raise ValueError("Annotation mask shape does not match the loaded image shape.")
+
+        self._annotation_display_volume = build_oriented_volume(
+            annotation_mask.data,
+            annotation_mask.affine,
+        )
+        self._annotation_undo_stack.clear()
+        self._apply_annotation_overlay_to_views()
+        self.annotation_undo_availability_changed.emit(False)
+
+    def refresh_annotation_overlay(self) -> None:
+        if self._annotation_mask is not None:
+            self._annotation_display_volume = build_oriented_volume(
+                self._annotation_mask.data,
+                self._annotation_mask.affine,
+            )
+        self._apply_annotation_overlay_to_views()
+
+    def set_annotation_overlay_opacity(self, opacity: float) -> None:
+        self._annotation_opacity = min(max(float(opacity), 0.0), 1.0)
+        self._apply_annotation_overlay_to_views()
+
+    def set_annotation_overlay_visible(self, visible: bool) -> None:
+        self._annotation_visible = bool(visible)
+        self._apply_annotation_overlay_to_views()
+
+    def set_annotation_active_label(self, label: int) -> None:
+        self._annotation_active_label = max(int(label), 0)
+        self._apply_annotation_overlay_to_views()
+
+    def set_annotation_editing_enabled(self, enabled: bool) -> None:
+        self._annotation_editing_enabled = (
+            bool(enabled) and self._annotation_mask is not None
+        )
+        for view in self._views:
+            view.set_annotation_editing_enabled(self._annotation_editing_enabled)
+
+    def set_annotation_brush_radius(self, radius: int) -> None:
+        self._annotation_brush_radius = max(int(radius), 0)
+        for view in self._views:
+            view.set_annotation_brush_radius(self._annotation_brush_radius)
+
+    def set_annotation_brush_mode(self, mode: str) -> None:
+        if mode not in {"paint", "cursor", "erase"}:
+            return
+        self._annotation_brush_mode = mode
+        for view in self._views:
+            view.set_annotation_brush_mode(mode)
+
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:
         if self._accept_drop_event(event):
             return
@@ -339,6 +449,67 @@ class TriPlanarViewerWidget(QWidget):
     def _on_patch_center_selected(self, x: int, y: int, z: int) -> None:
         self.patch_selector.set_center((x, y, z))
         self._update_patch_overlays()
+
+    def _on_annotation_voxel_selected(
+        self, orientation: str, x: int, y: int, z: int
+    ) -> None:
+        if (
+            self._annotation_mask is None
+            or not self._annotation_editing_enabled
+            or self._annotation_brush_mode == "cursor"
+        ):
+            return
+
+        undo_snapshot = self._annotation_undo_stack.snapshot_disk(
+            self._annotation_mask,
+            orientation,  # type: ignore[arg-type]
+            (x, y, z),
+            self._annotation_brush_radius,
+        )
+        if self._annotation_brush_mode == "erase":
+            changed = erase_disk(
+                self._annotation_mask,
+                orientation,  # type: ignore[arg-type]
+                (x, y, z),
+                self._annotation_brush_radius,
+            )
+        else:
+            changed = paint_disk(
+                self._annotation_mask,
+                orientation,  # type: ignore[arg-type]
+                (x, y, z),
+                self._annotation_brush_radius,
+                self._annotation_active_label,
+            )
+        if changed <= 0:
+            return
+        self._annotation_undo_stack.commit_snapshot(
+            undo_snapshot,
+            self._annotation_mask,
+        )
+        self.refresh_annotation_overlay()
+        self.annotation_undo_availability_changed.emit(
+            self._annotation_undo_stack.can_undo()
+        )
+        self.annotation_changed.emit(changed)
+
+    def undo_annotation(self) -> int:
+        if self._annotation_mask is None:
+            return 0
+        changed = self._annotation_undo_stack.undo(self._annotation_mask)
+        if changed <= 0:
+            self.annotation_undo_availability_changed.emit(False)
+            return 0
+        self.refresh_annotation_overlay()
+        self.annotation_undo_availability_changed.emit(
+            self._annotation_undo_stack.can_undo()
+        )
+        return changed
+
+    def annotation_can_undo(self) -> bool:
+        if self._annotation_mask is None:
+            return False
+        return self._annotation_undo_stack.can_undo()
 
     def _on_zoom_changed(self, zoom_factor: float) -> None:
         for view in self._views:
@@ -452,13 +623,21 @@ class TriPlanarViewerWidget(QWidget):
     def _update_projection_overrides(self) -> None:
         if self._display_volume is None:
             for view in self._views:
-                view.set_projection_slice(None, segmentation_slice_2d=None)
+                view.set_projection_slice(
+                    None,
+                    segmentation_slice_2d=None,
+                    annotation_slice_2d=None,
+                )
             return
 
         volume = self._display_volume.display_data
         for view in self._views:
             if not self._projection_enabled.get(view.orientation, False):
-                view.set_projection_slice(None, segmentation_slice_2d=None)
+                view.set_projection_slice(
+                    None,
+                    segmentation_slice_2d=None,
+                    annotation_slice_2d=None,
+                )
                 continue
             projection_slice = _project_oriented_volume(
                 volume,
@@ -472,10 +651,17 @@ class TriPlanarViewerWidget(QWidget):
                     view.orientation,
                     self._projection_mode,
                 )
+            annotation_projection_slice = None
+            if self._annotation_display_volume is not None:
+                annotation_projection_slice = _project_annotation_volume(
+                    self._annotation_display_volume.display_data,
+                    view.orientation,
+                )
             view.set_projection_slice(
                 projection_slice,
                 f"{self._projection_mode} ({view.orientation.title()})",
                 segmentation_slice_2d=segmentation_projection_slice,
+                annotation_slice_2d=annotation_projection_slice,
             )
 
     def _apply_segmentation_overlay_to_views(self) -> None:
@@ -491,6 +677,39 @@ class TriPlanarViewerWidget(QWidget):
                 self._segmentation_opacity,
             )
         self._update_projection_overrides()
+
+    def _apply_annotation_overlay_to_views(self) -> None:
+        annotation_data = (
+            None
+            if self._annotation_display_volume is None
+            else self._annotation_display_volume.display_data
+        )
+        for view in self._views:
+            view.set_annotation_overlay(
+                annotation_data,
+                opacity=self._annotation_opacity,
+                visible=self._annotation_visible,
+                active_label=self._annotation_active_label,
+            )
+            view.set_annotation_editing_enabled(self._annotation_editing_enabled)
+            view.set_annotation_brush_radius(self._annotation_brush_radius)
+            view.set_annotation_brush_mode(self._annotation_brush_mode)
+        self._update_projection_overrides()
+
+    def _sync_annotation_overlay_for_loaded_volume(self) -> None:
+        if self._display_volume is None or self._annotation_mask is None:
+            self._apply_annotation_overlay_to_views()
+            return
+
+        if self._annotation_mask.shape != self._display_volume.source_shape:
+            self._annotation_mask = None
+            self._annotation_display_volume = None
+        else:
+            self._annotation_display_volume = build_oriented_volume(
+                self._annotation_mask.data,
+                self._annotation_mask.affine,
+            )
+        self._apply_annotation_overlay_to_views()
 
     def _accept_drop_event(self, event: QDragEnterEvent | QDragMoveEvent) -> bool:
         if self._dropped_nifti_path(event) is None:
@@ -545,6 +764,16 @@ def _project_oriented_volume(
         return reducer(volume, axis=1).T[::-1, ::-1]
     if orientation == "sagittal":
         return reducer(volume, axis=0).T[::-1, ::-1]
+    raise ValueError(f"Unsupported orientation: {orientation}")
+
+
+def _project_annotation_volume(volume: np.ndarray, orientation: Orientation) -> np.ndarray:
+    if orientation == "axial":
+        return np.max(volume, axis=2).T[::-1, ::-1]
+    if orientation == "coronal":
+        return np.max(volume, axis=1).T[::-1, ::-1]
+    if orientation == "sagittal":
+        return np.max(volume, axis=0).T[::-1, ::-1]
     raise ValueError(f"Unsupported orientation: {orientation}")
 
 
