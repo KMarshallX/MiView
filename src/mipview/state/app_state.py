@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from dataclasses import field
 from pathlib import Path
 
+from mipview.annotation import AnnotationState
 from mipview.nifti_io import NiftiLoadResult
 from mipview.patch_selector import PatchBounds
 from mipview.segmentation_models import LoadedSegmentation
@@ -20,3 +21,4 @@ class AppState:
     loaded_segmentations: list[LoadedSegmentation] = field(default_factory=list)
     active_segmentation_id: str | None = None
     segmentation_opacity: float = 0.5
+    annotation: AnnotationState = field(default_factory=AnnotationState)

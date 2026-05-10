@@ -17,6 +17,12 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from mipview.annotation import (
+    AnnotationState,
+    create_empty_annotation_mask,
+    load_annotation_mask,
+    save_annotation_mask,
+)
 from mipview.nifti_io import load_nifti
 from mipview.patch_extractor import extract_patch
 from mipview.patch_selector import PatchBounds
@@ -31,6 +37,7 @@ from mipview.ui.contrast_helpers import (
     initialize_contrast_state,
 )
 from mipview.ui.contrast_control_bar import ContrastControlBar
+from mipview.ui.annotation_panel import AnnotationPanel
 from mipview.ui.cursor_panel import CursorInspectionPanel
 from mipview.ui.drop_load_choice_dialog import DropLoadChoice, DropLoadChoiceDialog
 from mipview.ui.drop_loading import first_supported_local_nifti_path
@@ -59,6 +66,7 @@ class MainWindow(QMainWindow):
         self.contrast_state = ContrastState(self)
         self.slice_viewer = TriPlanarViewerWidget()
         self.cursor_panel = CursorInspectionPanel()
+        self.annotation_panel = AnnotationPanel()
         self.contrast_control_bar = ContrastControlBar(self)
         self.cursor_overlay_action: QAction | None = None
         self._cursor_overlay_checked_before_patch = True
@@ -84,6 +92,10 @@ class MainWindow(QMainWindow):
         self.slice_viewer.cursor_inspection_changed.connect(
             self.cursor_panel.set_cursor_values
         )
+        self.slice_viewer.annotation_changed.connect(self._on_annotation_changed)
+        self.slice_viewer.annotation_undo_availability_changed.connect(
+            self.annotation_panel.set_undo_available
+        )
         self.slice_viewer.nifti_file_dropped.connect(self._on_viewer_nifti_file_dropped)
         self.slice_viewer.cursor_state.cursor_changed.connect(self._update_cursor_position)
         self.slice_viewer.patch_selection_changed.connect(self._on_patch_selection_changed)
@@ -94,6 +106,23 @@ class MainWindow(QMainWindow):
         self.cursor_panel.patch_size_changed.connect(self._on_patch_size_changed)
         self.cursor_panel.select_patch_requested.connect(self._on_select_patch)
         self.cursor_panel.find_patch_box_requested.connect(self._on_find_patch_box)
+        self.annotation_panel.create_requested.connect(self._on_create_annotation)
+        self.annotation_panel.load_requested.connect(self._on_load_annotation)
+        self.annotation_panel.save_requested.connect(self._on_save_annotation)
+        self.annotation_panel.visibility_changed.connect(
+            self._on_annotation_visibility_changed
+        )
+        self.annotation_panel.opacity_changed.connect(self._on_annotation_opacity_changed)
+        self.annotation_panel.active_label_changed.connect(
+            self._on_annotation_active_label_changed
+        )
+        self.annotation_panel.brush_radius_changed.connect(
+            self._on_annotation_brush_radius_changed
+        )
+        self.annotation_panel.brush_mode_changed.connect(
+            self._on_annotation_brush_mode_changed
+        )
+        self.annotation_panel.undo_requested.connect(self._on_annotation_undo_requested)
         connect_contrast_controls(
             self.contrast_control_bar,
             self.contrast_state,
@@ -106,6 +135,7 @@ class MainWindow(QMainWindow):
         self.slice_viewer.set_drop_loading_enabled(True)
         self.cursor_panel.set_patch_opacity(self.slice_viewer.patch_overlay_opacity())
         self.cursor_panel.set_patch_size_xyz(self.slice_viewer.patch_size_xyz())
+        self._refresh_annotation_ui()
         self.segmentation_config_window.set_opacity(self.state.segmentation_opacity)
         self._refresh_segmentation_ui()
         self._refresh_patch_selection_ui()
@@ -120,7 +150,15 @@ class MainWindow(QMainWindow):
 
         splitter = QSplitter(Qt.Orientation.Horizontal, self)
         splitter.addWidget(self.slice_viewer)
-        splitter.addWidget(self.cursor_panel)
+        right_panel = QWidget(self)
+        right_layout = QVBoxLayout(right_panel)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setSpacing(0)
+        right_layout.addWidget(self.cursor_panel)
+        right_layout.addWidget(self.annotation_panel)
+        right_layout.addStretch(1)
+
+        splitter.addWidget(right_panel)
         splitter.setStretchFactor(0, 4)
         splitter.setStretchFactor(1, 1)
         content_widget.setAcceptDrops(True)
@@ -256,6 +294,7 @@ class MainWindow(QMainWindow):
         self.state.cursor_position = None
         self.state.selected_patch_bounds = None
         self.state.selected_patch_data = None
+        self._clear_annotation_session()
         self._clear_segmentation_session()
         self._set_patch_selection_active(False)
         if self.cursor_overlay_action is not None:
@@ -384,6 +423,176 @@ class MainWindow(QMainWindow):
 
     def _on_find_patch_box(self) -> None:
         self.slice_viewer.recenter_views_on_patch_box()
+
+    def _on_create_annotation(self) -> None:
+        if self.state.volume is None:
+            QMessageBox.warning(
+                self,
+                "No Image Loaded",
+                "Load a base image before creating an annotation.",
+            )
+            return
+
+        annotation_mask = create_empty_annotation_mask(self.state.volume)
+        self.state.annotation.active_mask = annotation_mask
+        self.state.annotation.undo_stack.clear()
+        self.slice_viewer.set_annotation_overlay(
+            annotation_mask,
+            opacity=self.state.annotation.opacity,
+            visible=self.state.annotation.visible,
+            active_label=self.state.annotation.active_label,
+            undo_stack=self.state.annotation.undo_stack,
+        )
+        self._sync_annotation_brush_settings()
+        self._refresh_annotation_ui()
+        self.statusBar().showMessage("Created empty annotation mask")
+
+    def _on_load_annotation(self) -> None:
+        if self.state.volume is None:
+            QMessageBox.warning(
+                self,
+                "No Image Loaded",
+                "Load a base image before loading an annotation.",
+            )
+            return
+
+        selected_file, _ = QFileDialog.getOpenFileName(
+            self,
+            "Load Annotation Mask",
+            "",
+            "NIfTI Files (*.nii *.nii.gz);;All Files (*)",
+        )
+        if not selected_file:
+            self.statusBar().showMessage("Annotation load canceled")
+            return
+
+        try:
+            annotation_mask = load_annotation_mask(selected_file, self.state.volume)
+        except (FileNotFoundError, ValueError) as exc:
+            QMessageBox.warning(
+                self,
+                "Annotation Load Failed",
+                str(exc),
+            )
+            self.statusBar().showMessage("Annotation load failed")
+            return
+
+        self.state.annotation.active_mask = annotation_mask
+        self.state.annotation.undo_stack.clear()
+        self.slice_viewer.set_annotation_overlay(
+            annotation_mask,
+            opacity=self.state.annotation.opacity,
+            visible=self.state.annotation.visible,
+            active_label=self.state.annotation.active_label,
+            undo_stack=self.state.annotation.undo_stack,
+        )
+        self._sync_annotation_brush_settings()
+        self._refresh_annotation_ui()
+        self.statusBar().showMessage(f"Loaded annotation {Path(selected_file).name}")
+
+    def _on_save_annotation(self) -> None:
+        annotation_mask = self.state.annotation.active_mask
+        if annotation_mask is None:
+            QMessageBox.warning(
+                self,
+                "No Annotation",
+                "Create or load an annotation before saving.",
+            )
+            return
+
+        selected_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save Annotation Mask",
+            str(self._default_annotation_save_path()),
+            "NIfTI Files (*.nii.gz *.nii);;All Files (*)",
+        )
+        if not selected_path:
+            self.statusBar().showMessage("Annotation save canceled")
+            return
+
+        try:
+            saved_path = save_annotation_mask(annotation_mask, selected_path)
+        except ValueError as exc:
+            QMessageBox.critical(self, "Annotation Save Failed", str(exc))
+            self.statusBar().showMessage("Annotation save failed")
+            return
+        self.statusBar().showMessage(f"Saved annotation {saved_path}")
+
+    def _on_annotation_visibility_changed(self, visible: bool) -> None:
+        self.state.annotation.visible = bool(visible)
+        self.slice_viewer.set_annotation_overlay_visible(self.state.annotation.visible)
+
+    def _on_annotation_opacity_changed(self, opacity: float) -> None:
+        self.state.annotation.opacity = min(max(float(opacity), 0.0), 1.0)
+        self.slice_viewer.set_annotation_overlay_opacity(self.state.annotation.opacity)
+
+    def _on_annotation_active_label_changed(self, label: int) -> None:
+        self.state.annotation.active_label = max(int(label), 1)
+        self.slice_viewer.set_annotation_active_label(self.state.annotation.active_label)
+
+    def _on_annotation_brush_radius_changed(self, radius: int) -> None:
+        self.state.annotation.brush_radius = max(int(radius), 0)
+        self.slice_viewer.set_annotation_brush_radius(self.state.annotation.brush_radius)
+
+    def _on_annotation_brush_mode_changed(self, mode: str) -> None:
+        if mode not in {"paint", "erase"}:
+            return
+        self.state.annotation.brush_mode = mode
+        self.slice_viewer.set_annotation_brush_mode(mode)
+
+    def _on_annotation_changed(self, changed_voxels: object) -> None:
+        self.statusBar().showMessage(
+            f"Annotation updated: {int(changed_voxels)} voxel(s) changed"
+        )
+        self.annotation_panel.set_undo_available(self.slice_viewer.annotation_can_undo())
+
+    def _on_annotation_undo_requested(self) -> None:
+        changed = self.slice_viewer.undo_annotation()
+        self.annotation_panel.set_undo_available(self.slice_viewer.annotation_can_undo())
+        if changed <= 0:
+            self.statusBar().showMessage("No annotation edit to undo")
+            return
+        self.statusBar().showMessage(
+            f"Undid annotation edit: {changed} voxel(s) restored"
+        )
+
+    def _refresh_annotation_ui(self) -> None:
+        annotation_state = self.state.annotation
+        has_image = self.state.volume is not None
+        has_mask = annotation_state.active_mask is not None
+        self.annotation_panel.set_image_loaded(has_image)
+        self.annotation_panel.set_annotation_active(has_mask)
+        self.annotation_panel.set_visible_checked(annotation_state.visible)
+        self.annotation_panel.set_opacity(annotation_state.opacity)
+        self.annotation_panel.set_active_label(annotation_state.active_label)
+        self.annotation_panel.set_brush_radius(annotation_state.brush_radius)
+        self.annotation_panel.set_brush_mode(annotation_state.brush_mode)
+        self.annotation_panel.set_undo_available(self.slice_viewer.annotation_can_undo())
+        self._sync_annotation_brush_settings()
+
+    def _clear_annotation_session(self) -> None:
+        self.state.annotation = AnnotationState()
+        self.slice_viewer.set_annotation_overlay(
+            None,
+            undo_stack=self.state.annotation.undo_stack,
+        )
+        self._refresh_annotation_ui()
+
+    def _sync_annotation_brush_settings(self) -> None:
+        self.slice_viewer.set_annotation_brush_radius(self.state.annotation.brush_radius)
+        self.slice_viewer.set_annotation_brush_mode(self.state.annotation.brush_mode)
+
+    def _default_annotation_save_path(self) -> Path:
+        if self.state.loaded_file_path is None:
+            return Path.home() / "annotation_mask.nii.gz"
+        source_name = self.state.loaded_file_path.name
+        if source_name.lower().endswith(".nii.gz"):
+            source_stem = source_name[:-7]
+        elif source_name.lower().endswith(".nii"):
+            source_stem = source_name[:-4]
+        else:
+            source_stem = self.state.loaded_file_path.stem
+        return self.state.loaded_file_path.with_name(f"{source_stem}_annotation.nii.gz")
 
     def _on_apply_tool_to_main_image_requested(self, tool_id: str) -> None:
         if self.state.volume is None:
@@ -710,6 +919,7 @@ class MainWindow(QMainWindow):
         self.state.cursor_position = self.slice_viewer.current_cursor_position()
         self.state.selected_patch_bounds = None
         self.state.selected_patch_data = None
+        self._clear_annotation_session()
         cleared_count = self._reset_segmentation_session_for_loaded_image(image_path)
         self._initialize_contrast_for_loaded_volume()
         self._refresh_patch_selection_ui()

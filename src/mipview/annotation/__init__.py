@@ -14,11 +14,14 @@ from mipview.annotation.brush import (
     paint_stroke,
     paint_voxel,
 )
+from mipview.annotation.undo import AnnotationUndoEntry, AnnotationUndoStack
 
 __all__ = [
     "AnnotationCompatibilityResult",
     "AnnotationMask",
     "AnnotationState",
+    "AnnotationUndoEntry",
+    "AnnotationUndoStack",
     "create_empty_annotation_mask",
     "erase_disk",
     "erase_stroke",

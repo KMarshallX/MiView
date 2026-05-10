@@ -10,6 +10,8 @@ from PySide6.QtGui import QDragEnterEvent, QDragMoveEvent, QDropEvent
 from PySide6.QtWidgets import QGridLayout, QWidget
 
 from mipview.annotation.annotation_mask import AnnotationMask
+from mipview.annotation.brush import erase_disk, paint_disk
+from mipview.annotation.undo import AnnotationUndoStack
 from mipview.ui.drop_loading import first_supported_local_nifti_path
 from mipview.state.cursor_state import CursorState
 from mipview.state.zoom_state import ZoomState
@@ -40,6 +42,8 @@ class TriPlanarViewerWidget(QWidget):
 
     cursor_inspection_changed = Signal(object, object, object, object)
     patch_selection_changed = Signal(object)
+    annotation_changed = Signal(object)
+    annotation_undo_availability_changed = Signal(bool)
     nifti_file_dropped = Signal(object)
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -52,6 +56,9 @@ class TriPlanarViewerWidget(QWidget):
         self._annotation_opacity: float = 0.5
         self._annotation_visible: bool = True
         self._annotation_active_label: int = 1
+        self._annotation_brush_radius: int = 1
+        self._annotation_brush_mode: str = "paint"
+        self._annotation_undo_stack = AnnotationUndoStack()
         self._contrast_window: tuple[float, float] | None = None
         patch_debug_value = os.getenv("MIPVIEW_PATCH_DEBUG")
         if patch_debug_value is None:
@@ -95,6 +102,7 @@ class TriPlanarViewerWidget(QWidget):
         for view in self._views:
             view.cursor_position_selected.connect(self._on_cursor_selected)
             view.patch_center_position_selected.connect(self._on_patch_center_selected)
+            view.annotation_voxel_selected.connect(self._on_annotation_voxel_selected)
             view.zoom_factor_requested.connect(self.zoom_state.set_zoom_factor)
             view.patch_axis_size_requested.connect(self._on_patch_axis_size_requested)
             view.viewport_resized.connect(self._update_shared_base_scale)
@@ -320,6 +328,7 @@ class TriPlanarViewerWidget(QWidget):
         opacity: float | None = None,
         visible: bool | None = None,
         active_label: int | None = None,
+        undo_stack: AnnotationUndoStack | None = None,
     ) -> None:
         if opacity is not None:
             self._annotation_opacity = min(max(float(opacity), 0.0), 1.0)
@@ -327,11 +336,15 @@ class TriPlanarViewerWidget(QWidget):
             self._annotation_visible = bool(visible)
         if active_label is not None:
             self._annotation_active_label = max(int(active_label), 0)
+        if undo_stack is not None:
+            self._annotation_undo_stack = undo_stack
 
         self._annotation_mask = annotation_mask
         if annotation_mask is None:
             self._annotation_display_volume = None
+            self._annotation_undo_stack.clear()
             self._apply_annotation_overlay_to_views()
+            self.annotation_undo_availability_changed.emit(False)
             return
 
         if annotation_mask.data.ndim != 3:
@@ -348,7 +361,9 @@ class TriPlanarViewerWidget(QWidget):
             annotation_mask.data,
             annotation_mask.affine,
         )
+        self._annotation_undo_stack.clear()
         self._apply_annotation_overlay_to_views()
+        self.annotation_undo_availability_changed.emit(False)
 
     def refresh_annotation_overlay(self) -> None:
         if self._annotation_mask is not None:
@@ -369,6 +384,14 @@ class TriPlanarViewerWidget(QWidget):
     def set_annotation_active_label(self, label: int) -> None:
         self._annotation_active_label = max(int(label), 0)
         self._apply_annotation_overlay_to_views()
+
+    def set_annotation_brush_radius(self, radius: int) -> None:
+        self._annotation_brush_radius = max(int(radius), 0)
+
+    def set_annotation_brush_mode(self, mode: str) -> None:
+        if mode not in {"paint", "erase"}:
+            return
+        self._annotation_brush_mode = mode
 
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:
         if self._accept_drop_event(event):
@@ -411,6 +434,63 @@ class TriPlanarViewerWidget(QWidget):
     def _on_patch_center_selected(self, x: int, y: int, z: int) -> None:
         self.patch_selector.set_center((x, y, z))
         self._update_patch_overlays()
+
+    def _on_annotation_voxel_selected(
+        self, orientation: str, x: int, y: int, z: int
+    ) -> None:
+        if self._annotation_mask is None:
+            return
+
+        undo_snapshot = self._annotation_undo_stack.snapshot_disk(
+            self._annotation_mask,
+            orientation,  # type: ignore[arg-type]
+            (x, y, z),
+            self._annotation_brush_radius,
+        )
+        if self._annotation_brush_mode == "erase":
+            changed = erase_disk(
+                self._annotation_mask,
+                orientation,  # type: ignore[arg-type]
+                (x, y, z),
+                self._annotation_brush_radius,
+            )
+        else:
+            changed = paint_disk(
+                self._annotation_mask,
+                orientation,  # type: ignore[arg-type]
+                (x, y, z),
+                self._annotation_brush_radius,
+                self._annotation_active_label,
+            )
+        if changed <= 0:
+            return
+        self._annotation_undo_stack.commit_snapshot(
+            undo_snapshot,
+            self._annotation_mask,
+        )
+        self.refresh_annotation_overlay()
+        self.annotation_undo_availability_changed.emit(
+            self._annotation_undo_stack.can_undo()
+        )
+        self.annotation_changed.emit(changed)
+
+    def undo_annotation(self) -> int:
+        if self._annotation_mask is None:
+            return 0
+        changed = self._annotation_undo_stack.undo(self._annotation_mask)
+        if changed <= 0:
+            self.annotation_undo_availability_changed.emit(False)
+            return 0
+        self.refresh_annotation_overlay()
+        self.annotation_undo_availability_changed.emit(
+            self._annotation_undo_stack.can_undo()
+        )
+        return changed
+
+    def annotation_can_undo(self) -> bool:
+        if self._annotation_mask is None:
+            return False
+        return self._annotation_undo_stack.can_undo()
 
     def _on_zoom_changed(self, zoom_factor: float) -> None:
         for view in self._views:

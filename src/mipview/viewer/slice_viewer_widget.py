@@ -43,6 +43,7 @@ class SliceViewerWidget(QWidget):
 
     cursor_position_selected = Signal(int, int, int)
     patch_center_position_selected = Signal(int, int, int)
+    annotation_voxel_selected = Signal(str, int, int, int)
     zoom_factor_requested = Signal(float)
     patch_axis_size_requested = Signal(int, int)
     viewport_resized = Signal()
@@ -543,7 +544,7 @@ class SliceViewerWidget(QWidget):
                 self._interaction_mode = "left_patch_drag"
                 return
             self._interaction_mode = "left_cursor"
-            self._emit_cursor_from_label_position(mouse_event.position())
+            self._emit_cursor_and_annotation_from_label_position(mouse_event.position())
         elif mouse_event.button() == Qt.MouseButton.MiddleButton:
             self._interaction_mode = "middle_pan"
         elif mouse_event.button() == Qt.MouseButton.RightButton:
@@ -568,7 +569,9 @@ class SliceViewerWidget(QWidget):
 
         if self._interaction_mode == "left_cursor":
             if mouse_event.buttons() & Qt.MouseButton.LeftButton:
-                self._emit_cursor_from_label_position(mouse_event.position())
+                self._emit_cursor_and_annotation_from_label_position(
+                    mouse_event.position()
+                )
             return
 
         if self._last_drag_position is None:
@@ -633,20 +636,31 @@ class SliceViewerWidget(QWidget):
         self._last_drag_position = current_position
         self.zoom_factor_requested.emit(requested_zoom)
 
-    def _emit_cursor_from_label_position(self, label_position: QPointF) -> None:
-        if self._display_volume is None or self._source_cursor_position is None:
+    def _emit_cursor_and_annotation_from_label_position(
+        self, label_position: QPointF
+    ) -> None:
+        source_cursor = self._source_cursor_from_label_position(label_position)
+        if source_cursor is None:
             return
+        self.cursor_position_selected.emit(*source_cursor)
+        self.annotation_voxel_selected.emit(self.orientation, *source_cursor)
+
+    def _source_cursor_from_label_position(
+        self, label_position: QPointF
+    ) -> tuple[int, int, int] | None:
+        if self._display_volume is None or self._source_cursor_position is None:
+            return None
 
         display_rect = self._display_rect()
         if display_rect is None:
-            return
+            return None
 
         plane_fraction = map_label_position_to_plane_fraction(
             (label_position.x(), label_position.y()),
             display_rect,
         )
         if plane_fraction is None:
-            return
+            return None
 
         cursor = map_plane_fraction_to_cursor(
             self.orientation,
@@ -655,8 +669,7 @@ class SliceViewerWidget(QWidget):
             plane_fraction[0],
             plane_fraction[1],
         )
-        source_cursor = self._display_volume.display_to_source(cursor)
-        self.cursor_position_selected.emit(*source_cursor)
+        return self._display_volume.display_to_source(cursor)
 
     def _crosshair_pixel_position(self, display_rect: DisplayRect) -> tuple[int, int]:
         assert self._display_volume is not None
