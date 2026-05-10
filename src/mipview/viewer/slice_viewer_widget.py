@@ -83,6 +83,7 @@ class SliceViewerWidget(QWidget):
         self._brush_cursor_cache: dict[int, QCursor] = {}
         self._projection_slice_2d: np.ndarray | None = None
         self._projection_segmentation_slice_2d: np.ndarray | None = None
+        self._projection_annotation_slice_2d: np.ndarray | None = None
         self._projection_label: str | None = None
         self._active_patch_resize_handle: str | None = None
         self._interaction_mode: str | None = None
@@ -127,6 +128,7 @@ class SliceViewerWidget(QWidget):
         self._last_drag_position = None
         self._projection_slice_2d = None
         self._projection_segmentation_slice_2d = None
+        self._projection_annotation_slice_2d = None
         self._projection_label = None
         self._configure_slice_slider()
         self.image_label.setText("Set cursor to view slices")
@@ -147,6 +149,7 @@ class SliceViewerWidget(QWidget):
         self._last_drag_position = None
         self._projection_slice_2d = None
         self._projection_segmentation_slice_2d = None
+        self._projection_annotation_slice_2d = None
         self._projection_label = None
         self.slice_slider.setEnabled(False)
         self.slice_slider.setRange(0, 0)
@@ -248,10 +251,12 @@ class SliceViewerWidget(QWidget):
         slice_2d: np.ndarray | None,
         label: str | None = None,
         segmentation_slice_2d: np.ndarray | None = None,
+        annotation_slice_2d: np.ndarray | None = None,
     ) -> None:
         if slice_2d is None:
             self._projection_slice_2d = None
             self._projection_segmentation_slice_2d = None
+            self._projection_annotation_slice_2d = None
             self._projection_label = None
         else:
             projection = np.asarray(slice_2d)
@@ -269,6 +274,17 @@ class SliceViewerWidget(QWidget):
                         "Segmentation projection slice must match projection slice shape."
                     )
                 self._projection_segmentation_slice_2d = segmentation_projection
+            if annotation_slice_2d is None:
+                self._projection_annotation_slice_2d = None
+            else:
+                annotation_projection = np.asarray(annotation_slice_2d)
+                if annotation_projection.ndim != 2:
+                    raise ValueError("Annotation projection slice must be a 2D array.")
+                if annotation_projection.shape != projection.shape:
+                    raise ValueError(
+                        "Annotation projection slice must match projection slice shape."
+                    )
+                self._projection_annotation_slice_2d = annotation_projection
             self._projection_label = label
         if self._display_volume is not None and self._source_cursor_position is not None:
             self._render_current_slice()
@@ -518,16 +534,22 @@ class SliceViewerWidget(QWidget):
             or self._annotation_display_data is None
             or self._display_volume is None
             or self._source_cursor_position is None
-            or self._projection_slice_2d is not None
         ):
             return
 
-        display_cursor = self._display_volume.source_to_display(self._source_cursor_position)
-        annotation_slice = extract_oriented_slice(
-            self._annotation_display_data,
-            self.orientation,
-            display_cursor,
-        )
+        if self._projection_slice_2d is not None:
+            if self._projection_annotation_slice_2d is None:
+                return
+            annotation_slice = self._projection_annotation_slice_2d
+        else:
+            display_cursor = self._display_volume.source_to_display(
+                self._source_cursor_position
+            )
+            annotation_slice = extract_oriented_slice(
+                self._annotation_display_data,
+                self.orientation,
+                display_cursor,
+            )
         overlay = build_annotation_overlay_rgba(
             annotation_slice,
             opacity=self._annotation_overlay_opacity,

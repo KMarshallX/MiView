@@ -18,12 +18,13 @@ from PySide6.QtWidgets import (
 )
 
 from mipview.annotation import (
+    AnnotationMask,
     AnnotationState,
     create_empty_annotation_mask,
     load_annotation_mask,
     save_annotation_mask,
 )
-from mipview.nifti_io import load_nifti
+from mipview.nifti_io import NiftiLoadResult, load_nifti
 from mipview.patch_extractor import extract_patch
 from mipview.patch_selector import PatchBounds
 from mipview.segmentation_models import LoadedSegmentation
@@ -391,6 +392,7 @@ class MainWindow(QMainWindow):
             else "image.nii.gz"
         )
         active_segmentation = self._active_segmentation()
+        active_annotation_patch = self._extract_active_annotation_patch(bounds)
         patch_window = PatchViewerWindow(
             extracted,
             segmentation_volume=(
@@ -399,6 +401,10 @@ class MainWindow(QMainWindow):
                 else None
             ),
             segmentation_opacity=self.state.segmentation_opacity,
+            annotation_mask=active_annotation_patch,
+            annotation_opacity=self.state.annotation.opacity,
+            annotation_visible=self.state.annotation.visible,
+            annotation_active_label=self.state.annotation.active_label,
             parent=self,
             source_image_name=source_image_name,
             source_image_path=self.state.loaded_file_path,
@@ -459,6 +465,7 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("Created empty annotation mask")
         else:
             self.statusBar().showMessage("Entered annotation mode")
+        self._update_patch_windows_annotation_for_current_image()
 
     def _on_load_annotation(self) -> None:
         if self.state.volume is None:
@@ -503,6 +510,7 @@ class MainWindow(QMainWindow):
         self._sync_annotation_brush_settings()
         self._refresh_annotation_ui()
         self.statusBar().showMessage(f"Loaded annotation {Path(selected_file).name}")
+        self._update_patch_windows_annotation_for_current_image()
 
     def _on_save_annotation(self) -> None:
         annotation_mask = self.state.annotation.active_mask
@@ -535,14 +543,17 @@ class MainWindow(QMainWindow):
     def _on_annotation_visibility_changed(self, visible: bool) -> None:
         self.state.annotation.visible = bool(visible)
         self.slice_viewer.set_annotation_overlay_visible(self.state.annotation.visible)
+        self._update_patch_windows_annotation_display_options()
 
     def _on_annotation_opacity_changed(self, opacity: float) -> None:
         self.state.annotation.opacity = min(max(float(opacity), 0.0), 1.0)
         self.slice_viewer.set_annotation_overlay_opacity(self.state.annotation.opacity)
+        self._update_patch_windows_annotation_display_options()
 
     def _on_annotation_active_label_changed(self, label: int) -> None:
         self.state.annotation.active_label = max(int(label), 1)
         self.slice_viewer.set_annotation_active_label(self.state.annotation.active_label)
+        self._update_patch_windows_annotation_display_options()
 
     def _on_annotation_brush_radius_changed(self, radius: int) -> None:
         self.state.annotation.brush_radius = max(int(radius), 0)
@@ -559,6 +570,7 @@ class MainWindow(QMainWindow):
             f"Annotation updated: {int(changed_voxels)} voxel(s) changed"
         )
         self.annotation_panel.set_undo_available(self.slice_viewer.annotation_can_undo())
+        self._update_patch_windows_annotation_for_current_image()
 
     def _on_annotation_undo_requested(self) -> None:
         changed = self.slice_viewer.undo_annotation()
@@ -569,6 +581,7 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(
             f"Undid annotation edit: {changed} voxel(s) restored"
         )
+        self._update_patch_windows_annotation_for_current_image()
 
     def _refresh_annotation_ui(self) -> None:
         annotation_state = self.state.annotation
@@ -595,6 +608,7 @@ class MainWindow(QMainWindow):
             undo_stack=self.state.annotation.undo_stack,
         )
         self._refresh_annotation_ui()
+        self._update_patch_windows_annotation_for_current_image()
 
     def _exit_annotation_mode(self) -> None:
         self.state.annotation.editing_enabled = False
@@ -621,6 +635,57 @@ class MainWindow(QMainWindow):
         else:
             source_stem = self.state.loaded_file_path.stem
         return self.state.loaded_file_path.with_name(f"{source_stem}_annotation.nii.gz")
+
+    def _active_annotation_volume(self) -> NiftiLoadResult | None:
+        annotation_mask = self.state.annotation.active_mask
+        if annotation_mask is None:
+            return None
+        return NiftiLoadResult(
+            data=annotation_mask.data,
+            affine=annotation_mask.affine,
+            header=annotation_mask.header,
+            shape=annotation_mask.shape,
+            dtype=annotation_mask.dtype,
+        )
+
+    def _extract_active_annotation_patch(
+        self,
+        bounds: PatchBounds,
+    ) -> AnnotationMask | None:
+        annotation_volume = self._active_annotation_volume()
+        annotation_mask = self.state.annotation.active_mask
+        if annotation_volume is None or annotation_mask is None:
+            return None
+        annotation_patch = extract_patch(annotation_volume, bounds)
+        return AnnotationMask(
+            data=annotation_patch.data,
+            affine=annotation_patch.affine,
+            header=annotation_patch.header,
+            labels=annotation_mask.labels,
+        )
+
+    def _update_patch_windows_annotation_for_current_image(self) -> None:
+        for patch_window in self._patch_windows_for_current_image():
+            bounds = patch_window.source_patch_bounds()
+            annotation_patch = (
+                self._extract_active_annotation_patch(bounds)
+                if bounds is not None
+                else None
+            )
+            patch_window.update_annotation_overlay(
+                annotation_patch,
+                opacity=self.state.annotation.opacity,
+                visible=self.state.annotation.visible,
+                active_label=self.state.annotation.active_label,
+            )
+
+    def _update_patch_windows_annotation_display_options(self) -> None:
+        for patch_window in self._patch_windows_for_current_image():
+            patch_window.update_annotation_display_options(
+                opacity=self.state.annotation.opacity,
+                visible=self.state.annotation.visible,
+                active_label=self.state.annotation.active_label,
+            )
 
     def _on_apply_tool_to_main_image_requested(self, tool_id: str) -> None:
         if self.state.volume is None:

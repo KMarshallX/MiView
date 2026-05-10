@@ -623,13 +623,21 @@ class TriPlanarViewerWidget(QWidget):
     def _update_projection_overrides(self) -> None:
         if self._display_volume is None:
             for view in self._views:
-                view.set_projection_slice(None, segmentation_slice_2d=None)
+                view.set_projection_slice(
+                    None,
+                    segmentation_slice_2d=None,
+                    annotation_slice_2d=None,
+                )
             return
 
         volume = self._display_volume.display_data
         for view in self._views:
             if not self._projection_enabled.get(view.orientation, False):
-                view.set_projection_slice(None, segmentation_slice_2d=None)
+                view.set_projection_slice(
+                    None,
+                    segmentation_slice_2d=None,
+                    annotation_slice_2d=None,
+                )
                 continue
             projection_slice = _project_oriented_volume(
                 volume,
@@ -643,10 +651,17 @@ class TriPlanarViewerWidget(QWidget):
                     view.orientation,
                     self._projection_mode,
                 )
+            annotation_projection_slice = None
+            if self._annotation_display_volume is not None:
+                annotation_projection_slice = _project_annotation_volume(
+                    self._annotation_display_volume.display_data,
+                    view.orientation,
+                )
             view.set_projection_slice(
                 projection_slice,
                 f"{self._projection_mode} ({view.orientation.title()})",
                 segmentation_slice_2d=segmentation_projection_slice,
+                annotation_slice_2d=annotation_projection_slice,
             )
 
     def _apply_segmentation_overlay_to_views(self) -> None:
@@ -679,6 +694,7 @@ class TriPlanarViewerWidget(QWidget):
             view.set_annotation_editing_enabled(self._annotation_editing_enabled)
             view.set_annotation_brush_radius(self._annotation_brush_radius)
             view.set_annotation_brush_mode(self._annotation_brush_mode)
+        self._update_projection_overrides()
 
     def _sync_annotation_overlay_for_loaded_volume(self) -> None:
         if self._display_volume is None or self._annotation_mask is None:
@@ -748,6 +764,16 @@ def _project_oriented_volume(
         return reducer(volume, axis=1).T[::-1, ::-1]
     if orientation == "sagittal":
         return reducer(volume, axis=0).T[::-1, ::-1]
+    raise ValueError(f"Unsupported orientation: {orientation}")
+
+
+def _project_annotation_volume(volume: np.ndarray, orientation: Orientation) -> np.ndarray:
+    if orientation == "axial":
+        return np.max(volume, axis=2).T[::-1, ::-1]
+    if orientation == "coronal":
+        return np.max(volume, axis=1).T[::-1, ::-1]
+    if orientation == "sagittal":
+        return np.max(volume, axis=0).T[::-1, ::-1]
     raise ValueError(f"Unsupported orientation: {orientation}")
 
 
