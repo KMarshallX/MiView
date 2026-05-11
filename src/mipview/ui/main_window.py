@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QProgressBar,
+    QProgressDialog,
     QSplitter,
     QWidget,
 )
@@ -23,6 +24,7 @@ from mipview.annotation import (
     annotation_metadata_path,
     create_empty_annotation_mask,
     load_annotation_mask,
+    recon_annotation_metadata,
     save_annotation_metadata,
     save_annotation_mask,
 )
@@ -53,6 +55,13 @@ from mipview.ui.window_styling import (
     apply_window_content_frame,
 )
 from mipview.viewer.triplanar_viewer_widget import TriPlanarViewerWidget
+
+ANNOTATION_LOAD_FILTER = (
+    "Annotation Files (*.nii *.nii.gz *.json);;"
+    "NIfTI Files (*.nii *.nii.gz);;"
+    "JSON Metadata (*.json);;"
+    "All Files (*)"
+)
 
 
 class MainWindow(QMainWindow):
@@ -480,17 +489,38 @@ class MainWindow(QMainWindow):
 
         selected_file, _ = QFileDialog.getOpenFileName(
             self,
-            "Load Annotation Mask",
+            "Load Annotation",
             "",
-            "NIfTI Files (*.nii *.nii.gz);;All Files (*)",
+            ANNOTATION_LOAD_FILTER,
         )
         if not selected_file:
             self.statusBar().showMessage("Annotation load canceled")
             return
 
+        selected_path = Path(selected_file)
+        progress = self._show_annotation_load_progress(
+            "Reconstructing annotation metadata..."
+            if self._is_annotation_metadata_path(selected_path)
+            else "Loading annotation..."
+        )
+        reconstructed_path: Path | None = None
         try:
-            annotation_mask = load_annotation_mask(selected_file, self.state.volume)
-        except (FileNotFoundError, ValueError) as exc:
+            if self._is_annotation_metadata_path(selected_path):
+                reconstructed_path = self._temporary_reconstructed_annotation_path(
+                    selected_path
+                )
+                recon_annotation_metadata(
+                    selected_path,
+                    reconstructed_path,
+                    source_image_path=self.state.loaded_file_path,
+                )
+                annotation_mask = load_annotation_mask(
+                    reconstructed_path,
+                    self.state.volume,
+                )
+            else:
+                annotation_mask = load_annotation_mask(selected_path, self.state.volume)
+        except (FileNotFoundError, ValueError, OSError) as exc:
             QMessageBox.warning(
                 self,
                 "Annotation Load Failed",
@@ -498,7 +528,35 @@ class MainWindow(QMainWindow):
             )
             self.statusBar().showMessage("Annotation load failed")
             return
+        finally:
+            progress.close()
+            if reconstructed_path is not None:
+                reconstructed_path.unlink(missing_ok=True)
 
+        self._set_loaded_annotation_mask(annotation_mask)
+        self.statusBar().showMessage(f"Loaded annotation {selected_path.name}")
+
+    @staticmethod
+    def _is_annotation_metadata_path(path: str | Path) -> bool:
+        return Path(path).suffix.lower() == ".json"
+
+    @staticmethod
+    def _temporary_reconstructed_annotation_path(metadata_path: Path) -> Path:
+        return metadata_path.with_name(
+            f".{metadata_path.stem}.mipview-reconstructed-{uuid4().hex}.nii.gz"
+        )
+
+    def _show_annotation_load_progress(self, message: str) -> QProgressDialog:
+        progress = QProgressDialog(message, None, 0, 0, self)
+        progress.setWindowTitle("Loading Annotation")
+        progress.setWindowModality(Qt.WindowModality.ApplicationModal)
+        progress.setMinimumDuration(0)
+        progress.setCancelButton(None)
+        progress.show()
+        QApplication.processEvents()
+        return progress
+
+    def _set_loaded_annotation_mask(self, annotation_mask: AnnotationMask) -> None:
         self.state.annotation.active_mask = annotation_mask
         self.state.annotation.undo_stack.clear()
         self.state.annotation.editing_enabled = True
@@ -511,7 +569,6 @@ class MainWindow(QMainWindow):
         )
         self._sync_annotation_brush_settings()
         self._refresh_annotation_ui()
-        self.statusBar().showMessage(f"Loaded annotation {Path(selected_file).name}")
         self._update_patch_windows_annotation_for_current_image()
 
     def _on_save_annotation(self) -> None:
@@ -521,6 +578,39 @@ class MainWindow(QMainWindow):
                 self,
                 "No Annotation",
                 "Create or load an annotation before saving.",
+            )
+            return
+
+        export_type = self.annotation_panel.current_export_type()
+        if export_type == AnnotationPanel.EXPORT_JSON:
+            selected_path, _ = QFileDialog.getSaveFileName(
+                self,
+                "Save Annotation Metadata",
+                str(self._default_annotation_metadata_save_path()),
+                "JSON Files (*.json);;All Files (*)",
+            )
+            if not selected_path:
+                self.statusBar().showMessage("Annotation save canceled")
+                return
+
+            metadata_path = Path(selected_path)
+            if not self._confirm_overwrite_annotation_outputs([metadata_path]):
+                return
+
+            try:
+                saved_metadata_path = save_annotation_metadata(
+                    annotation_mask,
+                    "",
+                    metadata_path,
+                    source_image_path=self.state.loaded_file_path,
+                    overwrite=True,
+                )
+            except (FileExistsError, ValueError, OSError) as exc:
+                QMessageBox.critical(self, "Annotation Save Failed", str(exc))
+                self.statusBar().showMessage("Annotation save failed")
+                return
+            self.statusBar().showMessage(
+                f"Saved annotation metadata {saved_metadata_path}"
             )
             return
 
@@ -536,9 +626,44 @@ class MainWindow(QMainWindow):
 
         mask_path = Path(selected_path)
         metadata_path = annotation_metadata_path(mask_path)
-        existing_outputs = [
-            path for path in (mask_path, metadata_path) if path.exists()
-        ]
+        output_paths = (
+            [mask_path, metadata_path]
+            if export_type == AnnotationPanel.EXPORT_BOTH
+            else [mask_path]
+        )
+        if not self._confirm_overwrite_annotation_outputs(output_paths):
+            return
+
+        try:
+            saved_path = save_annotation_mask(
+                annotation_mask,
+                mask_path,
+                overwrite=True,
+            )
+            if export_type == AnnotationPanel.EXPORT_BOTH:
+                saved_metadata_path = save_annotation_metadata(
+                    annotation_mask,
+                    saved_path,
+                    metadata_path,
+                    source_image_path=self.state.loaded_file_path,
+                    overwrite=True,
+                )
+            else:
+                saved_metadata_path = None
+        except (FileExistsError, ValueError, OSError) as exc:
+            QMessageBox.critical(self, "Annotation Save Failed", str(exc))
+            self.statusBar().showMessage("Annotation save failed")
+            return
+
+        if saved_metadata_path is None:
+            self.statusBar().showMessage(f"Saved annotation {saved_path}")
+        else:
+            self.statusBar().showMessage(
+                f"Saved annotation {saved_path} and metadata {saved_metadata_path}"
+            )
+
+    def _confirm_overwrite_annotation_outputs(self, output_paths: list[Path]) -> bool:
+        existing_outputs = [path for path in output_paths if path.exists()]
         if existing_outputs:
             existing_names = "\n".join(str(path) for path in existing_outputs)
             choice = QMessageBox.question(
@@ -553,28 +678,8 @@ class MainWindow(QMainWindow):
             )
             if choice != QMessageBox.StandardButton.Yes:
                 self.statusBar().showMessage("Annotation save canceled")
-                return
-
-        try:
-            saved_path = save_annotation_mask(
-                annotation_mask,
-                mask_path,
-                overwrite=True,
-            )
-            saved_metadata_path = save_annotation_metadata(
-                annotation_mask,
-                saved_path,
-                metadata_path,
-                source_image_path=self.state.loaded_file_path,
-                overwrite=True,
-            )
-        except (FileExistsError, ValueError, OSError) as exc:
-            QMessageBox.critical(self, "Annotation Save Failed", str(exc))
-            self.statusBar().showMessage("Annotation save failed")
-            return
-        self.statusBar().showMessage(
-            f"Saved annotation {saved_path} and metadata {saved_metadata_path}"
-        )
+                return False
+        return True
 
     def _on_annotation_visibility_changed(self, visible: bool) -> None:
         self.state.annotation.visible = bool(visible)
@@ -671,6 +776,9 @@ class MainWindow(QMainWindow):
         else:
             source_stem = self.state.loaded_file_path.stem
         return self.state.loaded_file_path.with_name(f"{source_stem}_annotation.nii.gz")
+
+    def _default_annotation_metadata_save_path(self) -> Path:
+        return annotation_metadata_path(self._default_annotation_save_path())
 
     def _active_annotation_volume(self) -> NiftiLoadResult | None:
         annotation_mask = self.state.annotation.active_mask

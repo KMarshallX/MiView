@@ -12,6 +12,9 @@ from mipview.annotation.annotation_mask import AnnotationMask
 from mipview.nifti_io import NiftiLoadResult
 from mipview.nifti_io import load_nifti
 
+RLE_LINEAR_ENCODING = "rle_linear"
+INDEX_ORDER = "x_fastest_xyz"
+
 
 @dataclass(frozen=True)
 class AnnotationCompatibilityResult:
@@ -162,6 +165,70 @@ def annotation_metadata_path(annotation_path: str | Path) -> Path:
     return output_path.with_suffix(".json")
 
 
+def _validate_shape(shape_value: Any) -> tuple[int, int, int]:
+    if not isinstance(shape_value, list | tuple):
+        raise ValueError("Annotation metadata shape must be a flat array.")
+    if len(shape_value) != 3:
+        raise ValueError(
+            f"Annotation metadata shape must contain exactly 3 values, got {len(shape_value)}."
+        )
+
+    shape: list[int] = []
+    for dim in shape_value:
+        if not isinstance(dim, int) or isinstance(dim, bool):
+            raise ValueError("Annotation metadata shape must contain integer values.")
+        if dim <= 0:
+            raise ValueError("Annotation metadata shape must contain positive integers.")
+        shape.append(int(dim))
+    return (shape[0], shape[1], shape[2])
+
+
+def _num_voxels(shape: tuple[int, int, int]) -> int:
+    return int(shape[0]) * int(shape[1]) * int(shape[2])
+
+
+def _require_int(value: Any, field_name: str) -> int:
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise ValueError(f"Annotation metadata {field_name} must be an integer.")
+    return int(value)
+
+
+def encode_rle_linear_indices(
+    indices: np.ndarray | list[int] | tuple[int, ...],
+) -> list[list[int]]:
+    """Encode sorted voxel linear indices as contiguous ``[start, length]`` runs."""
+    index_array = np.asarray(indices, dtype=np.int64).reshape(-1)
+    if index_array.size == 0:
+        return []
+
+    index_array = np.unique(index_array)
+    if np.any(index_array < 0):
+        raise ValueError("RLE-linear indices must be non-negative.")
+
+    breaks = np.flatnonzero(np.diff(index_array) != 1) + 1
+    starts = np.concatenate(([0], breaks))
+    stops = np.concatenate((breaks, [index_array.size]))
+    return [
+        [int(index_array[start]), int(stop - start)]
+        for start, stop in zip(starts, stops, strict=True)
+    ]
+
+
+def linear_indices_from_mask(mask: np.ndarray) -> np.ndarray:
+    """Return foreground voxel indices using x-fastest XYZ flattening."""
+    mask_array = np.asarray(mask)
+    if mask_array.ndim != 3:
+        raise ValueError(
+            f"Annotation mask must be 3D to encode RLE-linear metadata, got {mask_array.ndim}D."
+        )
+    return np.flatnonzero(mask_array.ravel(order="F")).astype(np.int64, copy=False)
+
+
+def encode_rle_linear_mask(mask: np.ndarray) -> list[list[int]]:
+    """Encode a binary annotation mask as RLE-linear runs."""
+    return encode_rle_linear_indices(linear_indices_from_mask(mask))
+
+
 def build_annotation_metadata(
     annotation_mask: AnnotationMask,
     annotation_path: str | Path,
@@ -169,17 +236,27 @@ def build_annotation_metadata(
     source_image_path: str | Path | None = None,
     notes: str = "",
 ) -> dict[str, Any]:
-    """Build simple JSON metadata describing a saved annotation mask."""
-    labels = {
-        str(int(label)): name
-        for label, name in sorted(annotation_mask.labels.items())
+    """Build RLE-linear JSON metadata describing annotated voxels."""
+    labels: dict[str, dict[str, Any]] = {}
+    data = np.asarray(annotation_mask.data)
+    label_values = {
+        int(label)
+        for label in np.unique(data)
         if int(label) != 0
-    }
+    } | {int(label) for label in annotation_mask.labels if int(label) != 0}
+    for label_value in sorted(label_values):
+        label_indices = linear_indices_from_mask(data == label_value)
+        labels[str(label_value)] = {
+            "name": annotation_mask.labels.get(label_value, f"label {label_value}"),
+            "encoding": RLE_LINEAR_ENCODING,
+            "runs": encode_rle_linear_indices(label_indices),
+        }
+
     return {
         "source_image": "" if source_image_path is None else str(source_image_path),
         "annotation_mask": str(annotation_path),
+        "index_order": INDEX_ORDER,
         "labels": labels,
-        "created_by": "MipView",
         "shape": [int(dim) for dim in annotation_mask.shape],
         "notes": notes,
     }
@@ -212,7 +289,146 @@ def save_annotation_metadata(
         notes=notes,
     )
     output_path.write_text(
-        json.dumps(metadata, indent=2, sort_keys=True) + "\n",
+        json.dumps(metadata, sort_keys=True, separators=(",", ":")) + "\n",
         encoding="utf-8",
     )
     return output_path
+
+
+def _load_annotation_metadata(metadata: str | Path | dict[str, Any]) -> dict[str, Any]:
+    if isinstance(metadata, str | Path):
+        metadata_path = Path(metadata)
+        loaded_metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        if not isinstance(loaded_metadata, dict):
+            raise ValueError("Annotation metadata JSON must contain an object.")
+        return loaded_metadata
+    if isinstance(metadata, dict):
+        return metadata
+    raise TypeError("Annotation metadata must be a JSON path or loaded dictionary.")
+
+
+def _decode_rle_linear_runs(
+    runs: Any,
+    *,
+    shape: tuple[int, int, int],
+    label_value: int,
+    flat_mask: np.ndarray,
+) -> None:
+    if not isinstance(runs, list):
+        raise ValueError("RLE-linear runs must be a list of [start, length] pairs.")
+
+    total_voxels = _num_voxels(shape)
+    for run in runs:
+        if not isinstance(run, list | tuple) or len(run) != 2:
+            raise ValueError("Each RLE-linear run must be a pair of integers.")
+
+        start = _require_int(run[0], "run start")
+        length = _require_int(run[1], "run length")
+        if start < 0:
+            raise ValueError("RLE-linear run start must be >= 0.")
+        if length <= 0:
+            raise ValueError("RLE-linear run length must be > 0.")
+        if start + length > total_voxels:
+            raise ValueError(
+                "RLE-linear run exceeds the annotation mask size for the stored shape."
+            )
+
+        flat_mask[start : start + length] = label_value
+
+
+def decode_annotation_metadata(metadata: str | Path | dict[str, Any]) -> np.ndarray:
+    """Decode RLE-linear annotation metadata into a voxel-space integer mask."""
+    loaded_metadata = _load_annotation_metadata(metadata)
+    shape = _validate_shape(loaded_metadata.get("shape"))
+
+    index_order = loaded_metadata.get("index_order", INDEX_ORDER)
+    if index_order != INDEX_ORDER:
+        raise ValueError(
+            f"Unsupported annotation index_order {index_order!r}; expected {INDEX_ORDER!r}."
+        )
+
+    labels = loaded_metadata.get("labels")
+    if not isinstance(labels, dict):
+        raise ValueError("Annotation metadata must contain a labels object.")
+
+    flat_mask = np.zeros(_num_voxels(shape), dtype=np.uint8)
+    for label_key, label_metadata in labels.items():
+        try:
+            label_value = int(label_key)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"Annotation label key {label_key!r} must be parseable as an integer."
+            ) from exc
+
+        if label_value < 0 or label_value > np.iinfo(np.uint8).max:
+            raise ValueError("Annotation label values must fit in uint8 for decoding.")
+        if not isinstance(label_metadata, dict):
+            raise ValueError("Annotation label metadata must be an object.")
+
+        encoding = label_metadata.get("encoding")
+        if encoding != RLE_LINEAR_ENCODING:
+            raise ValueError(
+                f"Unsupported annotation encoding {encoding!r}; expected {RLE_LINEAR_ENCODING!r}."
+            )
+
+        _decode_rle_linear_runs(
+            label_metadata.get("runs"),
+            shape=shape,
+            label_value=label_value,
+            flat_mask=flat_mask,
+        )
+
+    return flat_mask.reshape(shape, order="F")
+
+
+def recon_annotation_metadata(
+    metadata_path: str | Path,
+    output_path: str | Path,
+    source_image_path: str | Path | None = None,
+) -> Path:
+    """Reconstruct RLE-linear metadata as a NIfTI mask aligned to the source image."""
+    metadata = _load_annotation_metadata(metadata_path)
+    decoded_mask = decode_annotation_metadata(metadata)
+
+    resolved_source_path = source_image_path
+    if resolved_source_path is None:
+        metadata_source_path = metadata.get("source_image")
+        if isinstance(metadata_source_path, str) and metadata_source_path:
+            resolved_source_path = metadata_source_path
+    if resolved_source_path is None:
+        raise ValueError(
+            "A source image path is required, either as an argument or metadata['source_image']."
+        )
+
+    try:
+        source_volume = load_nifti(resolved_source_path)
+    except (FileNotFoundError, ValueError) as exc:
+        raise ValueError(
+            f"Could not load source NIfTI image: {resolved_source_path}"
+        ) from exc
+
+    source_shape = tuple(int(dim) for dim in source_volume.shape)
+    if len(source_shape) != 3:
+        raise ValueError(f"Source NIfTI image must be 3D, got shape {source_shape}.")
+    if decoded_mask.shape != source_shape:
+        raise ValueError(
+            "Decoded annotation shape does not match source image shape. "
+            f"Annotation shape={decoded_mask.shape}, source shape={source_shape}."
+        )
+
+    destination = Path(output_path)
+    if not str(destination).lower().endswith((".nii", ".nii.gz")):
+        raise ValueError("Reconstructed annotation path must end with .nii or .nii.gz.")
+
+    affine = source_volume.affine
+    header = source_volume.header.copy()
+    header.set_data_dtype(np.uint8)
+    header.set_data_shape(decoded_mask.shape)
+
+    image = nib.Nifti1Image(
+        decoded_mask.astype(np.uint8, copy=False),
+        affine,
+        header=header,
+    )
+    nib.save(image, str(destination))
+    return destination
