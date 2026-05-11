@@ -324,6 +324,9 @@ class TriPlanarViewerWidget(QWidget):
         self._segmentation_opacity = min(max(opacity, 0.0), 1.0)
         self._apply_segmentation_overlay_to_views()
 
+    def segmentation_overlay_opacity(self) -> float:
+        return self._segmentation_opacity
+
     def set_annotation_overlay(
         self,
         annotation_mask: AnnotationMask | None,

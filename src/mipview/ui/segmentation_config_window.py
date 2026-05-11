@@ -2,12 +2,14 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QPoint, Qt, Signal
+from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QLabel,
     QListWidget,
     QListWidgetItem,
     QMainWindow,
+    QMenu,
     QSlider,
     QVBoxLayout,
     QWidget,
@@ -17,6 +19,7 @@ from PySide6.QtWidgets import (
 class SegmentationConfigWindow(QMainWindow):
     active_segmentation_changed = Signal(str)
     opacity_changed = Signal(float)
+    unload_segmentation_requested = Signal(str)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -31,8 +34,12 @@ class SegmentationConfigWindow(QMainWindow):
         self.image_label = QLabel("Image: none", container)
         self.segmentations_label = QLabel("Loaded Segmentations", container)
         self.segmentation_list = QListWidget(container)
+        self.segmentation_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.segmentation_list.currentItemChanged.connect(
             self._on_current_segmentation_changed
+        )
+        self.segmentation_list.customContextMenuRequested.connect(
+            self._on_segmentation_context_menu_requested
         )
 
         self.opacity_label = QLabel("Overlay Opacity", container)
@@ -91,3 +98,25 @@ class SegmentationConfigWindow(QMainWindow):
 
     def _on_opacity_slider_changed(self, value: int) -> None:
         self.opacity_changed.emit(value / 100.0)
+
+    def _on_segmentation_context_menu_requested(self, position: QPoint) -> None:
+        item = self.segmentation_list.itemAt(position)
+        if item is None:
+            return
+        menu = self._build_segmentation_context_menu(item)
+        menu.exec(self.segmentation_list.viewport().mapToGlobal(position))
+
+    def _build_segmentation_context_menu(self, item: QListWidgetItem) -> QMenu:
+        menu = QMenu(self)
+        segmentation_id = item.data(Qt.ItemDataRole.UserRole)
+        unload_action = QAction("Unload this label", menu)
+        if isinstance(segmentation_id, str):
+            unload_action.triggered.connect(
+                lambda _checked=False, selected_id=segmentation_id: (
+                    self.unload_segmentation_requested.emit(selected_id)
+                )
+            )
+        else:
+            unload_action.setEnabled(False)
+        menu.addAction(unload_action)
+        return menu

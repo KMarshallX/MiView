@@ -104,6 +104,9 @@ class MainWindow(QMainWindow):
         self.segmentation_config_window.opacity_changed.connect(
             self._on_segmentation_opacity_changed
         )
+        self.segmentation_config_window.unload_segmentation_requested.connect(
+            self._on_unload_segmentation_requested
+        )
         self.slice_viewer.cursor_inspection_changed.connect(
             self.cursor_panel.set_cursor_values
         )
@@ -411,7 +414,7 @@ class MainWindow(QMainWindow):
             extracted,
             segmentation_volume=(
                 extract_patch(active_segmentation.volume, bounds)
-                if active_segmentation is not None
+                if active_segmentation is not None and active_segmentation.kind == "file"
                 else None
             ),
             segmentation_opacity=self.state.segmentation_opacity,
@@ -454,6 +457,13 @@ class MainWindow(QMainWindow):
         patch_window.annotation_brush_mode_changed.connect(
             self._on_annotation_brush_mode_changed
         )
+        patch_window.unload_current_segmentation_requested.connect(
+            self._on_unload_current_segmentation
+        )
+        patch_window.open_segmentation_configuration_requested.connect(
+            self._on_open_segmentation_configuration
+        )
+        self._sync_patch_window_segmentation_menu_state(patch_window)
         patch_window.show()
         self._patch_windows.append(patch_window)
         patch_window.destroyed.connect(
@@ -1111,24 +1121,44 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("No active segmentation to unload")
             return
 
-        if active_segmentation.kind == "annotation":
+        self._unload_segmentation_by_id(active_segmentation.id)
+
+    def _on_unload_segmentation_requested(self, segmentation_id: str) -> None:
+        self._unload_segmentation_by_id(segmentation_id)
+
+    def _unload_segmentation_by_id(self, segmentation_id: str) -> None:
+        target_segmentation = next(
+            (
+                segmentation
+                for segmentation in self.state.loaded_segmentations
+                if segmentation.id == segmentation_id
+            ),
+            None,
+        )
+        if target_segmentation is None:
+            self.statusBar().showMessage("Segmentation is no longer loaded")
+            return
+
+        if target_segmentation.kind == "annotation":
             self._clear_annotation_session()
             self.statusBar().showMessage("Unloaded annotation layer")
             return
 
+        removed_active = self.state.active_segmentation_id == target_segmentation.id
         self.state.loaded_segmentations = [
             segmentation
             for segmentation in self.state.loaded_segmentations
-            if segmentation.id != active_segmentation.id
+            if segmentation.id != target_segmentation.id
         ]
-        self.state.active_segmentation_id = (
-            self.state.loaded_segmentations[0].id
-            if self.state.loaded_segmentations
-            else None
-        )
+        if removed_active:
+            self.state.active_segmentation_id = (
+                self.state.loaded_segmentations[0].id
+                if self.state.loaded_segmentations
+                else None
+            )
         self._apply_active_segmentation_overlay()
         self._refresh_segmentation_ui()
-        self.statusBar().showMessage("Unloaded current segmentation")
+        self.statusBar().showMessage("Unloaded segmentation")
 
     def _on_open_segmentation_configuration(self) -> None:
         self._refresh_segmentation_ui()
@@ -1211,6 +1241,7 @@ class MainWindow(QMainWindow):
             if self._active_segmentation_is_annotation()
             else self.state.segmentation_opacity
         )
+        self._sync_patch_windows_segmentation_menu_state()
 
     def _clear_segmentation_session(self) -> None:
         self.state.segmentation_image_path = None
@@ -1239,7 +1270,11 @@ class MainWindow(QMainWindow):
     ) -> None:
         for patch_window in self._patch_windows_for_current_image():
             bounds = patch_window.source_patch_bounds()
-            if active_segmentation is None or bounds is None:
+            if (
+                active_segmentation is None
+                or active_segmentation.kind == "annotation"
+                or bounds is None
+            ):
                 patch_window.update_segmentation_overlay(
                     None,
                     opacity=self.state.segmentation_opacity,
@@ -1249,6 +1284,34 @@ class MainWindow(QMainWindow):
                 extract_patch(active_segmentation.volume, bounds),
                 opacity=self.state.segmentation_opacity,
             )
+
+    def _sync_patch_windows_segmentation_menu_state(self) -> None:
+        has_image = self.state.volume is not None
+        has_segmentations = len(self.state.loaded_segmentations) > 0
+        for patch_window in self._patch_windows_for_current_image():
+            self._sync_patch_window_segmentation_menu_state(
+                patch_window,
+                has_segmentations=has_segmentations,
+                has_image=has_image,
+            )
+
+    def _sync_patch_window_segmentation_menu_state(
+        self,
+        patch_window: PatchViewerWindow,
+        *,
+        has_segmentations: bool | None = None,
+        has_image: bool | None = None,
+    ) -> None:
+        patch_window.set_segmentation_menu_enabled(
+            can_unload=(
+                len(self.state.loaded_segmentations) > 0
+                if has_segmentations is None
+                else has_segmentations
+            ),
+            can_open_configuration=(
+                self.state.volume is not None if has_image is None else has_image
+            ),
+        )
 
     def _update_patch_windows_segmentation_opacity_for_current_image(self) -> None:
         for patch_window in self._patch_windows_for_current_image():
