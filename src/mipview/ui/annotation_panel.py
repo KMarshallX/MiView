@@ -4,6 +4,7 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
+    QComboBox,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
@@ -27,6 +28,9 @@ class AnnotationPanel(QWidget):
     undo_requested = Signal()
 
     PANEL_WIDTH = 220
+    EXPORT_NIFTI = "nifti"
+    EXPORT_JSON = "json"
+    EXPORT_BOTH = "both"
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -48,7 +52,6 @@ class AnnotationPanel(QWidget):
         action_layout.setContentsMargins(0, 0, 0, 0)
         action_layout.addWidget(self.create_button)
         action_layout.addWidget(self.load_button)
-        action_layout.addWidget(self.save_button)
 
         self.visible_checkbox = QCheckBox("Visible", group)
         self.visible_checkbox.setChecked(True)
@@ -98,6 +101,11 @@ class AnnotationPanel(QWidget):
         mode_layout.addWidget(self.cursor_button)
         mode_layout.addWidget(self.erase_button)
 
+        self.export_combobox = QComboBox(group)
+        self.export_combobox.addItem("NIFTI file", self.EXPORT_NIFTI)
+        self.export_combobox.addItem("JSON metadata", self.EXPORT_JSON)
+        self.export_combobox.addItem("Both", self.EXPORT_BOTH)
+
         self.undo_button = QPushButton("Undo", group)
         self.undo_button.setEnabled(False)
         self.undo_button.clicked.connect(self.undo_requested.emit)
@@ -108,6 +116,8 @@ class AnnotationPanel(QWidget):
         form.addRow("Active Label:", self.active_label_spinbox)
         form.addRow("Brush Radius:", self.brush_radius_spinbox)
         form.addRow("Mode:", mode_row)
+        form.addRow("Export:", self.export_combobox)
+        form.addRow(self.save_button)
         form.addRow(self.undo_button)
 
         layout = QVBoxLayout(self)
@@ -142,6 +152,7 @@ class AnnotationPanel(QWidget):
             self.paint_button,
             self.cursor_button,
             self.erase_button,
+            self.export_combobox,
         ):
             widget.setEnabled(editing)
         self.undo_button.setEnabled(editing and can_undo)
@@ -184,6 +195,12 @@ class AnnotationPanel(QWidget):
         self.paint_button.blockSignals(was_paint_blocked)
         self.cursor_button.blockSignals(was_cursor_blocked)
         self.erase_button.blockSignals(was_erase_blocked)
+
+    def current_export_type(self) -> str:
+        export_type = self.export_combobox.currentData()
+        if export_type in {self.EXPORT_JSON, self.EXPORT_BOTH}:
+            return str(export_type)
+        return self.EXPORT_NIFTI
 
     def _on_opacity_changed(self, value: int) -> None:
         self.opacity_changed.emit(value / 100.0)
