@@ -74,6 +74,7 @@ class TriPlanarViewerWidget(QWidget):
         self.zoom_state = ZoomState(self)
         self.patch_selector = PatchSelector(DEFAULT_PATCH_SIZE)
         self._projection_mode = "MIP"
+        self._active_view: Orientation | None = None
         self._drop_loading_enabled = False
         self._projection_enabled: dict[str, bool] = {
             "axial": False,
@@ -185,6 +186,7 @@ class TriPlanarViewerWidget(QWidget):
         self._annotation_mask = None
         self._annotation_display_volume = None
         self._annotation_editing_enabled = False
+        self._active_view = None
         self.cursor_state.clear()
         self.zoom_state.set_zoom_factor(1.0)
         self.patch_selector.clear()
@@ -210,6 +212,20 @@ class TriPlanarViewerWidget(QWidget):
 
     def current_cursor_position(self) -> tuple[int, int, int] | None:
         return self.cursor_state.cursor_position()
+
+    def active_view(self) -> Orientation | None:
+        return self._active_view
+
+    def current_slice_indices(self) -> dict[str, int] | None:
+        cursor = self.cursor_state.cursor_position()
+        if cursor is None:
+            return None
+        x, y, z = cursor
+        return {
+            "axial": int(z),
+            "coronal": int(y),
+            "sagittal": int(x),
+        }
 
     def set_cursor_overlay_visible(self, visible: bool) -> None:
         for view in self._views:
@@ -438,6 +454,7 @@ class TriPlanarViewerWidget(QWidget):
         return super().eventFilter(watched, event)
 
     def _on_cursor_selected(self, x: int, y: int, z: int) -> None:
+        self._set_active_view_from_sender()
         self.cursor_state.set_cursor_position((x, y, z))
 
     def _on_cursor_changed(self, x: int, y: int, z: int) -> None:
@@ -453,12 +470,15 @@ class TriPlanarViewerWidget(QWidget):
         self._update_patch_overlays()
 
     def _on_patch_center_selected(self, x: int, y: int, z: int) -> None:
+        self._set_active_view_from_sender()
         self.patch_selector.set_center((x, y, z))
         self._update_patch_overlays()
 
     def _on_annotation_voxel_selected(
         self, orientation: str, x: int, y: int, z: int
     ) -> None:
+        if orientation in ("axial", "coronal", "sagittal"):
+            self._active_view = orientation  # type: ignore[assignment]
         if (
             self._annotation_mask is None
             or not self._annotation_editing_enabled
@@ -498,6 +518,12 @@ class TriPlanarViewerWidget(QWidget):
             self._annotation_undo_stack.can_undo()
         )
         self.annotation_changed.emit(changed)
+
+    def _set_active_view_from_sender(self) -> None:
+        sender = self.sender()
+        orientation = getattr(sender, "orientation", None)
+        if orientation in ("axial", "coronal", "sagittal"):
+            self._active_view = orientation
 
     def undo_annotation(self) -> int:
         if self._annotation_mask is None:

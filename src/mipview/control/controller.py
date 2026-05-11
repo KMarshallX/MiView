@@ -61,6 +61,8 @@ class MipViewController:
             "image_shape": _shape_to_list(volume.shape if volume is not None else None),
             "voxel_spacing": _voxel_spacing(volume),
             "cursor": _tuple_to_list(slice_viewer.current_cursor_position()),
+            "active_view": _active_view(slice_viewer),
+            "slice_indices": _slice_indices(slice_viewer),
             "patch": {
                 "center": _tuple_to_list(slice_viewer.current_patch_center()),
                 "size": _tuple_to_list(slice_viewer.patch_size_xyz()),
@@ -409,6 +411,26 @@ def _projection_mode(slice_viewer: Any) -> str | None:
     if mode is None:
         return None
     return str(mode)
+
+
+def _active_view(slice_viewer: Any) -> str | None:
+    active_view_method = getattr(slice_viewer, "active_view", None)
+    if not callable(active_view_method):
+        return None
+    value = active_view_method()
+    if value is None:
+        return None
+    return str(value)
+
+
+def _slice_indices(slice_viewer: Any) -> dict[str, int] | None:
+    indices_method = getattr(slice_viewer, "current_slice_indices", None)
+    if not callable(indices_method):
+        return None
+    value = indices_method()
+    if value is None:
+        return None
+    return {str(key): int(index) for key, index in value.items()}
 
 
 def _first_out_of_bounds_axis(
