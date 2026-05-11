@@ -4,7 +4,6 @@ import logging
 import os
 from pathlib import Path
 
-import numpy as np
 from PySide6.QtCore import QEvent, QObject, Qt, Signal
 from PySide6.QtGui import QDragEnterEvent, QDragMoveEvent, QDropEvent
 from PySide6.QtWidgets import QGridLayout, QWidget
@@ -15,8 +14,8 @@ from mipview.annotation.undo import AnnotationUndoStack
 from mipview.ui.drop_loading import first_supported_local_nifti_path
 from mipview.state.cursor_state import CursorState
 from mipview.state.zoom_state import ZoomState
-from mipview.nifti_io import NiftiLoadResult
-from mipview.patch_selector import (
+from mipview.io.nifti_io import NiftiLoadResult
+from mipview.patch.selector import (
     DEFAULT_PATCH_SIZE,
     PatchBounds,
     PatchSelector,
@@ -31,6 +30,7 @@ from mipview.viewer.slice_geometry import (
     compute_shared_base_scale,
     plane_axes_for_orientation,
     plane_shape_for_orientation,
+    project_oriented_volume,
 )
 from mipview.viewer.slice_viewer_widget import SliceViewerWidget
 
@@ -74,6 +74,7 @@ class TriPlanarViewerWidget(QWidget):
         self.zoom_state = ZoomState(self)
         self.patch_selector = PatchSelector(DEFAULT_PATCH_SIZE)
         self._projection_mode = "MIP"
+        self._active_view: Orientation | None = None
         self._drop_loading_enabled = False
         self._projection_enabled: dict[str, bool] = {
             "axial": False,
@@ -185,6 +186,7 @@ class TriPlanarViewerWidget(QWidget):
         self._annotation_mask = None
         self._annotation_display_volume = None
         self._annotation_editing_enabled = False
+        self._active_view = None
         self.cursor_state.clear()
         self.zoom_state.set_zoom_factor(1.0)
         self.patch_selector.clear()
@@ -210,6 +212,20 @@ class TriPlanarViewerWidget(QWidget):
 
     def current_cursor_position(self) -> tuple[int, int, int] | None:
         return self.cursor_state.cursor_position()
+
+    def active_view(self) -> Orientation | None:
+        return self._active_view
+
+    def current_slice_indices(self) -> dict[str, int] | None:
+        cursor = self.cursor_state.cursor_position()
+        if cursor is None:
+            return None
+        x, y, z = cursor
+        return {
+            "axial": int(z),
+            "coronal": int(y),
+            "sagittal": int(x),
+        }
 
     def set_cursor_overlay_visible(self, visible: bool) -> None:
         for view in self._views:
@@ -324,6 +340,9 @@ class TriPlanarViewerWidget(QWidget):
         self._segmentation_opacity = min(max(opacity, 0.0), 1.0)
         self._apply_segmentation_overlay_to_views()
 
+    def segmentation_overlay_opacity(self) -> float:
+        return self._segmentation_opacity
+
     def set_annotation_overlay(
         self,
         annotation_mask: AnnotationMask | None,
@@ -435,6 +454,7 @@ class TriPlanarViewerWidget(QWidget):
         return super().eventFilter(watched, event)
 
     def _on_cursor_selected(self, x: int, y: int, z: int) -> None:
+        self._set_active_view_from_sender()
         self.cursor_state.set_cursor_position((x, y, z))
 
     def _on_cursor_changed(self, x: int, y: int, z: int) -> None:
@@ -450,12 +470,15 @@ class TriPlanarViewerWidget(QWidget):
         self._update_patch_overlays()
 
     def _on_patch_center_selected(self, x: int, y: int, z: int) -> None:
+        self._set_active_view_from_sender()
         self.patch_selector.set_center((x, y, z))
         self._update_patch_overlays()
 
     def _on_annotation_voxel_selected(
         self, orientation: str, x: int, y: int, z: int
     ) -> None:
+        if orientation in ("axial", "coronal", "sagittal"):
+            self._active_view = orientation  # type: ignore[assignment]
         if (
             self._annotation_mask is None
             or not self._annotation_editing_enabled
@@ -495,6 +518,12 @@ class TriPlanarViewerWidget(QWidget):
             self._annotation_undo_stack.can_undo()
         )
         self.annotation_changed.emit(changed)
+
+    def _set_active_view_from_sender(self) -> None:
+        sender = self.sender()
+        orientation = getattr(sender, "orientation", None)
+        if orientation in ("axial", "coronal", "sagittal"):
+            self._active_view = orientation
 
     def undo_annotation(self) -> int:
         if self._annotation_mask is None:
@@ -642,23 +671,24 @@ class TriPlanarViewerWidget(QWidget):
                     annotation_slice_2d=None,
                 )
                 continue
-            projection_slice = _project_oriented_volume(
+            projection_slice = project_oriented_volume(
                 volume,
                 view.orientation,
                 self._projection_mode,
             )
             segmentation_projection_slice = None
             if self._segmentation_display_volume is not None:
-                segmentation_projection_slice = _project_oriented_volume(
+                segmentation_projection_slice = project_oriented_volume(
                     self._segmentation_display_volume.display_data,
                     view.orientation,
                     self._projection_mode,
                 )
             annotation_projection_slice = None
             if self._annotation_display_volume is not None:
-                annotation_projection_slice = _project_annotation_volume(
+                annotation_projection_slice = project_oriented_volume(
                     self._annotation_display_volume.display_data,
                     view.orientation,
+                    "MIP",
                 )
             view.set_projection_slice(
                 projection_slice,
@@ -755,29 +785,6 @@ class TriPlanarViewerWidget(QWidget):
         if mime_data is None or not mime_data.hasUrls():
             return None
         return first_supported_local_nifti_path(mime_data.urls())
-
-
-def _project_oriented_volume(
-    volume: np.ndarray, orientation: Orientation, mode: str
-) -> np.ndarray:
-    reducer = np.max if mode == "MIP" else np.min
-    if orientation == "axial":
-        return reducer(volume, axis=2).T[::-1, ::-1]
-    if orientation == "coronal":
-        return reducer(volume, axis=1).T[::-1, ::-1]
-    if orientation == "sagittal":
-        return reducer(volume, axis=0).T[::-1, ::-1]
-    raise ValueError(f"Unsupported orientation: {orientation}")
-
-
-def _project_annotation_volume(volume: np.ndarray, orientation: Orientation) -> np.ndarray:
-    if orientation == "axial":
-        return np.max(volume, axis=2).T[::-1, ::-1]
-    if orientation == "coronal":
-        return np.max(volume, axis=1).T[::-1, ::-1]
-    if orientation == "sagittal":
-        return np.max(volume, axis=0).T[::-1, ::-1]
-    raise ValueError(f"Unsupported orientation: {orientation}")
 
 
 def _clamp_voxel(

@@ -7,6 +7,9 @@ import os
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication
 
+from mipview.control import CommandRegistry
+from mipview.control import MipViewController
+from mipview.control import MipViewIpcServer
 from mipview.ui.main_window import MainWindow
 
 
@@ -21,14 +24,29 @@ def main() -> int:
     signal_pump_timer.start()
 
     window = MainWindow()
+    ipc_server = _start_ipc_server(window)
     window.show()
     if _smoke_test_enabled():
         QTimer.singleShot(50, app.quit)
     try:
         return app.exec()
     finally:
+        if ipc_server is not None:
+            ipc_server.stop()
         signal_pump_timer.stop()
         signal.signal(signal.SIGINT, previous_sigint_handler)
+
+
+def _start_ipc_server(window: MainWindow) -> MipViewIpcServer | None:
+    controller = MipViewController(window)
+    registry = CommandRegistry(controller)
+    ipc_server = MipViewIpcServer(registry)
+    try:
+        ipc_server.start()
+    except (OSError, RuntimeError) as exc:
+        print(f"Warning: MipView IPC server failed to start: {exc}", file=sys.stderr)
+        return None
+    return ipc_server
 
 
 def _handle_sigint(_signum: int, _frame: object) -> None:

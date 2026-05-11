@@ -6,7 +6,7 @@ from dataclasses import field
 import nibabel as nib
 import numpy as np
 
-from mipview.nifti_io import NiftiLoadResult
+from mipview.io.nifti_io import NiftiLoadResult
 
 
 NiftiHeader = nib.nifti1.Nifti1Header | nib.nifti2.Nifti2Header

@@ -19,7 +19,7 @@ from PySide6.QtWidgets import QLabel, QSlider, QVBoxLayout, QWidget
 from mipview.annotation.annotation_overlay import build_annotation_overlay_rgba
 from mipview.viewer.intensity import normalize_slice_to_uint8, window_slice_to_uint8
 from mipview.viewer.oriented_volume import OrientedVolume
-from mipview.patch_selector import (
+from mipview.patch.selector import (
     PatchPlaneBounds,
     axis_for_resize_edge,
     resized_axis_size_from_edge,

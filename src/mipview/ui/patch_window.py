@@ -30,10 +30,11 @@ from PySide6.QtWidgets import (
 )
 
 from mipview.annotation import AnnotationMask
-from mipview.nifti_io import NiftiLoadResult
-from mipview.patch_history import PatchHistoryManager
-from mipview.patch_saver import build_patch_default_filename, save_patch_nifti
-from mipview.patch_selector import PatchBounds
+from mipview.annotation.annotation_overlay import build_annotation_overlay_rgba
+from mipview.io.nifti_io import NiftiLoadResult
+from mipview.patch.history import PatchHistoryManager
+from mipview.patch.saver import build_patch_default_filename, save_patch_nifti
+from mipview.patch.selector import PatchBounds
 from mipview.state.contrast_state import ContrastState
 from mipview.tools import derive_volume, get_tool
 from mipview.tools.patch_utility import patch_utility_from_tool
@@ -53,6 +54,8 @@ from mipview.ui.window_styling import (
     apply_window_content_frame,
 )
 from mipview.viewer.intensity import normalize_slice_to_uint8, window_slice_to_uint8
+from mipview.viewer.oriented_volume import build_oriented_volume
+from mipview.viewer.slice_geometry import project_oriented_volume
 from mipview.viewer.triplanar_viewer_widget import TriPlanarViewerWidget
 
 
@@ -67,6 +70,8 @@ class PatchViewerWindow(QMainWindow):
     annotation_active_label_changed = Signal(int)
     annotation_brush_radius_changed = Signal(int)
     annotation_brush_mode_changed = Signal(str)
+    unload_current_segmentation_requested = Signal()
+    open_segmentation_configuration_requested = Signal()
 
     VIEW_EXPORT_SCALE_FACTOR = 3
 
@@ -100,6 +105,11 @@ class PatchViewerWindow(QMainWindow):
         self._patch_size = patch_size if patch_size is not None else patch_volume.shape
         self._patch_data = patch_volume.data
         self._patch_volume = patch_volume
+        self._segmentation_patch_volume = segmentation_volume
+        self._annotation_patch_mask = annotation_mask
+        self._annotation_opacity = min(max(float(annotation_opacity), 0.0), 1.0)
+        self._annotation_visible = bool(annotation_visible)
+        self._annotation_active_label = max(int(annotation_active_label), 0)
         self._patch_history = PatchHistoryManager(
             patch_volume.data,
             apply_operation=self._apply_history_operation,
@@ -232,6 +242,25 @@ class PatchViewerWindow(QMainWindow):
         self._refresh_patch_history_panel()
 
     def _setup_menu(self) -> None:
+        self.segmentation_menu = self.menuBar().addMenu("&Segmentation")
+        self.unload_current_segmentation_action = QAction(
+            "&Unload Current Segmentation", self
+        )
+        self.unload_current_segmentation_action.triggered.connect(
+            self.unload_current_segmentation_requested.emit
+        )
+        self.segmentation_menu.addAction(self.unload_current_segmentation_action)
+
+        self.segmentation_menu.addSeparator()
+
+        self.open_segmentation_config_action = QAction(
+            "Open &Configuration Panel", self
+        )
+        self.open_segmentation_config_action.triggered.connect(
+            self.open_segmentation_configuration_requested.emit
+        )
+        self.segmentation_menu.addAction(self.open_segmentation_config_action)
+
         tools_menu = self.menuBar().addMenu("&Tools")
         build_tools_submenu(
             self,
@@ -293,9 +322,13 @@ class PatchViewerWindow(QMainWindow):
         self.save_views_button = QPushButton("Save MIP/MinIP Image...", panel)
         self.save_views_button.clicked.connect(self._on_save_views_clicked)
         layout.addWidget(self.save_views_button)
-        self.save_patch_button = QPushButton("Save Patch...", panel)
+        self.save_patch_button = QPushButton("Save Img Patch", panel)
         self.save_patch_button.clicked.connect(self._on_save_patch_clicked)
         layout.addWidget(self.save_patch_button)
+        self.save_seg_patch_button = QPushButton("Save Seg Patch", panel)
+        self.save_seg_patch_button.clicked.connect(self._on_save_seg_patch_clicked)
+        layout.addWidget(self.save_seg_patch_button)
+        self._refresh_seg_patch_save_enabled()
         return panel
 
     def _sync_projection_controls(self) -> None:
@@ -371,6 +404,31 @@ class PatchViewerWindow(QMainWindow):
 
         self.statusBar().showMessage(f"Patch saved: {saved_path}")
 
+    def _on_save_seg_patch_clicked(self) -> None:
+        overlay_patch = self._active_overlay_patch_volume()
+        if overlay_patch is None:
+            self.statusBar().showMessage("No active segmentation patch to save")
+            return
+
+        selected_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save Segmentation Patch",
+            self._default_seg_patch_filename(),
+            "NIfTI Files (*.nii.gz *.nii);;All Files (*)",
+        )
+        if not selected_path:
+            self.statusBar().showMessage("Segmentation patch save canceled")
+            return
+
+        try:
+            saved_path = save_patch_nifti(overlay_patch, selected_path)
+        except (OSError, ValueError) as exc:
+            QMessageBox.critical(self, "Save Segmentation Patch Failed", str(exc))
+            self.statusBar().showMessage("Segmentation patch save failed")
+            return
+
+        self.statusBar().showMessage(f"Segmentation patch saved: {saved_path}")
+
     def _on_save_views_clicked(self) -> None:
         export_default = self._default_views_filename()
         selected_path, selected_filter = QFileDialog.getSaveFileName(
@@ -428,6 +486,13 @@ class PatchViewerWindow(QMainWindow):
         if stem.endswith(".nii"):
             stem = stem[:-4]
         return str(Path.home() / f"{stem}_views.png")
+
+    def _default_seg_patch_filename(self) -> str:
+        stem = Path(self._default_patch_filename()).stem
+        if stem.endswith(".nii"):
+            stem = stem[:-4]
+        suffix = "annotation" if self._segmentation_patch_volume is None else "seg"
+        return str(Path.home() / f"{stem}_{suffix}.nii.gz")
 
     def _resolve_views_export_target(
         self,
@@ -505,22 +570,163 @@ class PatchViewerWindow(QMainWindow):
                     margin + title_height,
                     scaled_image,
                 )
+                self._draw_export_overlays(
+                    painter,
+                    projection_planes,
+                    title.lower(),
+                    x_offset,
+                    margin + title_height,
+                    scaled_image.width(),
+                    scaled_image.height(),
+                )
                 x_offset += scaled_image.width() + panel_gap
         finally:
             painter.end()
 
         return canvas
 
-    def _compute_projection_planes_for_export(self) -> dict[str, np.ndarray] | None:
+    def _draw_export_overlays(
+        self,
+        painter: QPainter,
+        projection_planes: dict[str, np.ndarray | dict[str, np.ndarray]],
+        orientation_title: str,
+        x_offset: int,
+        y_offset: int,
+        target_width: int,
+        target_height: int,
+    ) -> None:
+        segmentation_planes = projection_planes.get("segmentation")
+        if isinstance(segmentation_planes, dict):
+            segmentation_plane = segmentation_planes.get(orientation_title)
+            if segmentation_plane is not None:
+                self._draw_segmentation_export_overlay(
+                    painter,
+                    segmentation_plane,
+                    x_offset,
+                    y_offset,
+                    target_width,
+                    target_height,
+                )
+
+        annotation_planes = projection_planes.get("annotation")
+        if isinstance(annotation_planes, dict) and self._annotation_visible:
+            annotation_plane = annotation_planes.get(orientation_title)
+            if annotation_plane is not None:
+                self._draw_annotation_export_overlay(
+                    painter,
+                    annotation_plane,
+                    x_offset,
+                    y_offset,
+                    target_width,
+                    target_height,
+                )
+
+    def _draw_segmentation_export_overlay(
+        self,
+        painter: QPainter,
+        plane: np.ndarray,
+        x_offset: int,
+        y_offset: int,
+        target_width: int,
+        target_height: int,
+    ) -> None:
+        mask = np.asarray(plane) > 0
+        if not np.any(mask):
+            return
+        overlay = np.zeros((*mask.shape, 4), dtype=np.uint8)
+        overlay[..., 0] = 255
+        overlay[..., 3] = mask.astype(np.uint8) * int(
+            round(self.slice_viewer.segmentation_overlay_opacity() * 255.0)
+        )
+        self._draw_rgba_export_overlay(
+            painter, overlay, x_offset, y_offset, target_width, target_height
+        )
+
+    def _draw_annotation_export_overlay(
+        self,
+        painter: QPainter,
+        plane: np.ndarray,
+        x_offset: int,
+        y_offset: int,
+        target_width: int,
+        target_height: int,
+    ) -> None:
+        overlay = build_annotation_overlay_rgba(
+            plane,
+            opacity=self._annotation_opacity,
+            active_label=self._annotation_active_label,
+        )
+        if not np.any(overlay[..., 3]):
+            return
+        self._draw_rgba_export_overlay(
+            painter, overlay, x_offset, y_offset, target_width, target_height
+        )
+
+    @staticmethod
+    def _draw_rgba_export_overlay(
+        painter: QPainter,
+        overlay: np.ndarray,
+        x_offset: int,
+        y_offset: int,
+        target_width: int,
+        target_height: int,
+    ) -> None:
+        height, width, _ = overlay.shape
+        contiguous = np.ascontiguousarray(overlay)
+        overlay_image = QImage(
+            contiguous.data,
+            width,
+            height,
+            width * 4,
+            QImage.Format.Format_RGBA8888,
+        ).copy()
+        painter.drawImage(
+            x_offset,
+            y_offset,
+            overlay_image.scaled(
+                target_width,
+                target_height,
+                Qt.AspectRatioMode.IgnoreAspectRatio,
+                Qt.TransformationMode.FastTransformation,
+            ),
+        )
+
+    def _compute_projection_planes_for_export(
+        self,
+    ) -> dict[str, np.ndarray | dict[str, np.ndarray]] | None:
         if self._patch_data.ndim != 3:
             return None
         mode = self._current_projection_mode_for_export()
-        volume = np.asarray(self._patch_data)
-        return {
-            "axial": self._project_patch_volume(volume, "axial", mode),
-            "coronal": self._project_patch_volume(volume, "coronal", mode),
-            "sagittal": self._project_patch_volume(volume, "sagittal", mode),
+        volume = build_oriented_volume(
+            self._patch_volume.data,
+            self._patch_volume.affine,
+        ).display_data
+        planes: dict[str, np.ndarray | dict[str, np.ndarray]] = {
+            "axial": project_oriented_volume(volume, "axial", mode),
+            "coronal": project_oriented_volume(volume, "coronal", mode),
+            "sagittal": project_oriented_volume(volume, "sagittal", mode),
         }
+        if self._segmentation_patch_volume is not None:
+            segmentation_volume = build_oriented_volume(
+                self._segmentation_patch_volume.data,
+                self._segmentation_patch_volume.affine,
+            ).display_data
+            planes["segmentation"] = {
+                "axial": project_oriented_volume(segmentation_volume, "axial", mode),
+                "coronal": project_oriented_volume(segmentation_volume, "coronal", mode),
+                "sagittal": project_oriented_volume(segmentation_volume, "sagittal", mode),
+            }
+        if self._annotation_patch_mask is not None:
+            annotation_volume = build_oriented_volume(
+                self._annotation_patch_mask.data,
+                self._annotation_patch_mask.affine,
+            ).display_data
+            planes["annotation"] = {
+                "axial": project_oriented_volume(annotation_volume, "axial", "MIP"),
+                "coronal": project_oriented_volume(annotation_volume, "coronal", "MIP"),
+                "sagittal": project_oriented_volume(annotation_volume, "sagittal", "MIP"),
+            }
+        return planes
 
     def _current_projection_mode_for_export(self) -> str:
         mode = self.projection_mode_combo.currentText().strip().upper()
@@ -531,21 +737,6 @@ class PatchViewerWindow(QMainWindow):
             window_min, window_max = self.contrast_state.window()
             return window_slice_to_uint8(plane, window_min, window_max)
         return normalize_slice_to_uint8(plane)
-
-    @staticmethod
-    def _project_patch_volume(
-        volume: np.ndarray,
-        orientation: str,
-        mode: str,
-    ) -> np.ndarray:
-        reducer = np.max if mode == "MIP" else np.min
-        if orientation == "axial":
-            return reducer(volume, axis=2).T[::-1, ::-1]
-        if orientation == "coronal":
-            return reducer(volume, axis=1).T[::-1, ::-1]
-        if orientation == "sagittal":
-            return reducer(volume, axis=0).T[::-1, ::-1]
-        raise ValueError(f"Unsupported orientation: {orientation}")
 
     def source_image_path(self) -> Path | None:
         return self._source_image_path
@@ -558,7 +749,9 @@ class PatchViewerWindow(QMainWindow):
         segmentation_volume: NiftiLoadResult | None,
         opacity: float,
     ) -> None:
+        self._segmentation_patch_volume = segmentation_volume
         self.slice_viewer.set_segmentation_overlay(segmentation_volume, opacity=opacity)
+        self._refresh_seg_patch_save_enabled()
 
     def update_segmentation_opacity(self, opacity: float) -> None:
         self.slice_viewer.set_segmentation_overlay_opacity(opacity)
@@ -574,6 +767,10 @@ class PatchViewerWindow(QMainWindow):
         brush_radius: int | None = None,
         brush_mode: str | None = None,
     ) -> None:
+        self._annotation_patch_mask = annotation_mask
+        self._annotation_opacity = min(max(float(opacity), 0.0), 1.0)
+        self._annotation_visible = bool(visible)
+        self._annotation_active_label = max(int(active_label), 0)
         self.slice_viewer.set_annotation_overlay(
             annotation_mask,
             opacity=opacity,
@@ -589,6 +786,7 @@ class PatchViewerWindow(QMainWindow):
             brush_radius=brush_radius,
             brush_mode=brush_mode,
         )
+        self._refresh_seg_patch_save_enabled()
 
     def update_annotation_display_options(
         self,
@@ -599,6 +797,9 @@ class PatchViewerWindow(QMainWindow):
         brush_radius: int | None = None,
         brush_mode: str | None = None,
     ) -> None:
+        self._annotation_opacity = min(max(float(opacity), 0.0), 1.0)
+        self._annotation_visible = bool(visible)
+        self._annotation_active_label = max(int(active_label), 0)
         self.slice_viewer.set_annotation_overlay_opacity(opacity)
         self.slice_viewer.set_annotation_overlay_visible(visible)
         self.slice_viewer.set_annotation_active_label(active_label)
@@ -642,6 +843,33 @@ class PatchViewerWindow(QMainWindow):
 
     def annotation_mask(self) -> AnnotationMask | None:
         return self.slice_viewer.annotation_mask()
+
+    def set_segmentation_menu_enabled(
+        self,
+        *,
+        can_unload: bool,
+        can_open_configuration: bool,
+    ) -> None:
+        self.unload_current_segmentation_action.setEnabled(can_unload)
+        self.open_segmentation_config_action.setEnabled(can_open_configuration)
+
+    def _refresh_seg_patch_save_enabled(self) -> None:
+        if not hasattr(self, "save_seg_patch_button"):
+            return
+        self.save_seg_patch_button.setEnabled(self._active_overlay_patch_volume() is not None)
+
+    def _active_overlay_patch_volume(self) -> NiftiLoadResult | None:
+        if self._segmentation_patch_volume is not None:
+            return self._segmentation_patch_volume
+        if self._annotation_patch_mask is None:
+            return None
+        return NiftiLoadResult(
+            data=self._annotation_patch_mask.data,
+            affine=self._annotation_patch_mask.affine,
+            header=self._annotation_patch_mask.header,
+            shape=self._annotation_patch_mask.shape,
+            dtype=self._annotation_patch_mask.dtype,
+        )
 
     def sync_patch_from_parent(self, patch_volume: NiftiLoadResult) -> None:
         """Replace local patch data from parent-image processing updates."""

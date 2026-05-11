@@ -4,7 +4,7 @@ from PySide6.QtCore import QEvent, QPoint, QTimer, Qt, Signal
 from PySide6.QtGui import QAction, QColor, QFont, QMouseEvent
 from PySide6.QtWidgets import QGroupBox, QListWidget, QListWidgetItem, QMenu, QToolTip, QVBoxLayout, QWidget
 
-from mipview.patch_history import PatchHistoryNode
+from mipview.patch.history import PatchHistoryNode
 
 
 class _HoverDelayListWidget(QListWidget):

@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import numpy as np
 
-from mipview.nifti_io import NiftiLoadResult
-from mipview.patch_selector import PatchBounds
+from mipview.io.nifti_io import NiftiLoadResult
+from mipview.patch.selector import PatchBounds
 
 
 def extract_patch(volume: NiftiLoadResult, bounds: PatchBounds) -> NiftiLoadResult:

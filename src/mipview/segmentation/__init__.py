@@ -1,5 +1,5 @@
-from mipview.segmentation_models import LoadedSegmentation
-from mipview.segmentation_validation import (
+from mipview.segmentation.models import LoadedSegmentation
+from mipview.segmentation.validation import (
     SegmentationValidationResult,
     validate_segmentation_compatibility,
 )

@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 from PySide6.QtWidgets import QMessageBox, QWidget
 
-from mipview.nifti_io import NiftiLoadResult
+from mipview.io.nifti_io import NiftiLoadResult
 from mipview.tools import ParameterValue, apply_tool, derive_volume
 from mipview.ui.tools_menu import resolve_tool_parameters
 
