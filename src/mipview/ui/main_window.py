@@ -419,12 +419,40 @@ class MainWindow(QMainWindow):
             annotation_opacity=self.state.annotation.opacity,
             annotation_visible=self.state.annotation.visible,
             annotation_active_label=self.state.annotation.active_label,
+            annotation_editing_enabled=self.state.annotation.editing_enabled
+            and active_annotation_patch is not None,
+            annotation_brush_radius=self.state.annotation.brush_radius,
+            annotation_brush_mode=self.state.annotation.brush_mode,
             parent=self,
             source_image_name=source_image_name,
             source_image_path=self.state.loaded_file_path,
             source_patch_bounds=bounds,
             patch_center=center,
             patch_size=self.slice_viewer.patch_size_xyz(),
+        )
+        patch_window.annotation_create_requested.connect(
+            self._on_patch_window_annotation_create_requested
+        )
+        patch_window.annotation_patch_changed.connect(
+            self._on_patch_window_annotation_patch_changed
+        )
+        patch_window.annotation_undo_requested_from_patch.connect(
+            self._on_patch_window_annotation_patch_changed
+        )
+        patch_window.annotation_visibility_changed.connect(
+            self._on_annotation_visibility_changed
+        )
+        patch_window.annotation_opacity_changed.connect(
+            self._on_annotation_opacity_changed
+        )
+        patch_window.annotation_active_label_changed.connect(
+            self._on_annotation_active_label_changed
+        )
+        patch_window.annotation_brush_radius_changed.connect(
+            self._on_annotation_brush_radius_changed
+        )
+        patch_window.annotation_brush_mode_changed.connect(
+            self._on_annotation_brush_mode_changed
         )
         patch_window.show()
         self._patch_windows.append(patch_window)
@@ -700,6 +728,7 @@ class MainWindow(QMainWindow):
 
     def _on_annotation_visibility_changed(self, visible: bool) -> None:
         self.state.annotation.visible = bool(visible)
+        self.annotation_panel.set_visible_checked(self.state.annotation.visible)
         self.slice_viewer.set_annotation_overlay_visible(self.state.annotation.visible)
         self._update_patch_windows_annotation_display_options()
 
@@ -713,18 +742,23 @@ class MainWindow(QMainWindow):
 
     def _on_annotation_active_label_changed(self, label: int) -> None:
         self.state.annotation.active_label = max(int(label), 1)
+        self.annotation_panel.set_active_label(self.state.annotation.active_label)
         self.slice_viewer.set_annotation_active_label(self.state.annotation.active_label)
         self._update_patch_windows_annotation_display_options()
 
     def _on_annotation_brush_radius_changed(self, radius: int) -> None:
         self.state.annotation.brush_radius = max(int(radius), 0)
+        self.annotation_panel.set_brush_radius(self.state.annotation.brush_radius)
         self.slice_viewer.set_annotation_brush_radius(self.state.annotation.brush_radius)
+        self._update_patch_windows_annotation_display_options()
 
     def _on_annotation_brush_mode_changed(self, mode: str) -> None:
         if mode not in {"paint", "cursor", "erase"}:
             return
         self.state.annotation.brush_mode = mode
+        self.annotation_panel.set_brush_mode(mode)
         self.slice_viewer.set_annotation_brush_mode(mode)
+        self._update_patch_windows_annotation_display_options()
 
     def _on_annotation_changed(self, changed_voxels: object) -> None:
         self.statusBar().showMessage(
@@ -908,8 +942,14 @@ class MainWindow(QMainWindow):
             labels=annotation_mask.labels,
         )
 
-    def _update_patch_windows_annotation_for_current_image(self) -> None:
+    def _update_patch_windows_annotation_for_current_image(
+        self,
+        *,
+        exclude: PatchViewerWindow | None = None,
+    ) -> None:
         for patch_window in self._patch_windows_for_current_image():
+            if patch_window is exclude:
+                continue
             bounds = patch_window.source_patch_bounds()
             annotation_patch = (
                 self._extract_active_annotation_patch(bounds)
@@ -921,6 +961,10 @@ class MainWindow(QMainWindow):
                 opacity=self.state.annotation.opacity,
                 visible=self.state.annotation.visible,
                 active_label=self.state.annotation.active_label,
+                editing_enabled=self.state.annotation.editing_enabled
+                and annotation_patch is not None,
+                brush_radius=self.state.annotation.brush_radius,
+                brush_mode=self.state.annotation.brush_mode,
             )
 
     def _update_patch_windows_annotation_display_options(self) -> None:
@@ -929,7 +973,48 @@ class MainWindow(QMainWindow):
                 opacity=self.state.annotation.opacity,
                 visible=self.state.annotation.visible,
                 active_label=self.state.annotation.active_label,
+                brush_radius=self.state.annotation.brush_radius,
+                brush_mode=self.state.annotation.brush_mode,
             )
+
+    def _on_patch_window_annotation_create_requested(
+        self,
+        patch_window: PatchViewerWindow,
+    ) -> None:
+        self._on_create_annotation()
+        self._update_patch_windows_annotation_for_current_image(exclude=None)
+
+    def _on_patch_window_annotation_patch_changed(
+        self,
+        patch_window: PatchViewerWindow,
+    ) -> None:
+        annotation_mask = self.state.annotation.active_mask
+        patch_mask = patch_window.annotation_mask()
+        bounds = patch_window.source_patch_bounds()
+        if annotation_mask is None or patch_mask is None or bounds is None:
+            return
+
+        target = annotation_mask.data[bounds.as_slices()]
+        if target.shape != patch_mask.shape:
+            QMessageBox.warning(
+                self,
+                "Patch Annotation Failed",
+                (
+                    "Patch annotation shape does not match the selected source "
+                    "bounds; changes were not applied."
+                ),
+            )
+            return
+
+        target[...] = patch_mask.data
+        self.slice_viewer.refresh_annotation_overlay()
+        self.annotation_panel.set_undo_available(self.slice_viewer.annotation_can_undo())
+        self._register_annotation_as_segmentation(
+            preserve_existing_display_name=True,
+            make_active=self._active_segmentation_is_annotation(),
+        )
+        self._update_patch_windows_annotation_for_current_image(exclude=patch_window)
+        self.statusBar().showMessage("Patch annotation updated source annotation layer")
 
     def _on_apply_tool_to_main_image_requested(self, tool_id: str) -> None:
         if self.state.volume is None:

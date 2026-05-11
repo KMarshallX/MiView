@@ -32,10 +32,16 @@ class AnnotationPanel(QWidget):
     EXPORT_JSON = "json"
     EXPORT_BOTH = "both"
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        parent: QWidget | None = None,
+        *,
+        show_file_actions: bool = True,
+    ) -> None:
         super().__init__(parent)
         self.setFixedWidth(self.PANEL_WIDTH)
         self._annotation_editing_enabled = False
+        self._show_file_actions = bool(show_file_actions)
 
         group = QGroupBox("Annotation", self)
         form = QFormLayout(group)
@@ -46,12 +52,16 @@ class AnnotationPanel(QWidget):
         self.load_button.clicked.connect(self.load_requested.emit)
         self.save_button = QPushButton("Save", group)
         self.save_button.clicked.connect(self.save_requested.emit)
+        if not self._show_file_actions:
+            self.load_button.setVisible(False)
+            self.save_button.setVisible(False)
 
         action_row = QWidget(group)
         action_layout = QHBoxLayout(action_row)
         action_layout.setContentsMargins(0, 0, 0, 0)
         action_layout.addWidget(self.create_button)
-        action_layout.addWidget(self.load_button)
+        if self._show_file_actions:
+            action_layout.addWidget(self.load_button)
 
         self.visible_checkbox = QCheckBox("Visible", group)
         self.visible_checkbox.setChecked(True)
@@ -105,6 +115,8 @@ class AnnotationPanel(QWidget):
         self.export_combobox.addItem("NIFTI file", self.EXPORT_NIFTI)
         self.export_combobox.addItem("JSON metadata", self.EXPORT_JSON)
         self.export_combobox.addItem("Both", self.EXPORT_BOTH)
+        if not self._show_file_actions:
+            self.export_combobox.setVisible(False)
 
         self.undo_button = QPushButton("Undo", group)
         self.undo_button.setEnabled(False)
@@ -116,8 +128,9 @@ class AnnotationPanel(QWidget):
         form.addRow("Active Label:", self.active_label_spinbox)
         form.addRow("Brush Radius:", self.brush_radius_spinbox)
         form.addRow("Mode:", mode_row)
-        form.addRow("Export:", self.export_combobox)
-        form.addRow(self.save_button)
+        if self._show_file_actions:
+            form.addRow("Export:", self.export_combobox)
+            form.addRow(self.save_button)
         form.addRow(self.undo_button)
 
         layout = QVBoxLayout(self)
@@ -129,7 +142,7 @@ class AnnotationPanel(QWidget):
 
     def set_image_loaded(self, loaded: bool) -> None:
         self.create_button.setEnabled(loaded)
-        self.load_button.setEnabled(loaded)
+        self.load_button.setEnabled(loaded and self._show_file_actions)
         if not loaded:
             self.set_annotation_active(False)
 
@@ -143,8 +156,7 @@ class AnnotationPanel(QWidget):
         editing = active if editing_enabled is None else active and editing_enabled
         self._annotation_editing_enabled = editing
         self.create_button.setText("Exit..." if editing else "Create")
-        for widget in (
-            self.save_button,
+        editing_widgets = (
             self.visible_checkbox,
             self.opacity_slider,
             self.active_label_spinbox,
@@ -152,9 +164,11 @@ class AnnotationPanel(QWidget):
             self.paint_button,
             self.cursor_button,
             self.erase_button,
-            self.export_combobox,
-        ):
+        )
+        for widget in editing_widgets:
             widget.setEnabled(editing)
+        self.save_button.setEnabled(editing and self._show_file_actions)
+        self.export_combobox.setEnabled(editing and self._show_file_actions)
         self.undo_button.setEnabled(editing and can_undo)
 
     def set_undo_available(self, available: bool) -> None:

@@ -23,6 +23,7 @@ from mipview.ui.main_window import (
     RECON_ANNOTATION_SEGMENTATION_NAME,
     MainWindow,
 )
+from mipview.ui.annotation_panel import AnnotationPanel
 from mipview.ui.patch_window import PatchViewerWindow
 from mipview.viewer.triplanar_viewer_widget import TriPlanarViewerWidget
 
@@ -372,6 +373,136 @@ def test_unloading_file_segmentation_preserves_annotation_layer() -> None:
     ]
     assert window.state.active_segmentation_id == ANNOTATION_SEGMENTATION_ID
 
+    window.deleteLater()
+    _ = app
+
+
+def test_annotation_panel_patch_mode_hides_file_actions() -> None:
+    app = QApplication.instance() or QApplication([])
+    panel = AnnotationPanel(show_file_actions=False)
+
+    panel.set_image_loaded(True)
+    panel.set_annotation_active(True, editing_enabled=True, can_undo=True)
+
+    assert panel.create_button.isEnabled()
+    assert panel.brush_radius_spinbox.isEnabled()
+    assert panel.cursor_button.isEnabled()
+    assert panel.undo_button.isEnabled()
+    assert not panel.load_button.isVisible()
+    assert not panel.save_button.isVisible()
+    assert not panel.export_combobox.isVisible()
+
+    panel.set_annotation_active(True, editing_enabled=False, can_undo=True)
+
+    assert panel.create_button.isEnabled()
+    assert not panel.brush_radius_spinbox.isEnabled()
+    assert not panel.cursor_button.isEnabled()
+
+    panel.deleteLater()
+    _ = app
+
+
+def test_patch_window_annotation_panel_enabled_when_main_annotation_enabled() -> None:
+    app = QApplication.instance() or QApplication([])
+    window = _window_with_loaded_volume()
+    window._on_create_annotation()
+    window.slice_viewer.set_patch_selection_enabled(True)
+
+    window._on_select_patch()
+
+    patch_window = window._patch_windows[-1]
+    assert patch_window.annotation_panel.create_button.text() == "Exit..."
+    assert patch_window.annotation_panel.brush_radius_spinbox.isEnabled()
+    assert patch_window.annotation_panel.cursor_button.isEnabled()
+    assert not patch_window.annotation_panel.load_button.isVisible()
+    assert not patch_window.annotation_panel.save_button.isVisible()
+    assert not patch_window.annotation_panel.export_combobox.isVisible()
+
+    patch_window.deleteLater()
+    window.deleteLater()
+    _ = app
+
+
+def test_patch_window_annotation_panel_greyed_when_main_annotation_disabled() -> None:
+    app = QApplication.instance() or QApplication([])
+    window = _window_with_loaded_volume()
+    window.slice_viewer.set_patch_selection_enabled(True)
+
+    window._on_select_patch()
+
+    patch_window = window._patch_windows[-1]
+    assert patch_window.annotation_panel.create_button.isEnabled()
+    assert patch_window.annotation_panel.create_button.text() == "Create"
+    assert not patch_window.annotation_panel.brush_radius_spinbox.isEnabled()
+    assert not patch_window.annotation_panel.cursor_button.isEnabled()
+
+    patch_window.deleteLater()
+    window.deleteLater()
+    _ = app
+
+
+def test_patch_window_create_enables_main_annotation_layer() -> None:
+    app = QApplication.instance() or QApplication([])
+    window = _window_with_loaded_volume()
+    window.slice_viewer.set_patch_selection_enabled(True)
+    window._on_select_patch()
+    patch_window = window._patch_windows[-1]
+
+    patch_window.annotation_panel.create_button.click()
+
+    assert window.state.annotation.active_mask is not None
+    assert window.state.annotation.editing_enabled
+    assert patch_window.annotation_panel.brush_radius_spinbox.isEnabled()
+    assert patch_window.annotation_mask() is not None
+
+    patch_window.deleteLater()
+    window.deleteLater()
+    _ = app
+
+
+def test_patch_window_annotation_edit_updates_main_annotation_layer() -> None:
+    app = QApplication.instance() or QApplication([])
+    window = _window_with_loaded_volume()
+    window._on_create_annotation()
+    window._on_annotation_brush_radius_changed(0)
+    window.slice_viewer.set_patch_selection_enabled(True)
+    window._on_select_patch()
+    patch_window = window._patch_windows[-1]
+    bounds = patch_window.source_patch_bounds()
+    assert bounds is not None
+    assert window.state.annotation.active_mask is not None
+
+    patch_window.slice_viewer._on_annotation_voxel_selected("axial", 0, 0, 0)
+
+    source_voxel = (bounds.x_start, bounds.y_start, bounds.z_start)
+    assert window.state.annotation.active_mask.data[source_voxel] == 1
+
+    patch_window.deleteLater()
+    window.deleteLater()
+    _ = app
+
+
+def test_patch_window_annotation_controls_sync_with_main_panel() -> None:
+    app = QApplication.instance() or QApplication([])
+    window = _window_with_loaded_volume()
+    window._on_create_annotation()
+    window.slice_viewer.set_patch_selection_enabled(True)
+    window._on_select_patch()
+    patch_window = window._patch_windows[-1]
+
+    patch_window.annotation_panel.opacity_slider.setValue(25)
+    patch_window.annotation_panel.active_label_spinbox.setValue(7)
+    patch_window.annotation_panel.brush_radius_spinbox.setValue(3)
+    patch_window.annotation_panel.cursor_button.click()
+    patch_window.annotation_panel.visible_checkbox.setChecked(False)
+
+    assert window.annotation_panel.opacity_slider.value() == 25
+    assert window.annotation_panel.active_label_spinbox.value() == 7
+    assert window.annotation_panel.brush_radius_spinbox.value() == 3
+    assert window.annotation_panel.cursor_button.isChecked()
+    assert not window.annotation_panel.visible_checkbox.isChecked()
+
+    patch_window.deleteLater()
     window.deleteLater()
     _ = app
 

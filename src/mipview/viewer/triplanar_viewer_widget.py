@@ -369,6 +369,9 @@ class TriPlanarViewerWidget(QWidget):
         self._apply_annotation_overlay_to_views()
         self.annotation_undo_availability_changed.emit(False)
 
+    def annotation_mask(self) -> AnnotationMask | None:
+        return self._annotation_mask
+
     def refresh_annotation_overlay(self) -> None:
         if self._annotation_mask is not None:
             self._annotation_display_volume = build_oriented_volume(

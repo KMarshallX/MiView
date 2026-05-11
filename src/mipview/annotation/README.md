@@ -57,6 +57,30 @@ the annotation panel. Removing the annotation entry through `Segmentation ->
 Unload Current Segmentation` clears the current annotation session and exits
 annotation mode.
 
+## Patch Window Annotation Panel
+
+Selected patch windows include an annotation panel for editing the same
+voxel-space annotation layer as the main viewer. The patch panel keeps `Create`,
+visibility, opacity, active label, brush radius, mode, and undo controls, but it
+does not expose annotation `Load`, `Export`, or `Save` actions. Annotation file
+I/O remains a main-window operation so patch windows cannot import or export
+independent annotation masks.
+
+When a patch window opens while main annotation editing is active, the patch
+panel starts enabled and receives the extracted annotation patch for the selected
+source-space bounds. When the main annotation feature is inactive, the patch
+panel greys out editing controls but keeps `Create` available. Pressing `Create`
+from the patch window creates or enables the full-volume annotation layer in the
+main window, then refreshes the patch annotation view.
+
+Patch-window edits are applied to the patch annotation mask first and then copied
+back into the main full-volume annotation mask using the selected
+`PatchBounds.as_slices()` region. This source-space patch bounds mapping is the
+authority for propagation; screen pixels and screenshots are visual context only
+and are not used to decide annotation coordinates. Visibility, opacity, active
+label, brush radius, and brush mode stay synchronized between the main and patch
+annotation panels.
+
 ## RLE-linear Metadata
 
 Flattening annotated voxels makes the JSON small and keeps the format independent

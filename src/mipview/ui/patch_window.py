@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import (
     QAction,
     QColor,
@@ -44,6 +44,7 @@ from mipview.ui.contrast_helpers import (
 )
 from mipview.ui.contrast_control_bar import ContrastControlBar
 from mipview.ui.cursor_panel import CursorInspectionPanel
+from mipview.ui.annotation_panel import AnnotationPanel
 from mipview.ui.patch_history_panel import PatchHistoryPanel
 from mipview.ui.tool_actions import apply_tool_to_volume_with_metadata
 from mipview.ui.tools_menu import build_tools_submenu
@@ -58,6 +59,15 @@ from mipview.viewer.triplanar_viewer_widget import TriPlanarViewerWidget
 class PatchViewerWindow(QMainWindow):
     """Secondary window for inspecting an extracted patch volume."""
 
+    annotation_create_requested = Signal(object)
+    annotation_patch_changed = Signal(object)
+    annotation_undo_requested_from_patch = Signal(object)
+    annotation_visibility_changed = Signal(bool)
+    annotation_opacity_changed = Signal(float)
+    annotation_active_label_changed = Signal(int)
+    annotation_brush_radius_changed = Signal(int)
+    annotation_brush_mode_changed = Signal(str)
+
     VIEW_EXPORT_SCALE_FACTOR = 3
 
     def __init__(
@@ -69,6 +79,9 @@ class PatchViewerWindow(QMainWindow):
         annotation_opacity: float = 0.5,
         annotation_visible: bool = True,
         annotation_active_label: int = 1,
+        annotation_editing_enabled: bool = False,
+        annotation_brush_radius: int = 1,
+        annotation_brush_mode: str = "paint",
         parent: QMainWindow | None = None,
         source_image_name: str = "image.nii.gz",
         source_image_path: Path | None = None,
@@ -102,6 +115,7 @@ class PatchViewerWindow(QMainWindow):
         self.slice_viewer = TriPlanarViewerWidget(self)
         self.cursor_panel = CursorInspectionPanel(self)
         self.cursor_panel.set_patch_controls_visible(False)
+        self.annotation_panel = AnnotationPanel(self, show_file_actions=False)
         self.mip_minip_panel = self._build_mip_minip_panel(self)
         self.patch_save_panel = self._build_save_panel(self)
         self.patch_history_panel = PatchHistoryPanel(self)
@@ -118,6 +132,7 @@ class PatchViewerWindow(QMainWindow):
         )
         self._right_control_stack_layout.addWidget(self.cursor_panel)
         self._right_control_stack_layout.addStretch(1)
+        self.add_right_control_panel(self.annotation_panel)
         self.add_right_control_panel(self.mip_minip_panel)
         self.add_right_control_panel(self.patch_save_panel)
         self.add_right_control_panel(self.patch_history_panel)
@@ -146,6 +161,27 @@ class PatchViewerWindow(QMainWindow):
         self.slice_viewer.cursor_inspection_changed.connect(
             self.cursor_panel.set_cursor_values
         )
+        self.slice_viewer.annotation_changed.connect(self._on_annotation_changed)
+        self.slice_viewer.annotation_undo_availability_changed.connect(
+            self.annotation_panel.set_undo_available
+        )
+        self.annotation_panel.create_requested.connect(
+            lambda: self.annotation_create_requested.emit(self)
+        )
+        self.annotation_panel.visibility_changed.connect(
+            self.annotation_visibility_changed.emit
+        )
+        self.annotation_panel.opacity_changed.connect(self.annotation_opacity_changed.emit)
+        self.annotation_panel.active_label_changed.connect(
+            self.annotation_active_label_changed.emit
+        )
+        self.annotation_panel.brush_radius_changed.connect(
+            self.annotation_brush_radius_changed.emit
+        )
+        self.annotation_panel.brush_mode_changed.connect(
+            self.annotation_brush_mode_changed.emit
+        )
+        self.annotation_panel.undo_requested.connect(self._on_annotation_undo_requested)
         connect_contrast_controls(
             self.contrast_control_bar,
             self.contrast_state,
@@ -163,6 +199,15 @@ class PatchViewerWindow(QMainWindow):
             opacity=annotation_opacity,
             visible=annotation_visible,
             active_label=annotation_active_label,
+        )
+        self.sync_annotation_controls(
+            annotation_mask=annotation_mask,
+            editing_enabled=annotation_editing_enabled,
+            opacity=annotation_opacity,
+            visible=annotation_visible,
+            active_label=annotation_active_label,
+            brush_radius=annotation_brush_radius,
+            brush_mode=annotation_brush_mode,
         )
         self._initialize_contrast(patch_volume)
         self._sync_projection_controls()
@@ -525,12 +570,24 @@ class PatchViewerWindow(QMainWindow):
         opacity: float,
         visible: bool,
         active_label: int,
+        editing_enabled: bool = False,
+        brush_radius: int | None = None,
+        brush_mode: str | None = None,
     ) -> None:
         self.slice_viewer.set_annotation_overlay(
             annotation_mask,
             opacity=opacity,
             visible=visible,
             active_label=active_label,
+        )
+        self.sync_annotation_controls(
+            annotation_mask=annotation_mask,
+            editing_enabled=editing_enabled,
+            opacity=opacity,
+            visible=visible,
+            active_label=active_label,
+            brush_radius=brush_radius,
+            brush_mode=brush_mode,
         )
 
     def update_annotation_display_options(
@@ -539,10 +596,52 @@ class PatchViewerWindow(QMainWindow):
         opacity: float,
         visible: bool,
         active_label: int,
+        brush_radius: int | None = None,
+        brush_mode: str | None = None,
     ) -> None:
         self.slice_viewer.set_annotation_overlay_opacity(opacity)
         self.slice_viewer.set_annotation_overlay_visible(visible)
         self.slice_viewer.set_annotation_active_label(active_label)
+        self.annotation_panel.set_visible_checked(visible)
+        self.annotation_panel.set_opacity(opacity)
+        self.annotation_panel.set_active_label(active_label)
+        if brush_radius is not None:
+            self.slice_viewer.set_annotation_brush_radius(brush_radius)
+            self.annotation_panel.set_brush_radius(brush_radius)
+        if brush_mode is not None:
+            self.slice_viewer.set_annotation_brush_mode(brush_mode)
+            self.annotation_panel.set_brush_mode(brush_mode)
+
+    def sync_annotation_controls(
+        self,
+        *,
+        annotation_mask: AnnotationMask | None,
+        editing_enabled: bool,
+        opacity: float,
+        visible: bool,
+        active_label: int,
+        brush_radius: int | None,
+        brush_mode: str | None,
+    ) -> None:
+        self.annotation_panel.set_image_loaded(True)
+        self.annotation_panel.set_annotation_active(
+            annotation_mask is not None,
+            editing_enabled=editing_enabled,
+            can_undo=self.slice_viewer.annotation_can_undo(),
+        )
+        self.annotation_panel.set_visible_checked(visible)
+        self.annotation_panel.set_opacity(opacity)
+        self.annotation_panel.set_active_label(active_label)
+        if brush_radius is not None:
+            self.slice_viewer.set_annotation_brush_radius(brush_radius)
+            self.annotation_panel.set_brush_radius(brush_radius)
+        if brush_mode is not None:
+            self.slice_viewer.set_annotation_brush_mode(brush_mode)
+            self.annotation_panel.set_brush_mode(brush_mode)
+        self.slice_viewer.set_annotation_editing_enabled(editing_enabled)
+
+    def annotation_mask(self) -> AnnotationMask | None:
+        return self.slice_viewer.annotation_mask()
 
     def sync_patch_from_parent(self, patch_volume: NiftiLoadResult) -> None:
         """Replace local patch data from parent-image processing updates."""
@@ -577,6 +676,21 @@ class PatchViewerWindow(QMainWindow):
     ) -> np.ndarray:
         utility = patch_utility_from_tool(operation_type)
         return utility.apply(patch_state, parameters)
+
+    def _on_annotation_changed(self, changed_voxels: object) -> None:
+        self.annotation_panel.set_undo_available(self.slice_viewer.annotation_can_undo())
+        self.annotation_patch_changed.emit(self)
+
+    def _on_annotation_undo_requested(self) -> None:
+        changed = self.slice_viewer.undo_annotation()
+        self.annotation_panel.set_undo_available(self.slice_viewer.annotation_can_undo())
+        if changed <= 0:
+            self.statusBar().showMessage("No annotation edit to undo")
+            return
+        self.statusBar().showMessage(
+            f"Undid patch annotation edit: {changed} voxel(s) restored"
+        )
+        self.annotation_undo_requested_from_patch.emit(self)
 
     def _refresh_patch_history_panel(self) -> None:
         self.patch_history_panel.set_history(
