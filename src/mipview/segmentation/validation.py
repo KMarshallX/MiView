@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import nibabel as nib
 import numpy as np
 
-from mipview.nifti_io import NiftiLoadResult
+from mipview.io.nifti_io import NiftiLoadResult
 
 
 @dataclass(frozen=True)

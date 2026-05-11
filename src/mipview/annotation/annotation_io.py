@@ -9,8 +9,8 @@ import nibabel as nib
 import numpy as np
 
 from mipview.annotation.annotation_mask import AnnotationMask
-from mipview.nifti_io import NiftiLoadResult
-from mipview.nifti_io import load_nifti
+from mipview.io.nifti_io import NiftiLoadResult
+from mipview.io.nifti_io import load_nifti
 
 RLE_LINEAR_ENCODING = "rle_linear"
 INDEX_ORDER = "x_fastest_xyz"

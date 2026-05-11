@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from mipview.nifti_io import NiftiLoadResult
+from mipview.io.nifti_io import NiftiLoadResult
 
 SegmentationKind = Literal["file", "annotation"]
 

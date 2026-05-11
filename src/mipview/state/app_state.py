@@ -5,9 +5,9 @@ from dataclasses import field
 from pathlib import Path
 
 from mipview.annotation import AnnotationState
-from mipview.nifti_io import NiftiLoadResult
-from mipview.patch_selector import PatchBounds
-from mipview.segmentation_models import LoadedSegmentation
+from mipview.io.nifti_io import NiftiLoadResult
+from mipview.patch.selector import PatchBounds
+from mipview.segmentation.models import LoadedSegmentation
 
 
 @dataclass

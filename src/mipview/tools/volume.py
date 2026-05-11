@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from mipview.nifti_io import NiftiLoadResult
+from mipview.io.nifti_io import NiftiLoadResult
 
 
 def derive_volume(source: NiftiLoadResult, data: np.ndarray) -> NiftiLoadResult:

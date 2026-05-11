@@ -31,10 +31,10 @@ from PySide6.QtWidgets import (
 
 from mipview.annotation import AnnotationMask
 from mipview.annotation.annotation_overlay import build_annotation_overlay_rgba
-from mipview.nifti_io import NiftiLoadResult
-from mipview.patch_history import PatchHistoryManager
-from mipview.patch_saver import build_patch_default_filename, save_patch_nifti
-from mipview.patch_selector import PatchBounds
+from mipview.io.nifti_io import NiftiLoadResult
+from mipview.patch.history import PatchHistoryManager
+from mipview.patch.saver import build_patch_default_filename, save_patch_nifti
+from mipview.patch.selector import PatchBounds
 from mipview.state.contrast_state import ContrastState
 from mipview.tools import derive_volume, get_tool
 from mipview.tools.patch_utility import patch_utility_from_tool

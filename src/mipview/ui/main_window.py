@@ -28,11 +28,11 @@ from mipview.annotation import (
     save_annotation_metadata,
     save_annotation_mask,
 )
-from mipview.nifti_io import NiftiLoadResult, load_nifti
-from mipview.patch_extractor import extract_patch
-from mipview.patch_selector import PatchBounds
-from mipview.segmentation_models import LoadedSegmentation
-from mipview.segmentation_validation import validate_segmentation_compatibility
+from mipview.io.nifti_io import NiftiLoadResult, load_nifti
+from mipview.patch.extractor import extract_patch
+from mipview.patch.selector import PatchBounds
+from mipview.segmentation.models import LoadedSegmentation
+from mipview.segmentation.validation import validate_segmentation_compatibility
 from mipview.state.app_state import AppState
 from mipview.state.contrast_state import ContrastState
 from mipview.tools import get_tool

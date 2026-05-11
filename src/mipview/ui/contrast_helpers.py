@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from mipview.nifti_io import NiftiLoadResult
+from mipview.io.nifti_io import NiftiLoadResult
 from mipview.state.contrast_state import ContrastState
 from mipview.ui.contrast_control_bar import ContrastControlBar
 from mipview.viewer.intensity import robust_auto_window, volume_intensity_range

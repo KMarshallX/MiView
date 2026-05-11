@@ -14,8 +14,8 @@ from mipview.annotation.undo import AnnotationUndoStack
 from mipview.ui.drop_loading import first_supported_local_nifti_path
 from mipview.state.cursor_state import CursorState
 from mipview.state.zoom_state import ZoomState
-from mipview.nifti_io import NiftiLoadResult
-from mipview.patch_selector import (
+from mipview.io.nifti_io import NiftiLoadResult
+from mipview.patch.selector import (
     DEFAULT_PATCH_SIZE,
     PatchBounds,
     PatchSelector,

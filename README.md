@@ -103,17 +103,25 @@ The current codebase is organized around a small top-level `mipview` package:
 ├── pyproject.toml
 ├── scripts/
 │   └── bootstrap_helpers.sh
-└── src/mipview/ 
-        └──io/ 
-        └──viewer/ 
-        └──patch/ 
-        └──segmentation/ 
-        └──annotation/ 
-        └──tools/ 
-        └──control/ 
-        └──state/ 
-        └──ui/ 
-        └──utils/
+└── src/mipview/
+    ├── __init__.py
+    ├── __main__.py
+    ├── main.py
+    ├── annotation/
+    ├── io/
+    │   └── nifti_io.py
+    ├── patch/
+    │   ├── extractor.py
+    │   ├── history.py
+    │   ├── saver.py
+    │   └── selector.py
+    ├── segmentation/
+    │   ├── models.py
+    │   └── validation.py
+    ├── state/
+    ├── tools/
+    ├── ui/
+    └── viewer/
 ```
 
 In practice, the main runtime flow is:
@@ -122,6 +130,5 @@ In practice, the main runtime flow is:
 2. `main.py` creates the Qt application and main window.
 3. `ui/main_window.py` coordinates loading, viewer updates, patch actions, segmentation overlay state, and tool execution.
 4. `viewer/` modules render slices and manage tri-planar interactions.
-5. `state/`, `patch_*.py`, `segmentation_*.py`, and `tools/` provide the supporting logic behind those UI actions.
-
+5. `state/`, `io/`, `patch/`, `segmentation/`, and `tools/` provide the supporting logic behind those UI actions.
 
