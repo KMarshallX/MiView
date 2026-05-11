@@ -62,6 +62,9 @@ ANNOTATION_LOAD_FILTER = (
     "JSON Metadata (*.json);;"
     "All Files (*)"
 )
+ANNOTATION_SEGMENTATION_ID = "annotation-active"
+ANNOTATION_SEGMENTATION_NAME = "Annotating Layer"
+RECON_ANNOTATION_SEGMENTATION_NAME = f"recon_{ANNOTATION_SEGMENTATION_NAME}"
 
 
 class MainWindow(QMainWindow):
@@ -416,12 +419,40 @@ class MainWindow(QMainWindow):
             annotation_opacity=self.state.annotation.opacity,
             annotation_visible=self.state.annotation.visible,
             annotation_active_label=self.state.annotation.active_label,
+            annotation_editing_enabled=self.state.annotation.editing_enabled
+            and active_annotation_patch is not None,
+            annotation_brush_radius=self.state.annotation.brush_radius,
+            annotation_brush_mode=self.state.annotation.brush_mode,
             parent=self,
             source_image_name=source_image_name,
             source_image_path=self.state.loaded_file_path,
             source_patch_bounds=bounds,
             patch_center=center,
             patch_size=self.slice_viewer.patch_size_xyz(),
+        )
+        patch_window.annotation_create_requested.connect(
+            self._on_patch_window_annotation_create_requested
+        )
+        patch_window.annotation_patch_changed.connect(
+            self._on_patch_window_annotation_patch_changed
+        )
+        patch_window.annotation_undo_requested_from_patch.connect(
+            self._on_patch_window_annotation_patch_changed
+        )
+        patch_window.annotation_visibility_changed.connect(
+            self._on_annotation_visibility_changed
+        )
+        patch_window.annotation_opacity_changed.connect(
+            self._on_annotation_opacity_changed
+        )
+        patch_window.annotation_active_label_changed.connect(
+            self._on_annotation_active_label_changed
+        )
+        patch_window.annotation_brush_radius_changed.connect(
+            self._on_annotation_brush_radius_changed
+        )
+        patch_window.annotation_brush_mode_changed.connect(
+            self._on_annotation_brush_mode_changed
         )
         patch_window.show()
         self._patch_windows.append(patch_window)
@@ -470,6 +501,9 @@ class MainWindow(QMainWindow):
                 active_label=self.state.annotation.active_label,
                 undo_stack=self.state.annotation.undo_stack,
             )
+        self._register_annotation_as_segmentation(
+            preserve_existing_display_name=not created_new_mask
+        )
         self._sync_annotation_brush_settings()
         self._refresh_annotation_ui()
         if created_new_mask:
@@ -533,7 +567,10 @@ class MainWindow(QMainWindow):
             if reconstructed_path is not None:
                 reconstructed_path.unlink(missing_ok=True)
 
-        self._set_loaded_annotation_mask(annotation_mask)
+        self._set_loaded_annotation_mask(
+            annotation_mask,
+            reconstructed_from_metadata=self._is_annotation_metadata_path(selected_path),
+        )
         self.statusBar().showMessage(f"Loaded annotation {selected_path.name}")
 
     @staticmethod
@@ -556,7 +593,12 @@ class MainWindow(QMainWindow):
         QApplication.processEvents()
         return progress
 
-    def _set_loaded_annotation_mask(self, annotation_mask: AnnotationMask) -> None:
+    def _set_loaded_annotation_mask(
+        self,
+        annotation_mask: AnnotationMask,
+        *,
+        reconstructed_from_metadata: bool = False,
+    ) -> None:
         self.state.annotation.active_mask = annotation_mask
         self.state.annotation.undo_stack.clear()
         self.state.annotation.editing_enabled = True
@@ -566,6 +608,9 @@ class MainWindow(QMainWindow):
             visible=self.state.annotation.visible,
             active_label=self.state.annotation.active_label,
             undo_stack=self.state.annotation.undo_stack,
+        )
+        self._register_annotation_as_segmentation(
+            reconstructed_from_metadata=reconstructed_from_metadata
         )
         self._sync_annotation_brush_settings()
         self._refresh_annotation_ui()
@@ -683,34 +728,47 @@ class MainWindow(QMainWindow):
 
     def _on_annotation_visibility_changed(self, visible: bool) -> None:
         self.state.annotation.visible = bool(visible)
+        self.annotation_panel.set_visible_checked(self.state.annotation.visible)
         self.slice_viewer.set_annotation_overlay_visible(self.state.annotation.visible)
         self._update_patch_windows_annotation_display_options()
 
     def _on_annotation_opacity_changed(self, opacity: float) -> None:
         self.state.annotation.opacity = min(max(float(opacity), 0.0), 1.0)
+        self.annotation_panel.set_opacity(self.state.annotation.opacity)
         self.slice_viewer.set_annotation_overlay_opacity(self.state.annotation.opacity)
         self._update_patch_windows_annotation_display_options()
+        if self._active_segmentation_is_annotation():
+            self._refresh_segmentation_ui()
 
     def _on_annotation_active_label_changed(self, label: int) -> None:
         self.state.annotation.active_label = max(int(label), 1)
+        self.annotation_panel.set_active_label(self.state.annotation.active_label)
         self.slice_viewer.set_annotation_active_label(self.state.annotation.active_label)
         self._update_patch_windows_annotation_display_options()
 
     def _on_annotation_brush_radius_changed(self, radius: int) -> None:
         self.state.annotation.brush_radius = max(int(radius), 0)
+        self.annotation_panel.set_brush_radius(self.state.annotation.brush_radius)
         self.slice_viewer.set_annotation_brush_radius(self.state.annotation.brush_radius)
+        self._update_patch_windows_annotation_display_options()
 
     def _on_annotation_brush_mode_changed(self, mode: str) -> None:
         if mode not in {"paint", "cursor", "erase"}:
             return
         self.state.annotation.brush_mode = mode
+        self.annotation_panel.set_brush_mode(mode)
         self.slice_viewer.set_annotation_brush_mode(mode)
+        self._update_patch_windows_annotation_display_options()
 
     def _on_annotation_changed(self, changed_voxels: object) -> None:
         self.statusBar().showMessage(
             f"Annotation updated: {int(changed_voxels)} voxel(s) changed"
         )
         self.annotation_panel.set_undo_available(self.slice_viewer.annotation_can_undo())
+        self._register_annotation_as_segmentation(
+            preserve_existing_display_name=True,
+            make_active=self._active_segmentation_is_annotation(),
+        )
         self._update_patch_windows_annotation_for_current_image()
 
     def _on_annotation_undo_requested(self) -> None:
@@ -748,6 +806,7 @@ class MainWindow(QMainWindow):
             None,
             undo_stack=self.state.annotation.undo_stack,
         )
+        self._remove_annotation_segmentation_entry()
         self._refresh_annotation_ui()
         self._update_patch_windows_annotation_for_current_image()
 
@@ -792,6 +851,81 @@ class MainWindow(QMainWindow):
             dtype=annotation_mask.dtype,
         )
 
+    def _register_annotation_as_segmentation(
+        self,
+        *,
+        reconstructed_from_metadata: bool = False,
+        make_active: bool = True,
+        preserve_existing_display_name: bool = False,
+    ) -> None:
+        annotation_volume = self._active_annotation_volume()
+        if (
+            annotation_volume is None
+            or self.state.loaded_file_path is None
+            or self.state.volume is None
+        ):
+            return
+
+        if self.state.segmentation_image_path != self.state.loaded_file_path:
+            self._reset_segmentation_session_for_loaded_image(self.state.loaded_file_path)
+
+        existing_annotation = next(
+            (
+                segmentation
+                for segmentation in self.state.loaded_segmentations
+                if segmentation.kind == "annotation"
+            ),
+            None,
+        )
+        display_name = (
+            RECON_ANNOTATION_SEGMENTATION_NAME
+            if reconstructed_from_metadata
+            else ANNOTATION_SEGMENTATION_NAME
+        )
+        if (
+            preserve_existing_display_name
+            and existing_annotation is not None
+            and existing_annotation.display_name_override is not None
+        ):
+            display_name = existing_annotation.display_name_override
+        annotation_segmentation = LoadedSegmentation(
+            id=ANNOTATION_SEGMENTATION_ID,
+            path=None,
+            volume=annotation_volume,
+            kind="annotation",
+            display_name_override=display_name,
+        )
+        self.state.loaded_segmentations = [
+            segmentation
+            for segmentation in self.state.loaded_segmentations
+            if segmentation.kind != "annotation"
+        ]
+        self.state.loaded_segmentations.append(annotation_segmentation)
+        if make_active or self.state.active_segmentation_id is None:
+            self.state.active_segmentation_id = ANNOTATION_SEGMENTATION_ID
+        self._apply_active_segmentation_overlay()
+        self._refresh_segmentation_ui()
+
+    def _remove_annotation_segmentation_entry(self) -> None:
+        removed_active = self._active_segmentation_is_annotation()
+        self.state.loaded_segmentations = [
+            segmentation
+            for segmentation in self.state.loaded_segmentations
+            if segmentation.kind != "annotation"
+        ]
+        if removed_active:
+            self.state.active_segmentation_id = (
+                self.state.loaded_segmentations[0].id
+                if self.state.loaded_segmentations
+                else None
+            )
+            self._apply_active_segmentation_overlay()
+        self._refresh_segmentation_ui()
+
+    def _active_segmentation_is_annotation(self) -> bool:
+        active_segmentation = self._active_segmentation()
+        return active_segmentation is not None and active_segmentation.kind == "annotation"
+
     def _extract_active_annotation_patch(
         self,
         bounds: PatchBounds,
@@ -808,8 +942,14 @@ class MainWindow(QMainWindow):
             labels=annotation_mask.labels,
         )
 
-    def _update_patch_windows_annotation_for_current_image(self) -> None:
+    def _update_patch_windows_annotation_for_current_image(
+        self,
+        *,
+        exclude: PatchViewerWindow | None = None,
+    ) -> None:
         for patch_window in self._patch_windows_for_current_image():
+            if patch_window is exclude:
+                continue
             bounds = patch_window.source_patch_bounds()
             annotation_patch = (
                 self._extract_active_annotation_patch(bounds)
@@ -821,6 +961,10 @@ class MainWindow(QMainWindow):
                 opacity=self.state.annotation.opacity,
                 visible=self.state.annotation.visible,
                 active_label=self.state.annotation.active_label,
+                editing_enabled=self.state.annotation.editing_enabled
+                and annotation_patch is not None,
+                brush_radius=self.state.annotation.brush_radius,
+                brush_mode=self.state.annotation.brush_mode,
             )
 
     def _update_patch_windows_annotation_display_options(self) -> None:
@@ -829,7 +973,48 @@ class MainWindow(QMainWindow):
                 opacity=self.state.annotation.opacity,
                 visible=self.state.annotation.visible,
                 active_label=self.state.annotation.active_label,
+                brush_radius=self.state.annotation.brush_radius,
+                brush_mode=self.state.annotation.brush_mode,
             )
+
+    def _on_patch_window_annotation_create_requested(
+        self,
+        patch_window: PatchViewerWindow,
+    ) -> None:
+        self._on_create_annotation()
+        self._update_patch_windows_annotation_for_current_image(exclude=None)
+
+    def _on_patch_window_annotation_patch_changed(
+        self,
+        patch_window: PatchViewerWindow,
+    ) -> None:
+        annotation_mask = self.state.annotation.active_mask
+        patch_mask = patch_window.annotation_mask()
+        bounds = patch_window.source_patch_bounds()
+        if annotation_mask is None or patch_mask is None or bounds is None:
+            return
+
+        target = annotation_mask.data[bounds.as_slices()]
+        if target.shape != patch_mask.shape:
+            QMessageBox.warning(
+                self,
+                "Patch Annotation Failed",
+                (
+                    "Patch annotation shape does not match the selected source "
+                    "bounds; changes were not applied."
+                ),
+            )
+            return
+
+        target[...] = patch_mask.data
+        self.slice_viewer.refresh_annotation_overlay()
+        self.annotation_panel.set_undo_available(self.slice_viewer.annotation_can_undo())
+        self._register_annotation_as_segmentation(
+            preserve_existing_display_name=True,
+            make_active=self._active_segmentation_is_annotation(),
+        )
+        self._update_patch_windows_annotation_for_current_image(exclude=patch_window)
+        self.statusBar().showMessage("Patch annotation updated source annotation layer")
 
     def _on_apply_tool_to_main_image_requested(self, tool_id: str) -> None:
         if self.state.volume is None:
@@ -921,14 +1106,20 @@ class MainWindow(QMainWindow):
         self._load_segmentation_from_path(dropped_path)
 
     def _on_unload_current_segmentation(self) -> None:
-        if self.state.active_segmentation_id is None:
+        active_segmentation = self._active_segmentation()
+        if active_segmentation is None:
             self.statusBar().showMessage("No active segmentation to unload")
+            return
+
+        if active_segmentation.kind == "annotation":
+            self._clear_annotation_session()
+            self.statusBar().showMessage("Unloaded annotation layer")
             return
 
         self.state.loaded_segmentations = [
             segmentation
             for segmentation in self.state.loaded_segmentations
-            if segmentation.id != self.state.active_segmentation_id
+            if segmentation.id != active_segmentation.id
         ]
         self.state.active_segmentation_id = (
             self.state.loaded_segmentations[0].id
@@ -955,6 +1146,9 @@ class MainWindow(QMainWindow):
             self._refresh_segmentation_ui()
 
     def _on_segmentation_opacity_changed(self, opacity: float) -> None:
+        if self._active_segmentation_is_annotation():
+            self._on_annotation_opacity_changed(opacity)
+            return
         self.state.segmentation_opacity = min(max(opacity, 0.0), 1.0)
         self.slice_viewer.set_segmentation_overlay_opacity(self.state.segmentation_opacity)
         self._update_patch_windows_segmentation_opacity_for_current_image()
@@ -969,7 +1163,7 @@ class MainWindow(QMainWindow):
 
     def _apply_active_segmentation_overlay(self) -> None:
         active_segmentation = self._active_segmentation()
-        if active_segmentation is None:
+        if active_segmentation is None or active_segmentation.kind == "annotation":
             self.slice_viewer.set_segmentation_overlay(
                 None,
                 opacity=self.state.segmentation_opacity,
@@ -1001,12 +1195,22 @@ class MainWindow(QMainWindow):
         self.segmentation_config_window.set_current_image_name(image_name)
         self.segmentation_config_window.set_segmentations(
             [
-                (segmentation.id, segmentation.display_name, str(segmentation.path))
+                (
+                    segmentation.id,
+                    segmentation.display_name,
+                    str(segmentation.path)
+                    if segmentation.path is not None
+                    else segmentation.display_name,
+                )
                 for segmentation in self.state.loaded_segmentations
             ],
             self.state.active_segmentation_id,
         )
-        self.segmentation_config_window.set_opacity(self.state.segmentation_opacity)
+        self.segmentation_config_window.set_opacity(
+            self.state.annotation.opacity
+            if self._active_segmentation_is_annotation()
+            else self.state.segmentation_opacity
+        )
 
     def _clear_segmentation_session(self) -> None:
         self.state.segmentation_image_path = None
