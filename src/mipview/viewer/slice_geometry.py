@@ -125,6 +125,21 @@ def extract_oriented_slice(
     raise ValueError(f"Unsupported orientation: {orientation}")
 
 
+def project_oriented_volume(
+    volume: np.ndarray, orientation: Orientation, mode: str
+) -> np.ndarray:
+    """Project canonical RAS data using the same display orientation rules as slices."""
+    normalized_mode = mode.strip().upper()
+    reducer = np.max if normalized_mode == "MIP" else np.min
+    if orientation == "axial":
+        return reducer(volume, axis=2).T[::-1, ::-1]
+    if orientation == "coronal":
+        return reducer(volume, axis=1).T[::-1, ::-1]
+    if orientation == "sagittal":
+        return reducer(volume, axis=0).T[::-1, ::-1]
+    raise ValueError(f"Unsupported orientation: {orientation}")
+
+
 def orientation_indicators_for_orientation(orientation: Orientation) -> OrientationIndicators:
     """Return boundary orientation labels for the displayed plane."""
     plane_definition = plane_definition_for_orientation(orientation)

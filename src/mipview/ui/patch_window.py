@@ -54,6 +54,8 @@ from mipview.ui.window_styling import (
     apply_window_content_frame,
 )
 from mipview.viewer.intensity import normalize_slice_to_uint8, window_slice_to_uint8
+from mipview.viewer.oriented_volume import build_oriented_volume
+from mipview.viewer.slice_geometry import project_oriented_volume
 from mipview.viewer.triplanar_viewer_widget import TriPlanarViewerWidget
 
 
@@ -586,7 +588,7 @@ class PatchViewerWindow(QMainWindow):
     def _draw_export_overlays(
         self,
         painter: QPainter,
-        projection_planes: dict[str, np.ndarray],
+        projection_planes: dict[str, np.ndarray | dict[str, np.ndarray]],
         orientation_title: str,
         x_offset: int,
         y_offset: int,
@@ -689,29 +691,40 @@ class PatchViewerWindow(QMainWindow):
             ),
         )
 
-    def _compute_projection_planes_for_export(self) -> dict[str, np.ndarray] | None:
+    def _compute_projection_planes_for_export(
+        self,
+    ) -> dict[str, np.ndarray | dict[str, np.ndarray]] | None:
         if self._patch_data.ndim != 3:
             return None
         mode = self._current_projection_mode_for_export()
-        volume = np.asarray(self._patch_data)
+        volume = build_oriented_volume(
+            self._patch_volume.data,
+            self._patch_volume.affine,
+        ).display_data
         planes: dict[str, np.ndarray | dict[str, np.ndarray]] = {
-            "axial": self._project_patch_volume(volume, "axial", mode),
-            "coronal": self._project_patch_volume(volume, "coronal", mode),
-            "sagittal": self._project_patch_volume(volume, "sagittal", mode),
+            "axial": project_oriented_volume(volume, "axial", mode),
+            "coronal": project_oriented_volume(volume, "coronal", mode),
+            "sagittal": project_oriented_volume(volume, "sagittal", mode),
         }
         if self._segmentation_patch_volume is not None:
-            segmentation_volume = np.asarray(self._segmentation_patch_volume.data)
+            segmentation_volume = build_oriented_volume(
+                self._segmentation_patch_volume.data,
+                self._segmentation_patch_volume.affine,
+            ).display_data
             planes["segmentation"] = {
-                "axial": self._project_patch_volume(segmentation_volume, "axial", mode),
-                "coronal": self._project_patch_volume(segmentation_volume, "coronal", mode),
-                "sagittal": self._project_patch_volume(segmentation_volume, "sagittal", mode),
+                "axial": project_oriented_volume(segmentation_volume, "axial", mode),
+                "coronal": project_oriented_volume(segmentation_volume, "coronal", mode),
+                "sagittal": project_oriented_volume(segmentation_volume, "sagittal", mode),
             }
         if self._annotation_patch_mask is not None:
-            annotation_volume = np.asarray(self._annotation_patch_mask.data)
+            annotation_volume = build_oriented_volume(
+                self._annotation_patch_mask.data,
+                self._annotation_patch_mask.affine,
+            ).display_data
             planes["annotation"] = {
-                "axial": self._project_annotation_volume(annotation_volume, "axial"),
-                "coronal": self._project_annotation_volume(annotation_volume, "coronal"),
-                "sagittal": self._project_annotation_volume(annotation_volume, "sagittal"),
+                "axial": project_oriented_volume(annotation_volume, "axial", "MIP"),
+                "coronal": project_oriented_volume(annotation_volume, "coronal", "MIP"),
+                "sagittal": project_oriented_volume(annotation_volume, "sagittal", "MIP"),
             }
         return planes
 
@@ -724,31 +737,6 @@ class PatchViewerWindow(QMainWindow):
             window_min, window_max = self.contrast_state.window()
             return window_slice_to_uint8(plane, window_min, window_max)
         return normalize_slice_to_uint8(plane)
-
-    @staticmethod
-    def _project_patch_volume(
-        volume: np.ndarray,
-        orientation: str,
-        mode: str,
-    ) -> np.ndarray:
-        reducer = np.max if mode == "MIP" else np.min
-        if orientation == "axial":
-            return reducer(volume, axis=2).T[::-1, ::-1]
-        if orientation == "coronal":
-            return reducer(volume, axis=1).T[::-1, ::-1]
-        if orientation == "sagittal":
-            return reducer(volume, axis=0).T[::-1, ::-1]
-        raise ValueError(f"Unsupported orientation: {orientation}")
-
-    @staticmethod
-    def _project_annotation_volume(volume: np.ndarray, orientation: str) -> np.ndarray:
-        if orientation == "axial":
-            return np.max(volume, axis=2).T[::-1, ::-1]
-        if orientation == "coronal":
-            return np.max(volume, axis=1).T[::-1, ::-1]
-        if orientation == "sagittal":
-            return np.max(volume, axis=0).T[::-1, ::-1]
-        raise ValueError(f"Unsupported orientation: {orientation}")
 
     def source_image_path(self) -> Path | None:
         return self._source_image_path

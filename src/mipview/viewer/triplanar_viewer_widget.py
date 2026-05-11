@@ -4,7 +4,6 @@ import logging
 import os
 from pathlib import Path
 
-import numpy as np
 from PySide6.QtCore import QEvent, QObject, Qt, Signal
 from PySide6.QtGui import QDragEnterEvent, QDragMoveEvent, QDropEvent
 from PySide6.QtWidgets import QGridLayout, QWidget
@@ -31,6 +30,7 @@ from mipview.viewer.slice_geometry import (
     compute_shared_base_scale,
     plane_axes_for_orientation,
     plane_shape_for_orientation,
+    project_oriented_volume,
 )
 from mipview.viewer.slice_viewer_widget import SliceViewerWidget
 
@@ -645,23 +645,24 @@ class TriPlanarViewerWidget(QWidget):
                     annotation_slice_2d=None,
                 )
                 continue
-            projection_slice = _project_oriented_volume(
+            projection_slice = project_oriented_volume(
                 volume,
                 view.orientation,
                 self._projection_mode,
             )
             segmentation_projection_slice = None
             if self._segmentation_display_volume is not None:
-                segmentation_projection_slice = _project_oriented_volume(
+                segmentation_projection_slice = project_oriented_volume(
                     self._segmentation_display_volume.display_data,
                     view.orientation,
                     self._projection_mode,
                 )
             annotation_projection_slice = None
             if self._annotation_display_volume is not None:
-                annotation_projection_slice = _project_annotation_volume(
+                annotation_projection_slice = project_oriented_volume(
                     self._annotation_display_volume.display_data,
                     view.orientation,
+                    "MIP",
                 )
             view.set_projection_slice(
                 projection_slice,
@@ -758,29 +759,6 @@ class TriPlanarViewerWidget(QWidget):
         if mime_data is None or not mime_data.hasUrls():
             return None
         return first_supported_local_nifti_path(mime_data.urls())
-
-
-def _project_oriented_volume(
-    volume: np.ndarray, orientation: Orientation, mode: str
-) -> np.ndarray:
-    reducer = np.max if mode == "MIP" else np.min
-    if orientation == "axial":
-        return reducer(volume, axis=2).T[::-1, ::-1]
-    if orientation == "coronal":
-        return reducer(volume, axis=1).T[::-1, ::-1]
-    if orientation == "sagittal":
-        return reducer(volume, axis=0).T[::-1, ::-1]
-    raise ValueError(f"Unsupported orientation: {orientation}")
-
-
-def _project_annotation_volume(volume: np.ndarray, orientation: Orientation) -> np.ndarray:
-    if orientation == "axial":
-        return np.max(volume, axis=2).T[::-1, ::-1]
-    if orientation == "coronal":
-        return np.max(volume, axis=1).T[::-1, ::-1]
-    if orientation == "sagittal":
-        return np.max(volume, axis=0).T[::-1, ::-1]
-    raise ValueError(f"Unsupported orientation: {orientation}")
 
 
 def _clamp_voxel(
