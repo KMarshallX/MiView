@@ -72,6 +72,8 @@ def _build_parser() -> argparse.ArgumentParser:
     patch_center.add_argument("y", type=int)
     patch_center.add_argument("z", type=int)
     patch_subparsers.add_parser("select")
+    patch_export_raw = patch_subparsers.add_parser("export-raw")
+    patch_export_raw.add_argument("path")
     patch_save = patch_subparsers.add_parser("save")
     patch_save.add_argument("path")
 
@@ -135,6 +137,8 @@ def _command_from_args(args: argparse.Namespace) -> tuple[str, dict[str, Any], A
             return "patch.center", {"x": args.x, "y": args.y, "z": args.z}, None
         if args.patch_command == "select":
             return "patch.select", {}, None
+        if args.patch_command == "export-raw":
+            return "patch.export_raw", {"path": args.path}, None
         if args.patch_command == "save":
             return "patch.save", {"path": args.path}, None
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 from typing import Any
@@ -181,6 +182,96 @@ class MipViewController:
         except (OSError, ValueError) as exc:
             return CommandResult(False, f"Patch save failed: {exc}")
         return CommandResult(True, "Patch saved.", {"path": str(saved_path)})
+
+    def export_raw_patch(self, path: str) -> CommandResult:
+        if path is None or not str(path).strip():
+            return CommandResult(False, "Raw patch export path is required.")
+
+        output_path = Path(path)
+        if output_path.suffix.lower() != ".npz":
+            return CommandResult(False, "Raw patch export path must end with .npz.")
+
+        parent = output_path.parent
+        if not parent.exists():
+            return CommandResult(
+                False,
+                f"Raw patch export directory does not exist: {parent}",
+                {"path": str(output_path)},
+            )
+        if not parent.is_dir():
+            return CommandResult(
+                False,
+                f"Raw patch export parent path is not a directory: {parent}",
+                {"path": str(output_path)},
+            )
+        if not os.access(parent, os.W_OK):
+            return CommandResult(
+                False,
+                f"Raw patch export directory is not writable: {parent}",
+                {"path": str(output_path)},
+            )
+
+        selected_patch = self.main_window.state.selected_patch_data
+        selected_bounds = self.main_window.state.selected_patch_bounds
+        if selected_patch is None or selected_bounds is None:
+            selected = self.select_patch()
+            if not selected.ok:
+                return selected
+            selected_patch = self.main_window.state.selected_patch_data
+            selected_bounds = self.main_window.state.selected_patch_bounds
+        if selected_patch is None or selected_bounds is None:
+            return CommandResult(False, "No selected patch data is available.")
+
+        arrays: dict[str, Any] = {
+            "image_patch": np.asarray(selected_patch.data),
+            "bounds": _patch_bounds_to_array(selected_bounds),
+            "patch_size": np.asarray(
+                self.main_window.slice_viewer.patch_size_xyz(),
+                dtype=np.int64,
+            ),
+            "patch_center": _tuple_to_array(
+                self.main_window.slice_viewer.current_patch_center()
+            ),
+            "affine": np.asarray(selected_patch.affine, dtype=np.float64),
+            "voxel_spacing": np.asarray(_voxel_spacing(selected_patch), dtype=np.float64),
+            "source_image_path": np.asarray(
+                _path_to_string(self.main_window.state.loaded_file_path) or ""
+            ),
+            "viewer_state_json": np.asarray(
+                json.dumps(self.export_viewer_state().data, sort_keys=True)
+            ),
+        }
+
+        annotation_included = False
+        annotation_mask = self.main_window.state.annotation.active_mask
+        if annotation_mask is not None:
+            annotation_patch = extract_patch(annotation_mask, selected_bounds)
+            arrays["annotation_patch"] = np.asarray(annotation_patch.data)
+            annotation_included = True
+
+        segmentation_included = False
+        active_segmentation = self._active_segmentation()
+        if active_segmentation is not None and active_segmentation.kind == "file":
+            segmentation_patch = extract_patch(active_segmentation.volume, selected_bounds)
+            arrays["segmentation_patch"] = np.asarray(segmentation_patch.data)
+            segmentation_included = True
+
+        try:
+            np.savez_compressed(output_path, **arrays)
+        except (OSError, ValueError) as exc:
+            return CommandResult(False, f"Raw patch export failed: {exc}")
+
+        return CommandResult(
+            True,
+            "Raw patch exported.",
+            {
+                "path": str(output_path),
+                "bounds": _patch_bounds_to_dict(selected_bounds),
+                "shape": list(selected_patch.shape),
+                "annotation_included": annotation_included,
+                "segmentation_included": segmentation_included,
+            },
+        )
 
     def set_projection_mode(self, mode: str) -> CommandResult:
         normalized_mode = mode.strip().upper()
@@ -448,6 +539,23 @@ def _patch_bounds_to_dict(bounds: PatchBounds | None) -> dict[str, list[int]] | 
         "y": [int(bounds.y_start), int(bounds.y_end)],
         "z": [int(bounds.z_start), int(bounds.z_end)],
     }
+
+
+def _patch_bounds_to_array(bounds: PatchBounds) -> np.ndarray:
+    return np.asarray(
+        [
+            [int(bounds.x_start), int(bounds.x_end)],
+            [int(bounds.y_start), int(bounds.y_end)],
+            [int(bounds.z_start), int(bounds.z_end)],
+        ],
+        dtype=np.int64,
+    )
+
+
+def _tuple_to_array(value: tuple[int, ...] | None) -> np.ndarray:
+    if value is None:
+        return np.asarray([], dtype=np.int64)
+    return np.asarray([int(item) for item in value], dtype=np.int64)
 
 
 def _projection_mode(slice_viewer: Any) -> str | None:

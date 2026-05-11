@@ -49,6 +49,7 @@ class CommandRegistry:
         self.register("patch.size", self.controller.set_patch_size)
         self.register("patch.center", self.controller.set_patch_center)
         self.register("patch.select", self.controller.select_patch)
+        self.register("patch.export_raw", self.controller.export_raw_patch)
         self.register("patch.save", self.controller.save_patch)
         self.register("projection.mode", self.controller.set_projection_mode)
         self.register("projection.save", self.controller.save_projection)
