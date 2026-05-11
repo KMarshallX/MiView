@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+from PySide6.QtGui import QImage
 
 from mipview.annotation import (
     create_empty_annotation_mask,
@@ -17,7 +18,10 @@ from mipview.control.result import CommandResult
 from mipview.patch.extractor import extract_patch
 from mipview.patch.saver import save_patch_nifti
 from mipview.patch.selector import PatchBounds
+from mipview.viewer.intensity import normalize_slice_to_uint8
+from mipview.viewer.oriented_volume import build_oriented_volume
 from mipview.viewer.slice_geometry import Orientation
+from mipview.viewer.slice_geometry import project_oriented_volume
 
 
 SUPPORTED_ORIENTATIONS: set[str] = {"axial", "coronal", "sagittal"}
@@ -291,10 +295,76 @@ class MipViewController:
         )
 
     def save_projection(self, view: str, path: str) -> CommandResult:
+        orientation = _validate_orientation(view)
+        if orientation is None:
+            return CommandResult(False, "Projection view must be axial, coronal, or sagittal.")
+        if path is None or not str(path).strip():
+            return CommandResult(False, "Projection save path is required.")
+
+        try:
+            output_path, format_name = _resolve_projection_output_path(path)
+        except ValueError as exc:
+            return CommandResult(False, str(exc), {"path": str(path), "view": orientation})
+
+        parent = output_path.parent
+        if not parent.exists():
+            return CommandResult(
+                False,
+                f"Projection save directory does not exist: {parent}",
+                {"path": str(output_path), "view": orientation},
+            )
+        if not parent.is_dir():
+            return CommandResult(
+                False,
+                f"Projection save parent path is not a directory: {parent}",
+                {"path": str(output_path), "view": orientation},
+            )
+        if not os.access(parent, os.W_OK):
+            return CommandResult(
+                False,
+                f"Projection save directory is not writable: {parent}",
+                {"path": str(output_path), "view": orientation},
+            )
+
+        selected_patch = self.main_window.state.selected_patch_data
+        selected_bounds = self.main_window.state.selected_patch_bounds
+        if selected_patch is None or selected_bounds is None:
+            selected = self.select_patch()
+            if not selected.ok:
+                return selected
+            selected_patch = self.main_window.state.selected_patch_data
+            selected_bounds = self.main_window.state.selected_patch_bounds
+        if selected_patch is None or selected_bounds is None:
+            return CommandResult(False, "No selected patch data is available.")
+
+        mode = _projection_mode(self.main_window.slice_viewer) or "MIP"
+        normalized_mode = mode.strip().upper()
+        if normalized_mode not in SUPPORTED_PROJECTION_MODES:
+            normalized_mode = "MIP"
+        projection = project_oriented_volume(
+            build_oriented_volume(selected_patch.data, selected_patch.affine).display_data,
+            orientation,
+            normalized_mode,
+        )
+        image_data = normalize_slice_to_uint8(projection)
+        qimage = _grayscale_image_from_array(image_data)
+        if not qimage.save(str(output_path), format_name):
+            return CommandResult(
+                False,
+                "Projection save failed. Check path permissions and file format.",
+                {"path": str(output_path), "view": orientation, "mode": normalized_mode},
+            )
+
         return CommandResult(
-            False,
-            "Projection saving is not implemented in Milestone 2.",
-            {"view": view, "path": path},
+            True,
+            "Projection saved.",
+            {
+                "path": str(output_path),
+                "view": orientation,
+                "mode": normalized_mode,
+                "patch_bounds": _patch_bounds_to_dict(selected_bounds),
+                "shape": [int(image_data.shape[0]), int(image_data.shape[1])],
+            },
         )
 
     def capture_screenshot(self, path: str | None = None) -> CommandResult:
@@ -556,6 +626,28 @@ def _tuple_to_array(value: tuple[int, ...] | None) -> np.ndarray:
     if value is None:
         return np.asarray([], dtype=np.int64)
     return np.asarray([int(item) for item in value], dtype=np.int64)
+
+
+def _resolve_projection_output_path(path: str | Path) -> tuple[Path, str]:
+    output_path = Path(path)
+    suffix = output_path.suffix.lower()
+    if suffix == ".png":
+        return output_path, "PNG"
+    if suffix in {".jpg", ".jpeg"}:
+        return output_path, "JPG"
+    raise ValueError("Projection save path must end with .png, .jpg, or .jpeg.")
+
+
+def _grayscale_image_from_array(image_data: np.ndarray) -> QImage:
+    contiguous = np.ascontiguousarray(image_data, dtype=np.uint8)
+    height, width = contiguous.shape
+    return QImage(
+        contiguous.data,
+        width,
+        height,
+        width,
+        QImage.Format.Format_Grayscale8,
+    ).copy()
 
 
 def _projection_mode(slice_viewer: Any) -> str | None:
