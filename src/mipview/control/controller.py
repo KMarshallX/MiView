@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any
 
@@ -206,10 +207,53 @@ class MipViewController:
         )
 
     def capture_screenshot(self, path: str | None = None) -> CommandResult:
+        if path is None or not str(path).strip():
+            return CommandResult(False, "Screenshot path is required.")
+
+        output_path = Path(path)
+        parent = output_path.parent
+        if not parent.exists():
+            return CommandResult(
+                False,
+                f"Screenshot directory does not exist: {parent}",
+                {"path": str(output_path)},
+            )
+        if not parent.is_dir():
+            return CommandResult(
+                False,
+                f"Screenshot parent path is not a directory: {parent}",
+                {"path": str(output_path)},
+            )
+        if not os.access(parent, os.W_OK):
+            return CommandResult(
+                False,
+                f"Screenshot directory is not writable: {parent}",
+                {"path": str(output_path)},
+            )
+
+        pixmap = self.main_window.grab()
+        if pixmap.isNull():
+            return CommandResult(
+                False,
+                "Screenshot capture produced an empty image.",
+                {"path": str(output_path), "target": "full_window"},
+            )
+        if not pixmap.save(str(output_path)):
+            return CommandResult(
+                False,
+                "Screenshot save failed. Check path permissions and file format.",
+                {"path": str(output_path), "target": "full_window"},
+            )
+
+        viewer_state = self.export_viewer_state()
         return CommandResult(
-            False,
-            "Screenshot capture is not implemented in Milestone 2.",
-            {"path": path},
+            True,
+            "Screenshot saved.",
+            {
+                "path": str(output_path),
+                "target": "full_window",
+                "viewer_state": viewer_state.data if viewer_state.ok else {},
+            },
         )
 
     def create_annotation(self, label: int = 1) -> CommandResult:
