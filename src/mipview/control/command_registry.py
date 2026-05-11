@@ -1,0 +1,58 @@
+from __future__ import annotations
+
+from collections.abc import Callable
+from typing import Any
+
+from mipview.control.controller import MipViewController
+from mipview.control.result import CommandResult
+
+
+CommandHandler = Callable[..., CommandResult]
+
+
+class CommandRegistry:
+    """Map stable command names to controller methods."""
+
+    def __init__(self, controller: MipViewController) -> None:
+        self.controller = controller
+        self._commands: dict[str, CommandHandler] = {}
+        self._register_defaults()
+
+    def register(self, name: str, handler: CommandHandler) -> None:
+        self._commands[name] = handler
+
+    def execute(self, name: str, args: dict[str, Any]) -> CommandResult:
+        if name not in self._commands:
+            return CommandResult(False, f"Unknown command: {name}")
+
+        if not isinstance(args, dict):
+            return CommandResult(
+                False,
+                f"Invalid arguments for {name}: args must be a dict.",
+            )
+
+        try:
+            return self._commands[name](**args)
+        except TypeError as exc:
+            return CommandResult(False, f"Invalid arguments for {name}: {exc}")
+        except Exception as exc:
+            return CommandResult(False, f"Command failed: {exc}")
+
+    def command_names(self) -> tuple[str, ...]:
+        return tuple(sorted(self._commands))
+
+    def _register_defaults(self) -> None:
+        self.register("viewer.status", self.controller.get_status)
+        self.register("viewer.screenshot", self.controller.capture_screenshot)
+        self.register("viewer.export_state", self.controller.export_viewer_state)
+        self.register("cursor.move", self.controller.move_cursor)
+        self.register("patch.size", self.controller.set_patch_size)
+        self.register("patch.center", self.controller.set_patch_center)
+        self.register("patch.select", self.controller.select_patch)
+        self.register("patch.save", self.controller.save_patch)
+        self.register("projection.mode", self.controller.set_projection_mode)
+        self.register("projection.save", self.controller.save_projection)
+        self.register("annotation.create", self.controller.create_annotation)
+        self.register("annotation.paint_stroke", self.controller.paint_annotation_stroke)
+        self.register("annotation.erase_stroke", self.controller.erase_annotation_stroke)
+        self.register("annotation.save", self.controller.save_annotation)
