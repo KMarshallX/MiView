@@ -9,13 +9,20 @@ import nibabel as nib
 import numpy as np
 import pytest
 
+from mipview.annotation import AnnotationMask
 from mipview.nifti_io import NiftiLoadResult
+from mipview.segmentation_models import LoadedSegmentation
 from mipview.tools import derive_volume
 from mipview.ui.drop_loading import (
     first_supported_local_nifti_path,
     is_supported_nifti_path,
 )
-from mipview.ui.main_window import MainWindow
+from mipview.ui.main_window import (
+    ANNOTATION_SEGMENTATION_ID,
+    ANNOTATION_SEGMENTATION_NAME,
+    RECON_ANNOTATION_SEGMENTATION_NAME,
+    MainWindow,
+)
 from mipview.ui.patch_window import PatchViewerWindow
 from mipview.viewer.triplanar_viewer_widget import TriPlanarViewerWidget
 
@@ -32,6 +39,25 @@ def _build_test_volume(shape: tuple[int, int, int] = (3, 3, 3)) -> NiftiLoadResu
         shape=shape,
         dtype=data.dtype,
     )
+
+
+def _build_annotation_mask(source: NiftiLoadResult) -> AnnotationMask:
+    data = np.zeros(source.shape, dtype=np.uint8)
+    data[1, 1, 1] = 1
+    return AnnotationMask(
+        data=data,
+        affine=source.affine,
+        header=source.header.copy(),
+    )
+
+
+def _window_with_loaded_volume() -> MainWindow:
+    window = MainWindow()
+    volume = _build_test_volume((4, 5, 6))
+    window.slice_viewer.load_volume(volume)
+    window.state.volume = volume
+    window.state.loaded_file_path = Path("/tmp/source.nii.gz")
+    return window
 
 
 def test_is_supported_nifti_path_accepts_nii_and_nii_gz() -> None:
@@ -223,6 +249,128 @@ def test_patch_window_export_computes_true_three_direction_projection_planes() -
         computed_minip["axial"],
         np.min(patch_volume.data, axis=2).T[::-1, ::-1],
     )
+
+    window.deleteLater()
+    _ = app
+
+
+def test_create_annotation_adds_annotating_layer_segmentation() -> None:
+    app = QApplication.instance() or QApplication([])
+    window = _window_with_loaded_volume()
+
+    window._on_create_annotation()
+
+    assert window.state.annotation.active_mask is not None
+    assert window.state.annotation.editing_enabled
+    assert len(window.state.loaded_segmentations) == 1
+    segmentation = window.state.loaded_segmentations[0]
+    assert segmentation.id == ANNOTATION_SEGMENTATION_ID
+    assert segmentation.kind == "annotation"
+    assert segmentation.display_name == ANNOTATION_SEGMENTATION_NAME
+    assert window.state.active_segmentation_id == ANNOTATION_SEGMENTATION_ID
+
+    window.deleteLater()
+    _ = app
+
+
+def test_loaded_nifti_annotation_updates_annotating_layer() -> None:
+    app = QApplication.instance() or QApplication([])
+    window = _window_with_loaded_volume()
+    assert window.state.volume is not None
+    annotation_mask = _build_annotation_mask(window.state.volume)
+
+    window._set_loaded_annotation_mask(annotation_mask)
+
+    segmentation = window.state.loaded_segmentations[0]
+    assert segmentation.kind == "annotation"
+    assert segmentation.display_name == ANNOTATION_SEGMENTATION_NAME
+    assert segmentation.volume.data is annotation_mask.data
+    assert window.state.annotation.active_mask is annotation_mask
+
+    window.deleteLater()
+    _ = app
+
+
+def test_reconstructed_json_annotation_uses_recon_display_name() -> None:
+    app = QApplication.instance() or QApplication([])
+    window = _window_with_loaded_volume()
+    assert window.state.volume is not None
+    annotation_mask = _build_annotation_mask(window.state.volume)
+
+    window._set_loaded_annotation_mask(
+        annotation_mask,
+        reconstructed_from_metadata=True,
+    )
+
+    assert window.state.loaded_segmentations[0].display_name == (
+        RECON_ANNOTATION_SEGMENTATION_NAME
+    )
+
+    window._on_annotation_changed(1)
+    assert window.state.loaded_segmentations[0].display_name == (
+        RECON_ANNOTATION_SEGMENTATION_NAME
+    )
+
+    window._exit_annotation_mode()
+    window._on_create_annotation()
+    assert window.state.loaded_segmentations[0].display_name == (
+        RECON_ANNOTATION_SEGMENTATION_NAME
+    )
+
+    window.deleteLater()
+    _ = app
+
+
+def test_annotation_segmentation_opacity_syncs_annotation_controls() -> None:
+    app = QApplication.instance() or QApplication([])
+    window = _window_with_loaded_volume()
+    window._on_create_annotation()
+
+    window._on_segmentation_opacity_changed(0.25)
+
+    assert window.state.annotation.opacity == 0.25
+    assert window.annotation_panel.opacity_slider.value() == 25
+    assert window.state.segmentation_opacity == 0.5
+
+    window.deleteLater()
+    _ = app
+
+
+def test_unloading_annotation_segmentation_clears_annotation_session() -> None:
+    app = QApplication.instance() or QApplication([])
+    window = _window_with_loaded_volume()
+    window._on_create_annotation()
+
+    window._on_unload_current_segmentation()
+
+    assert window.state.annotation.active_mask is None
+    assert not window.state.annotation.editing_enabled
+    assert not window.state.loaded_segmentations
+    assert window.state.active_segmentation_id is None
+
+    window.deleteLater()
+    _ = app
+
+
+def test_unloading_file_segmentation_preserves_annotation_layer() -> None:
+    app = QApplication.instance() or QApplication([])
+    window = _window_with_loaded_volume()
+    window._on_create_annotation()
+    file_segmentation = LoadedSegmentation(
+        id="file-segmentation",
+        path=Path("/tmp/seg.nii.gz"),
+        volume=window.state.volume,
+    )
+    window.state.loaded_segmentations.append(file_segmentation)
+    window.state.active_segmentation_id = file_segmentation.id
+
+    window._on_unload_current_segmentation()
+
+    assert window.state.annotation.active_mask is not None
+    assert [segmentation.kind for segmentation in window.state.loaded_segmentations] == [
+        "annotation"
+    ]
+    assert window.state.active_segmentation_id == ANNOTATION_SEGMENTATION_ID
 
     window.deleteLater()
     _ = app

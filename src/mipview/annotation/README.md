@@ -37,6 +37,26 @@ the same annotation loaded directly from NIfTI.
 Annotation loading shows a modal progress popup. A base image must already be
 loaded before either NIfTI masks or JSON metadata can be loaded.
 
+## Segmentation Configuration Integration
+
+The active annotation mask is also listed in `Segmentation -> Open Configuration
+Panel` so users can inspect it alongside other segmentation overlays. Creating a
+new annotation layer from the annotation panel registers a segmentation entry
+named `Annotating Layer`. Loading an annotation NIfTI mask uses the same display
+name. Loading annotation JSON metadata reconstructs the mask first and displays
+the entry as `recon_Annotating Layer`.
+
+The segmentation-panel entry does not make annotation data a separate editable
+segmentation object. The voxel-space annotation mask remains the source of truth,
+and edits must still happen through annotation tools such as paint, erase, active
+label, brush radius, and undo.
+
+When `Annotating Layer` is the active item in the segmentation configuration
+panel, the segmentation opacity slider controls the same annotation opacity as
+the annotation panel. Removing the annotation entry through `Segmentation ->
+Unload Current Segmentation` clears the current annotation session and exits
+annotation mode.
+
 ## RLE-linear Metadata
 
 Flattening annotated voxels makes the JSON small and keeps the format independent
