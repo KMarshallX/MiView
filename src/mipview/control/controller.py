@@ -14,6 +14,7 @@ from mipview.annotation import (
     paint_stroke,
     save_annotation_mask,
 )
+from mipview.annotation.annotation_overlay import build_annotation_overlay_rgba
 from mipview.control.result import CommandResult
 from mipview.patch.extractor import extract_patch
 from mipview.patch.saver import save_patch_nifti
@@ -294,7 +295,12 @@ class MipViewController:
             {"mode": normalized_mode},
         )
 
-    def save_projection(self, view: str, path: str) -> CommandResult:
+    def save_projection(
+        self,
+        view: str,
+        path: str,
+        annotation_preview: bool = False,
+    ) -> CommandResult:
         orientation = _validate_orientation(view)
         if orientation is None:
             return CommandResult(False, "Projection view must be axial, coronal, or sagittal.")
@@ -347,25 +353,92 @@ class MipViewController:
             normalized_mode,
         )
         image_data = normalize_slice_to_uint8(projection)
-        qimage = _grayscale_image_from_array(image_data)
+
+        annotation_preview_requested = bool(annotation_preview)
+        annotation_overlay_applied = False
+        warnings: list[str] = []
+        if annotation_preview_requested:
+            annotation_result = self._annotation_projection_for_selected_patch(
+                selected_bounds,
+                orientation,
+            )
+            annotation_plane = annotation_result["plane"]
+            warnings.extend(annotation_result["warnings"])
+            if annotation_plane is not None:
+                image_data = _blend_annotation_overlay(
+                    image_data,
+                    annotation_plane,
+                    opacity=self.main_window.state.annotation.opacity,
+                    active_label=self.main_window.state.annotation.active_label,
+                )
+                annotation_overlay_applied = True
+
+        qimage = (
+            _rgb_image_from_array(image_data)
+            if image_data.ndim == 3
+            else _grayscale_image_from_array(image_data)
+        )
         if not qimage.save(str(output_path), format_name):
             return CommandResult(
                 False,
                 "Projection save failed. Check path permissions and file format.",
-                {"path": str(output_path), "view": orientation, "mode": normalized_mode},
+                {
+                    "path": str(output_path),
+                    "view": orientation,
+                    "mode": normalized_mode,
+                    "annotation_preview_requested": annotation_preview_requested,
+                    "annotation_overlay_applied": annotation_overlay_applied,
+                },
             )
+
+        data: dict[str, Any] = {
+            "path": str(output_path),
+            "view": orientation,
+            "mode": normalized_mode,
+            "patch_bounds": _patch_bounds_to_dict(selected_bounds),
+            "shape": [int(image_data.shape[0]), int(image_data.shape[1])],
+            "annotation_preview_requested": annotation_preview_requested,
+            "annotation_overlay_applied": annotation_overlay_applied,
+        }
+        if annotation_preview_requested:
+            data["annotation_projection_mode"] = "MIP"
+        if warnings:
+            data["warnings"] = warnings
 
         return CommandResult(
             True,
             "Projection saved.",
-            {
-                "path": str(output_path),
-                "view": orientation,
-                "mode": normalized_mode,
-                "patch_bounds": _patch_bounds_to_dict(selected_bounds),
-                "shape": [int(image_data.shape[0]), int(image_data.shape[1])],
-            },
+            data,
         )
+
+    def _annotation_projection_for_selected_patch(
+        self,
+        selected_bounds: PatchBounds,
+        orientation: Orientation,
+    ) -> dict[str, Any]:
+        annotation_mask = self.main_window.state.annotation.active_mask
+        if annotation_mask is None:
+            return {
+                "plane": None,
+                "warnings": ["No annotation exists in the selected patch."],
+            }
+
+        annotation_patch = extract_patch(annotation_mask, selected_bounds)
+        if not np.any(np.asarray(annotation_patch.data) > 0):
+            return {
+                "plane": None,
+                "warnings": ["No annotation exists in the selected patch."],
+            }
+
+        annotation_plane = project_oriented_volume(
+            build_oriented_volume(
+                annotation_patch.data,
+                annotation_patch.affine,
+            ).display_data,
+            orientation,
+            "MIP",
+        )
+        return {"plane": annotation_plane, "warnings": []}
 
     def capture_screenshot(self, path: str | None = None) -> CommandResult:
         if path is None or not str(path).strip():
@@ -648,6 +721,41 @@ def _grayscale_image_from_array(image_data: np.ndarray) -> QImage:
         width,
         QImage.Format.Format_Grayscale8,
     ).copy()
+
+
+def _rgb_image_from_array(image_data: np.ndarray) -> QImage:
+    contiguous = np.ascontiguousarray(image_data, dtype=np.uint8)
+    height, width, channels = contiguous.shape
+    if channels != 3:
+        raise ValueError(f"RGB image export expects 3 channels, got {channels}.")
+    return QImage(
+        contiguous.data,
+        width,
+        height,
+        width * 3,
+        QImage.Format.Format_RGB888,
+    ).copy()
+
+
+def _blend_annotation_overlay(
+    image_data: np.ndarray,
+    annotation_plane: np.ndarray,
+    *,
+    opacity: float,
+    active_label: int,
+) -> np.ndarray:
+    overlay = build_annotation_overlay_rgba(
+        annotation_plane,
+        opacity=opacity,
+        active_label=active_label,
+    )
+    base = np.repeat(np.asarray(image_data, dtype=np.uint8)[..., None], 3, axis=2)
+    alpha = overlay[..., 3:4].astype(np.float32) / 255.0
+    blended = (
+        base.astype(np.float32) * (1.0 - alpha)
+        + overlay[..., :3].astype(np.float32) * alpha
+    )
+    return np.clip(np.rint(blended), 0, 255).astype(np.uint8)
 
 
 def _projection_mode(slice_viewer: Any) -> str | None:
