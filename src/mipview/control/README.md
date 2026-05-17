@@ -274,7 +274,10 @@ mipview-ctl patch select
 
 ### `patch.export_raw`
 
-Function: Export selected patch arrays and metadata, including annotation or segmentation patch arrays when available.
+Function: Export selected patch arrays and metadata to a compressed `.npz`
+archive. When an active annotation mask or file-backed active segmentation is
+available, their patch arrays are exported with the same selected patch bounds as
+the image patch.
 
 CLI usage:
 
@@ -293,6 +296,32 @@ Parameters:
 | Name | Type | Description |
 | --- | --- | --- |
 | `path` | `str` | Output `.npz` path. The parent directory must exist and be writable. |
+
+The `.npz` archive always includes:
+
+| Key | Description |
+| --- | --- |
+| `image_patch` | Raw selected image patch array. |
+| `bounds` | Half-open source voxel bounds as `[[x0, x1], [y0, y1], [z0, z1]]`. |
+| `patch_size` | Current requested patch size as `[sx, sy, sz]`. |
+| `patch_center` | Current patch center voxel as `[x, y, z]`, when available. |
+| `affine` | Patch affine. |
+| `voxel_spacing` | Patch voxel spacing. |
+| `source_image_path` | Loaded source image path, or an empty string. |
+| `viewer_state_json` | JSON string containing the exported viewer state. |
+
+The archive conditionally includes:
+
+| Key | Included when |
+| --- | --- |
+| `annotation_patch` | An active annotation mask exists. The patch is extracted in voxel space using the same bounds as `image_patch`. |
+| `segmentation_patch` | The active segmentation is a loaded file segmentation. Annotation-backed segmentations are not duplicated here. |
+
+The command response includes `annotation_included` and `segmentation_included`
+booleans so clients can tell which optional arrays were written.
+
+This command exports selected patch arrays only. It does not provide standalone
+full-volume annotation or segmentation `.npz` export commands.
 
 Example:
 
