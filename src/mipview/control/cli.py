@@ -27,6 +27,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     if postprocess is not None and response.get("ok") is True:
         postprocess(response)
+    if response.get("ok") is True:
+        _print_response_warnings(response)
 
     print(json.dumps(response))
     return 0 if response.get("ok") is True else 1
@@ -87,6 +89,11 @@ def _build_parser() -> argparse.ArgumentParser:
     projection_save = projection_subparsers.add_parser("save")
     projection_save.add_argument("view")
     projection_save.add_argument("path")
+    projection_save.add_argument(
+        "--annotation-preview",
+        action="store_true",
+        help="Overlay the active annotation MIP onto the exported projection.",
+    )
 
     annotation_parser = subparsers.add_parser("annotation")
     annotation_subparsers = annotation_parser.add_subparsers(
@@ -146,7 +153,15 @@ def _command_from_args(args: argparse.Namespace) -> tuple[str, dict[str, Any], A
         if args.projection_command == "mode":
             return "projection.mode", {"mode": args.mode}, None
         if args.projection_command == "save":
-            return "projection.save", {"view": args.view, "path": args.path}, None
+            return (
+                "projection.save",
+                {
+                    "view": args.view,
+                    "path": args.path,
+                    "annotation_preview": bool(args.annotation_preview),
+                },
+                None,
+            )
 
     if args.group == "annotation":
         if args.annotation_command == "create":
@@ -261,6 +276,17 @@ def _write_response_data(path: Path, response: dict[str, Any]) -> None:
         json.dumps(response.get("data", {}), indent=2),
         encoding="utf-8",
     )
+
+
+def _print_response_warnings(response: dict[str, Any]) -> None:
+    data = response.get("data")
+    if not isinstance(data, dict):
+        return
+    warnings = data.get("warnings")
+    if not isinstance(warnings, list):
+        return
+    for warning in warnings:
+        print(f"Warning: {warning}", file=sys.stderr)
 
 
 if __name__ == "__main__":

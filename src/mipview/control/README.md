@@ -359,17 +359,21 @@ mipview-ctl projection mode minip
 ### `projection.save`
 
 Function: Save the selected patch projection image for one anatomical view.
+With `--annotation-preview`, overlay the active annotation mask projection onto the
+exported grayscale image projection.
 
 CLI usage:
 
 ```bash
 mipview-ctl projection save VIEW PATH
+mipview-ctl projection save VIEW PATH --annotation-preview
 ```
 
 Direct command:
 
 ```json
 {"command": "projection.save", "args": {"view": "axial", "path": "./patch_axial_minip.png"}}
+{"command": "projection.save", "args": {"view": "axial", "path": "./patch_axial_minip.png", "annotation_preview": true}}
 ```
 
 Parameters:
@@ -378,11 +382,23 @@ Parameters:
 | --- | --- | --- |
 | `view` | `str` | Projection view: `axial`, `coronal`, or `sagittal`. |
 | `path` | `str` | Output image path. The parent directory must exist and be writable. |
+| `annotation_preview` | `bool` | Optional. When true, project the active annotation patch with MIP and overlay it on the image projection. |
+
+The image projection uses the current projection mode (`MIP` or `MinIP`). The
+annotation preview always uses MIP, even when the image projection mode is
+`MinIP`. This command-layer preview is independent of the GUI patch-window view
+export overlay path.
+
+If annotation preview is requested but there is no active annotation mask, or
+the selected patch contains no nonzero annotation labels, the command still saves
+the grayscale projection. The JSON response includes a warning in
+`data.warnings`, and `mipview-ctl` prints the warning to stderr.
 
 Example:
 
 ```bash
 mipview-ctl projection save axial ./patch_axial_minip.png
+mipview-ctl projection save axial ./patch_axial_minip.png --annotation-preview
 ```
 
 ### `annotation.create`
@@ -521,6 +537,7 @@ mipview-ctl patch select
 mipview-ctl patch export-raw ./patch_raw.npz
 mipview-ctl projection mode minip
 mipview-ctl projection save axial ./patch_axial_minip.png
+mipview-ctl projection save axial ./patch_axial_minip.png --annotation-preview  # add a flag to export png with current annotation overlayed
 mipview-ctl annotation create --label 1
 mipview-ctl annotation paint-stroke --label 1 --radius 2 --view axial --points ./stroke_points.json
 mipview-ctl viewer screenshot ./after.png
