@@ -6,6 +6,7 @@ sample_data/
 *.pyo
 *.pyd
 
+
 .venv
 /src/mipview.egg-info
 tests/
@@ -15,3 +16,6 @@ debug.ipynb
 
 AGENTS.md
 refs/
+
+.agents/mipview/
+.codex/
