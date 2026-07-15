@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from uuid import uuid4
 
 import numpy as np
 from PySide6.QtCore import Qt, Signal
@@ -10,8 +11,10 @@ from PySide6.QtGui import (
     QFont,
     QGuiApplication,
     QImage,
+    QKeySequence,
     QPainter,
     QResizeEvent,
+    QShortcut,
 )
 from PySide6.QtWidgets import (
     QComboBox,
@@ -21,6 +24,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLayout,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QPushButton,
     QScrollArea,
@@ -31,6 +35,7 @@ from PySide6.QtWidgets import (
 
 from mipview.annotation import AnnotationMask
 from mipview.annotation.annotation_overlay import build_annotation_overlay_rgba
+from mipview.graph import GraphEdge, GraphNode, ProjectionGraphState
 from mipview.io.nifti_io import NiftiLoadResult
 from mipview.patch.history import PatchHistoryManager
 from mipview.patch.saver import build_patch_default_filename, save_patch_nifti
@@ -46,6 +51,7 @@ from mipview.ui.contrast_helpers import (
 from mipview.ui.contrast_control_bar import ContrastControlBar
 from mipview.ui.cursor_panel import CursorInspectionPanel
 from mipview.ui.annotation_panel import AnnotationPanel
+from mipview.ui.graph_panel import GraphPanel
 from mipview.ui.patch_history_panel import PatchHistoryPanel
 from mipview.ui.tool_actions import apply_tool_to_volume_with_metadata
 from mipview.ui.tools_menu import build_tools_submenu
@@ -56,6 +62,7 @@ from mipview.ui.window_styling import (
 from mipview.viewer.intensity import normalize_slice_to_uint8, window_slice_to_uint8
 from mipview.viewer.oriented_volume import build_oriented_volume
 from mipview.viewer.slice_geometry import project_oriented_volume
+from mipview.viewer.slice_geometry import Orientation
 from mipview.viewer.triplanar_viewer_widget import TriPlanarViewerWidget
 
 
@@ -99,6 +106,7 @@ class PatchViewerWindow(QMainWindow):
         self.setAcceptDrops(False)
 
         self._source_image_name = source_image_name
+        self.graph_session_id = uuid4().hex
         self._source_image_path = source_image_path
         self._source_patch_bounds = source_patch_bounds
         self._patch_center = patch_center
@@ -110,6 +118,8 @@ class PatchViewerWindow(QMainWindow):
         self._annotation_opacity = min(max(float(annotation_opacity), 0.0), 1.0)
         self._annotation_visible = bool(annotation_visible)
         self._annotation_active_label = max(int(annotation_active_label), 0)
+        self.graph_state = ProjectionGraphState()
+        self._graph_projection_mode = "MIP"
         self._patch_history = PatchHistoryManager(
             patch_volume.data,
             apply_operation=self._apply_history_operation,
@@ -131,6 +141,7 @@ class PatchViewerWindow(QMainWindow):
             show_file_actions=False,
             adaptable_width=True,
         )
+        self.graph_panel = GraphPanel(self, adaptable_width=True)
         self.mip_minip_panel = self._build_mip_minip_panel(self)
         self.patch_save_panel = self._build_save_panel(self)
         self.patch_history_panel = PatchHistoryPanel(self)
@@ -148,6 +159,7 @@ class PatchViewerWindow(QMainWindow):
         self._right_control_stack_layout.addWidget(self.cursor_panel)
         self._right_control_stack_layout.addStretch(1)
         self.add_right_control_panel(self.annotation_panel)
+        self.add_right_control_panel(self.graph_panel)
         self.add_right_control_panel(self.mip_minip_panel)
         self.add_right_control_panel(self.patch_save_panel)
         self.add_right_control_panel(self.patch_history_panel)
@@ -180,6 +192,24 @@ class PatchViewerWindow(QMainWindow):
         self.slice_viewer.annotation_undo_availability_changed.connect(
             self.annotation_panel.set_undo_available
         )
+        self.slice_viewer.graph_context_requested.connect(
+            self._on_graph_context_requested
+        )
+        self.slice_viewer.graph_edge_completion_requested.connect(
+            self._on_graph_edge_completion_requested
+        )
+        self.slice_viewer.graph_edge_cancel_requested.connect(
+            self._cancel_pending_graph_edge
+        )
+        self.slice_viewer.graph_orientation_interacted.connect(
+            self._on_graph_orientation_interacted
+        )
+        self.slice_viewer.projection_state_changed.connect(
+            self._on_graph_projection_state_changed
+        )
+        self.slice_viewer.graph_layers_cleared.connect(
+            self._on_graph_layers_cleared
+        )
         self.annotation_panel.create_requested.connect(
             lambda: self.annotation_create_requested.emit(self)
         )
@@ -197,6 +227,20 @@ class PatchViewerWindow(QMainWindow):
             self.annotation_brush_mode_changed.emit
         )
         self.annotation_panel.undo_requested.connect(self._on_annotation_undo_requested)
+        self.graph_panel.activation_requested.connect(
+            self._on_graph_activation_requested
+        )
+        self.graph_panel.visibility_changed.connect(self._on_graph_visibility_changed)
+        self.graph_panel.opacity_changed.connect(self._on_graph_opacity_changed)
+        self.graph_panel.node_size_changed.connect(self._on_graph_node_size_changed)
+        self.graph_panel.edge_thickness_changed.connect(
+            self._on_graph_edge_thickness_changed
+        )
+        self._graph_cancel_shortcut = QShortcut(
+            QKeySequence(QKeySequence.StandardKey.Cancel),
+            self,
+        )
+        self._graph_cancel_shortcut.activated.connect(self._cancel_pending_graph_edge)
         connect_contrast_controls(
             self.contrast_control_bar,
             self.contrast_state,
@@ -204,6 +248,7 @@ class PatchViewerWindow(QMainWindow):
             self._on_auto_contrast,
         )
         self.slice_viewer.load_volume(patch_volume)
+        self.slice_viewer.set_projection_graph_state(self.graph_state)
         if segmentation_volume is not None:
             self.slice_viewer.set_segmentation_overlay(
                 segmentation_volume,
@@ -226,6 +271,10 @@ class PatchViewerWindow(QMainWindow):
         )
         self._initialize_contrast(patch_volume)
         self._sync_projection_controls()
+        self._on_graph_projection_state_changed(
+            self.slice_viewer.projection_mode(),
+            self.slice_viewer.enabled_projection_orientations(),
+        )
         self._configure_scroll_region_constraints()
 
         self._main_splitter = QSplitter(Qt.Orientation.Horizontal, self)
@@ -359,6 +408,393 @@ class PatchViewerWindow(QMainWindow):
 
     def _on_projection_direction_toggled(self, orientation: str, enabled: bool) -> None:
         self.slice_viewer.set_projection_enabled(orientation, enabled)
+
+    def graph_status(self) -> dict[str, object]:
+        summary = self.graph_state.summary()
+        summary.update(
+            {
+                "session_id": self.graph_session_id,
+                "source_image_path": (
+                    None
+                    if self._source_image_path is None
+                    else str(self._source_image_path)
+                ),
+                "patch_shape": list(self._patch_size),
+                "patch_bounds": (
+                    None
+                    if self._source_patch_bounds is None
+                    else {
+                        "x_start": self._source_patch_bounds.x_start,
+                        "x_end": self._source_patch_bounds.x_end,
+                        "y_start": self._source_patch_bounds.y_start,
+                        "y_end": self._source_patch_bounds.y_end,
+                        "z_start": self._source_patch_bounds.z_start,
+                        "z_end": self._source_patch_bounds.z_end,
+                    }
+                ),
+                "projection_mode": self.slice_viewer.projection_mode(),
+                "enabled_orientations": list(
+                    self.slice_viewer.enabled_projection_orientations()
+                ),
+            }
+        )
+        layers = summary["layers"]
+        assert isinstance(layers, dict)
+        for orientation in ("axial", "coronal", "sagittal"):
+            layer = self.graph_state.layer(orientation)
+            layer_summary = layers[orientation]
+            assert isinstance(layer_summary, dict)
+            layer_summary["nodes"] = [
+                {
+                    "id": node.id,
+                    "horizontal_index": node.horizontal_index,
+                    "vertical_index": node.vertical_index,
+                }
+                for node in sorted(layer.nodes.values(), key=lambda node: node.id)
+            ]
+            layer_summary["edges"] = [
+                {
+                    "start_node_id": edge.start_node_id,
+                    "end_node_id": edge.end_node_id,
+                }
+                for edge in sorted(layer.edges)
+            ]
+        return summary
+
+    def set_graph_editing_enabled(self, enabled: bool) -> bool:
+        target_enabled = bool(enabled)
+        if not target_enabled:
+            changed = self.graph_state.editing_enabled
+            self.graph_state.exit_editing()
+            self.graph_panel.set_editing_enabled(False)
+            self.slice_viewer.refresh_graph_overlay()
+            return changed
+
+        enabled_orientations = self.slice_viewer.enabled_projection_orientations()
+        if not enabled_orientations:
+            raise ValueError("Enable at least one MIP/MinIP projection first.")
+        self.graph_state.visible = True
+        self.graph_panel.set_visible_checked(True)
+        active_view = self.slice_viewer.active_view()
+        if active_view in enabled_orientations:
+            self.graph_state.active_orientation = active_view
+        elif self.graph_state.active_orientation not in enabled_orientations:
+            self.graph_state.active_orientation = enabled_orientations[0]
+        changed = not self.graph_state.editing_enabled
+        self.graph_state.editing_enabled = True
+        self.graph_panel.set_editing_enabled(True)
+        self.slice_viewer.refresh_graph_overlay()
+        return changed
+
+    def set_graph_display_options(
+        self,
+        *,
+        visible: bool | None = None,
+        opacity: float | None = None,
+        node_size: int | None = None,
+        edge_thickness: int | None = None,
+    ) -> None:
+        if visible is not None:
+            self.graph_state.visible = bool(visible)
+            self.graph_panel.set_visible_checked(self.graph_state.visible)
+            if not self.graph_state.visible:
+                self.graph_state.cancel_pending_edge()
+        if opacity is not None:
+            self.graph_state.set_opacity(opacity)
+            self.graph_panel.set_opacity(self.graph_state.opacity)
+        if node_size is not None:
+            self.graph_state.set_node_size(node_size)
+            self.graph_panel.set_node_size(self.graph_state.node_size)
+        if edge_thickness is not None:
+            self.graph_state.set_edge_thickness(edge_thickness)
+            self.graph_panel.set_edge_thickness(self.graph_state.edge_thickness)
+        self.slice_viewer.refresh_graph_overlay()
+
+    def add_graph_node(
+        self,
+        orientation: Orientation,
+        horizontal_index: int,
+        vertical_index: int,
+    ) -> GraphNode:
+        self._validate_graph_edit_operation(orientation)
+        node = self.graph_state.layer(orientation).add_node(
+            horizontal_index,
+            vertical_index,
+        )
+        self.graph_state.active_orientation = orientation
+        self.slice_viewer.refresh_graph_overlay()
+        return node
+
+    def delete_graph_node(self, orientation: Orientation, node_id: int) -> GraphNode:
+        self._validate_graph_edit_operation(orientation)
+        node = self.graph_state.layer(orientation).delete_node(node_id)
+        if (
+            self.graph_state.pending_edge_orientation == orientation
+            and self.graph_state.pending_edge_node_id == node.id
+        ):
+            self.graph_state.cancel_pending_edge()
+        self.slice_viewer.refresh_graph_overlay()
+        return node
+
+    def begin_graph_edge(self, orientation: Orientation, node_id: int) -> None:
+        self._validate_graph_edit_operation(orientation)
+        self.graph_state.begin_edge(orientation, node_id)
+        self.slice_viewer.refresh_graph_overlay()
+
+    def add_graph_edge(
+        self,
+        orientation: Orientation,
+        first_node_id: int,
+        second_node_id: int,
+    ) -> GraphEdge:
+        self._validate_graph_edit_operation(orientation)
+        edge = self.graph_state.layer(orientation).add_edge(
+            first_node_id,
+            second_node_id,
+        )
+        self.graph_state.cancel_pending_edge()
+        self.slice_viewer.refresh_graph_overlay()
+        return edge
+
+    def delete_graph_edge(
+        self,
+        orientation: Orientation,
+        first_node_id: int,
+        second_node_id: int,
+    ) -> GraphEdge:
+        self._validate_graph_edit_operation(orientation)
+        edge = self.graph_state.layer(orientation).delete_edge(
+            first_node_id,
+            second_node_id,
+        )
+        self.slice_viewer.refresh_graph_overlay()
+        return edge
+
+    def _validate_graph_edit_operation(self, orientation: Orientation) -> None:
+        if not self.graph_state.editing_enabled:
+            raise ValueError("Graph mode is not active.")
+        if not self.graph_state.visible:
+            raise ValueError("Graph visibility must be enabled before editing.")
+        if not self.slice_viewer.projection_enabled(orientation):
+            raise ValueError(
+                f"The {orientation} viewer is not showing a MIP/MinIP projection."
+            )
+
+    def _on_graph_activation_requested(self) -> None:
+        try:
+            enabled = not self.graph_state.editing_enabled
+            self.set_graph_editing_enabled(enabled)
+        except ValueError as exc:
+            self.statusBar().showMessage(str(exc))
+            return
+        self.statusBar().showMessage(
+            "Graph mode activated" if enabled else "Graph mode exited"
+        )
+
+    def _on_graph_visibility_changed(self, visible: bool) -> None:
+        self.set_graph_display_options(visible=visible)
+
+    def _on_graph_opacity_changed(self, opacity: float) -> None:
+        self.set_graph_display_options(opacity=opacity)
+
+    def _on_graph_node_size_changed(self, node_size: int) -> None:
+        self.set_graph_display_options(node_size=node_size)
+
+    def _on_graph_edge_thickness_changed(self, edge_thickness: int) -> None:
+        self.set_graph_display_options(edge_thickness=edge_thickness)
+
+    def _on_graph_projection_state_changed(
+        self,
+        mode: str,
+        enabled_orientations: object,
+    ) -> None:
+        enabled = tuple(
+            orientation
+            for orientation in ("axial", "coronal", "sagittal")
+            if isinstance(enabled_orientations, tuple)
+            and orientation in enabled_orientations
+        )
+        mode_changed = mode != self._graph_projection_mode
+        self._graph_projection_mode = mode
+        if mode_changed:
+            self.graph_state.cancel_pending_edge()
+        self.graph_panel.set_projection_available(bool(enabled))
+        if self.graph_state.editing_enabled and not enabled:
+            self.set_graph_editing_enabled(False)
+            self.statusBar().showMessage(
+                "Graph mode exited because all projections were disabled"
+            )
+            return
+        if self.graph_state.active_orientation not in enabled:
+            self.graph_state.cancel_pending_edge()
+            self.graph_state.active_orientation = enabled[0] if enabled else None
+        self.slice_viewer.refresh_graph_overlay()
+
+    def _on_graph_orientation_interacted(self, orientation: str) -> None:
+        if orientation in self.slice_viewer.enabled_projection_orientations():
+            self.graph_state.active_orientation = orientation  # type: ignore[assignment]
+
+    def _on_graph_context_requested(
+        self,
+        orientation: str,
+        projection_position: object,
+        hit: object,
+        global_position: object,
+    ) -> None:
+        if orientation not in ("axial", "coronal", "sagittal"):
+            return
+        if (
+            not isinstance(projection_position, tuple)
+            or len(projection_position) != 2
+            or not isinstance(hit, dict)
+        ):
+            return
+        graph_orientation: Orientation = orientation  # type: ignore[assignment]
+        self.graph_state.active_orientation = graph_orientation
+        menu = QMenu(self)
+        hit_kind = hit.get("kind")
+        if hit_kind == "node":
+            node_id = int(hit["node_id"])
+            delete_action = menu.addAction("Delete this node")
+            delete_action.triggered.connect(
+                lambda _checked=False: self._delete_graph_node_from_ui(
+                    graph_orientation,
+                    node_id,
+                )
+            )
+            edge_action = menu.addAction("Create an edge from here")
+            edge_action.triggered.connect(
+                lambda _checked=False: self._begin_graph_edge_from_ui(
+                    graph_orientation,
+                    node_id,
+                )
+            )
+        elif hit_kind == "edge":
+            start_node_id = int(hit["start_node_id"])
+            end_node_id = int(hit["end_node_id"])
+            delete_action = menu.addAction("Delete this edge")
+            delete_action.triggered.connect(
+                lambda _checked=False: self._delete_graph_edge_from_ui(
+                    graph_orientation,
+                    start_node_id,
+                    end_node_id,
+                )
+            )
+        else:
+            horizontal_index = int(projection_position[0])
+            vertical_index = int(projection_position[1])
+            create_action = menu.addAction("Create node here")
+            create_action.triggered.connect(
+                lambda _checked=False: self._add_graph_node_from_ui(
+                    graph_orientation,
+                    horizontal_index,
+                    vertical_index,
+                )
+            )
+        if not menu.isEmpty():
+            menu.exec(global_position)
+
+    def _add_graph_node_from_ui(
+        self,
+        orientation: Orientation,
+        horizontal_index: int,
+        vertical_index: int,
+    ) -> None:
+        try:
+            node = self.add_graph_node(
+                orientation,
+                horizontal_index,
+                vertical_index,
+            )
+        except ValueError as exc:
+            self.statusBar().showMessage(str(exc))
+            return
+        self.statusBar().showMessage(
+            f"Created {orientation} graph node {node.id} at {node.position()}"
+        )
+
+    def _delete_graph_node_from_ui(
+        self,
+        orientation: Orientation,
+        node_id: int,
+    ) -> None:
+        try:
+            self.delete_graph_node(orientation, node_id)
+        except ValueError as exc:
+            self.statusBar().showMessage(str(exc))
+            return
+        self.statusBar().showMessage(f"Deleted {orientation} graph node {node_id}")
+
+    def _begin_graph_edge_from_ui(
+        self,
+        orientation: Orientation,
+        node_id: int,
+    ) -> None:
+        try:
+            self.begin_graph_edge(orientation, node_id)
+        except ValueError as exc:
+            self.statusBar().showMessage(str(exc))
+            return
+        self.statusBar().showMessage(
+            f"Select another {orientation} graph node to complete the edge"
+        )
+
+    def _on_graph_edge_completion_requested(
+        self,
+        orientation: str,
+        node_id: int,
+    ) -> None:
+        pending_orientation = self.graph_state.pending_edge_orientation
+        pending_node_id = self.graph_state.pending_edge_node_id
+        if pending_orientation is None or pending_node_id is None:
+            return
+        if orientation != pending_orientation:
+            self.statusBar().showMessage(
+                "Graph edges must connect nodes in the same orientation"
+            )
+            return
+        try:
+            edge = self.add_graph_edge(
+                pending_orientation,
+                pending_node_id,
+                node_id,
+            )
+        except ValueError as exc:
+            self.statusBar().showMessage(str(exc))
+            return
+        self.statusBar().showMessage(
+            "Created graph edge "
+            f"{edge.start_node_id}-{edge.end_node_id} in {pending_orientation}"
+        )
+
+    def _delete_graph_edge_from_ui(
+        self,
+        orientation: Orientation,
+        start_node_id: int,
+        end_node_id: int,
+    ) -> None:
+        try:
+            self.delete_graph_edge(orientation, start_node_id, end_node_id)
+        except ValueError as exc:
+            self.statusBar().showMessage(str(exc))
+            return
+        self.statusBar().showMessage(
+            f"Deleted {orientation} graph edge {start_node_id}-{end_node_id}"
+        )
+
+    def _cancel_pending_graph_edge(self) -> None:
+        if self.graph_state.pending_edge_node_id is None:
+            return
+        self.graph_state.cancel_pending_edge()
+        self.slice_viewer.refresh_graph_overlay()
+        self.statusBar().showMessage("Graph edge creation canceled")
+
+    def _on_graph_layers_cleared(self, orientations: object) -> None:
+        if isinstance(orientations, tuple) and orientations:
+            self.statusBar().showMessage(
+                "Cleared graph layers after projection shape changed: "
+                + ", ".join(str(value) for value in orientations)
+            )
 
     def _initialize_contrast(self, patch_volume: NiftiLoadResult) -> None:
         initialize_contrast_state(self.contrast_state, patch_volume)

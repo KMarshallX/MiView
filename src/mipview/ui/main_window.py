@@ -1274,6 +1274,23 @@ class MainWindow(QMainWindow):
             if patch_window.source_image_path() == self.state.loaded_file_path
         ]
 
+    def graph_patch_window(self, session_id: str) -> PatchViewerWindow | None:
+        normalized_session_id = str(session_id).strip()
+        return next(
+            (
+                patch_window
+                for patch_window in self._patch_windows_for_current_image()
+                if patch_window.graph_session_id == normalized_session_id
+            ),
+            None,
+        )
+
+    def graph_session_summaries(self) -> list[dict[str, object]]:
+        return [
+            patch_window.graph_status()
+            for patch_window in self._patch_windows_for_current_image()
+        ]
+
     def _update_patch_windows_segmentation_for_current_image(
         self,
         active_segmentation: LoadedSegmentation | None,

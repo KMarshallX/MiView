@@ -108,6 +108,7 @@ The current codebase is organized around a small top-level `mipview` package:
     ├── __main__.py
     ├── main.py
     ├── annotation/
+    ├── graph/
     ├── io/
     │   └── nifti_io.py
     ├── patch/
@@ -131,4 +132,3 @@ In practice, the main runtime flow is:
 3. `ui/main_window.py` coordinates loading, viewer updates, patch actions, segmentation overlay state, and tool execution.
 4. `viewer/` modules render slices and manage tri-planar interactions.
 5. `state/`, `io/`, `patch/`, `segmentation/`, and `tools/` provide the supporting logic behind those UI actions.
-
