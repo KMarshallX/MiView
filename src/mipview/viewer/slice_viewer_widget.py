@@ -19,6 +19,7 @@ from PySide6.QtWidgets import QLabel, QSlider, QVBoxLayout, QWidget
 from mipview.annotation.annotation_overlay import build_annotation_overlay_rgba
 from mipview.viewer.intensity import normalize_slice_to_uint8, window_slice_to_uint8
 from mipview.viewer.oriented_volume import OrientedVolume
+from mipview.viewer.ruler import display_voxel_spacing_mm, select_ruler_geometry
 from mipview.patch.selector import (
     PatchPlaneBounds,
     axis_for_resize_edge,
@@ -52,6 +53,9 @@ class SliceViewerWidget(QWidget):
     ZOOM_DRAG_SENSITIVITY = 0.01
     PATCH_HANDLE_RADIUS = 3.0
     PATCH_HANDLE_HIT_RADIUS = 9.0
+    RULER_COLOR = QColor("#39ff14")
+    RULER_MARGIN = 8.0
+    RULER_TICK_HEIGHT = 6.0
 
     def __init__(
         self, orientation: Orientation, parent: QWidget | None = None
@@ -59,6 +63,7 @@ class SliceViewerWidget(QWidget):
         super().__init__(parent)
         self.orientation = orientation
         self._display_volume: OrientedVolume | None = None
+        self._spatial_unit_to_mm = 1.0
         self._source_cursor_position: tuple[int, int, int] | None = None
         self._contrast_window: tuple[float, float] | None = None
         self._current_pixmap: QPixmap | None = None
@@ -66,6 +71,7 @@ class SliceViewerWidget(QWidget):
         self._zoom_factor = 1.0
         self._pan_offset = (0.0, 0.0)
         self._cursor_overlay_visible = True
+        self._ruler_visible = True
         self._patch_overlay_visible = False
         self._patch_overlay_opacity = 0.5
         self._patch_plane_bounds: PatchPlaneBounds | None = None
@@ -119,8 +125,13 @@ class SliceViewerWidget(QWidget):
         layout.addWidget(self.slice_label)
         layout.setContentsMargins(8, 8, 8, 8)
 
-    def load_volume(self, display_volume: OrientedVolume) -> None:
+    def load_volume(
+        self,
+        display_volume: OrientedVolume,
+        spatial_unit_to_mm: float = 1.0,
+    ) -> None:
         self._display_volume = display_volume
+        self._spatial_unit_to_mm = float(spatial_unit_to_mm)
         self._source_cursor_position = None
         self._current_pixmap = None
         self._pan_offset = (0.0, 0.0)
@@ -180,6 +191,10 @@ class SliceViewerWidget(QWidget):
 
     def set_cursor_overlay_visible(self, visible: bool) -> None:
         self._cursor_overlay_visible = visible
+        self._update_scaled_pixmap()
+
+    def set_ruler_visible(self, visible: bool) -> None:
+        self._ruler_visible = bool(visible)
         self._update_scaled_pixmap()
 
     def set_patch_overlay(
@@ -459,22 +474,84 @@ class SliceViewerWidget(QWidget):
         ):
             self._draw_patch_overlay(painter, display_rect)
 
-        if self._source_cursor_position is None or self._display_volume is None or not self._cursor_overlay_visible:
-            painter.end()
-            self.image_label.setPixmap(canvas)
-            return
+        if (
+            self._source_cursor_position is not None
+            and self._display_volume is not None
+            and self._cursor_overlay_visible
+        ):
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+            pen = QPen(QColor("#ffb000"))
+            pen.setWidth(1)
+            painter.setPen(pen)
 
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
-        pen = QPen(QColor("#ffb000"))
-        pen.setWidth(1)
-        painter.setPen(pen)
+            crosshair_x, crosshair_y = self._crosshair_pixel_position(display_rect)
+            painter.drawLine(crosshair_x, 0, crosshair_x, canvas.height() - 1)
+            painter.drawLine(0, crosshair_y, canvas.width() - 1, crosshair_y)
 
-        crosshair_x, crosshair_y = self._crosshair_pixel_position(display_rect)
-        painter.drawLine(crosshair_x, 0, crosshair_x, canvas.height() - 1)
-        painter.drawLine(0, crosshair_y, canvas.width() - 1, crosshair_y)
+        self._draw_ruler(painter, display_rect)
         painter.end()
 
         self.image_label.setPixmap(canvas)
+
+    def _draw_ruler(self, painter: QPainter, display_rect: DisplayRect) -> None:
+        if not self._ruler_visible or self._display_volume is None:
+            return
+
+        horizontal_axis, _, _ = plane_axes_for_orientation(self.orientation)
+        horizontal_voxels = self._display_volume.display_shape[horizontal_axis]
+        if horizontal_voxels <= 0:
+            return
+
+        voxel_spacings = display_voxel_spacing_mm(
+            self._display_volume.affine,
+            self._display_volume.display_to_source_affine,
+            self._spatial_unit_to_mm,
+        )
+        horizontal_spacing_mm = voxel_spacings[horizontal_axis]
+        if not np.isfinite(horizontal_spacing_mm) or horizontal_spacing_mm <= 0.0:
+            return
+
+        pixels_per_voxel = display_rect.width / float(horizontal_voxels)
+        ruler = select_ruler_geometry(
+            pixels_per_voxel / horizontal_spacing_mm,
+            self.image_label.width(),
+        )
+        if ruler is None:
+            return
+
+        start_x = self.RULER_MARGIN
+        end_x = start_x + ruler.pixel_length
+        baseline_y = self.image_label.height() - self.RULER_MARGIN
+        tick_top = baseline_y - self.RULER_TICK_HEIGHT
+
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+        ruler_pen = QPen(self.RULER_COLOR, 2)
+        painter.setPen(ruler_pen)
+        painter.drawLine(QPointF(start_x, baseline_y), QPointF(end_x, baseline_y))
+        painter.drawLine(QPointF(start_x, tick_top), QPointF(start_x, baseline_y))
+        painter.drawLine(QPointF(end_x, tick_top), QPointF(end_x, baseline_y))
+
+        label_font = QFont(self._fixed_orientation_indicator_font)
+        label_font.setBold(True)
+        painter.setFont(label_font)
+        label_height = painter.fontMetrics().height()
+        painter.drawText(
+            QRectF(
+                start_x,
+                tick_top - label_height - 2.0,
+                max(
+                    ruler.pixel_length,
+                    float(
+                        painter.fontMetrics().horizontalAdvance(ruler.scale.label)
+                    ),
+                ),
+                float(label_height),
+            ),
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+            ruler.scale.label,
+        )
+        painter.restore()
 
     def _draw_segmentation_overlay(
         self, painter: QPainter, display_rect: DisplayRect

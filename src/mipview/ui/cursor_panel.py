@@ -14,6 +14,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from mipview.viewer.physical_axes import physical_axis_direction_labels
+
 
 class CursorInspectionPanel(QWidget):
     """Right-side panel for cursor/voxel readouts."""
@@ -50,9 +52,13 @@ class CursorInspectionPanel(QWidget):
         self.z_value = QLabel("-", group)
         self.intensity_value = QLabel("-", group)
 
-        form.addRow("X:", self.x_value)
-        form.addRow("Y:", self.y_value)
-        form.addRow("Z:", self.z_value)
+        self.x_axis_label = QLabel("X:", group)
+        self.y_axis_label = QLabel("Y:", group)
+        self.z_axis_label = QLabel("Z:", group)
+
+        form.addRow(self.x_axis_label, self.x_value)
+        form.addRow(self.y_axis_label, self.y_value)
+        form.addRow(self.z_axis_label, self.z_value)
         form.addRow("Intensity:", self.intensity_value)
 
         self.patch_group = QGroupBox("Patch Selection", self)
@@ -115,6 +121,21 @@ class CursorInspectionPanel(QWidget):
         ):
             label.setText("-" if value is None else str(value))
         self.intensity_value.setText(self._format_intensity(intensity))
+
+    def set_axis_directions(self, affine: np.ndarray | None) -> None:
+        if affine is None:
+            direction_labels = (None, None, None)
+        else:
+            direction_labels = physical_axis_direction_labels(affine)
+
+        for axis_name, direction, label in zip(
+            ("X", "Y", "Z"),
+            direction_labels,
+            (self.x_axis_label, self.y_axis_label, self.z_axis_label),
+            strict=True,
+        ):
+            suffix = "" if direction is None else f" ({direction})"
+            label.setText(f"{axis_name}{suffix}:")
 
     @staticmethod
     def _format_intensity(value: float | int | None) -> str:

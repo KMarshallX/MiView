@@ -124,6 +124,7 @@ class PatchViewerWindow(QMainWindow):
         self.contrast_control_bar = ContrastControlBar(self)
         self.slice_viewer = TriPlanarViewerWidget(self)
         self.cursor_panel = CursorInspectionPanel(self, adaptable_width=True)
+        self.cursor_panel.set_axis_directions(patch_volume.affine)
         self.cursor_panel.set_patch_controls_visible(False)
         self.annotation_panel = AnnotationPanel(
             self,
@@ -266,6 +267,12 @@ class PatchViewerWindow(QMainWindow):
         self.segmentation_menu.addAction(self.open_segmentation_config_action)
 
         tools_menu = self.menuBar().addMenu("&Tools")
+        self.ruler_action = QAction("Show &Ruler", self)
+        self.ruler_action.setCheckable(True)
+        self.ruler_action.setChecked(True)
+        self.ruler_action.toggled.connect(self.slice_viewer.set_ruler_visible)
+        tools_menu.addAction(self.ruler_action)
+        tools_menu.addSeparator()
         build_tools_submenu(
             self,
             tools_menu,
@@ -985,6 +992,7 @@ class PatchViewerWindow(QMainWindow):
         )
 
     def _replace_patch_viewer_volume(self, patch_volume: NiftiLoadResult) -> None:
+        self.cursor_panel.set_axis_directions(patch_volume.affine)
         cursor_position = self.slice_viewer.current_cursor_position()
         patch_enabled = self.slice_viewer.patch_selection_enabled()
         patch_center = self.slice_viewer.current_patch_center()

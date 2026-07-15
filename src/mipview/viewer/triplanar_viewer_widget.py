@@ -24,6 +24,7 @@ from mipview.patch.selector import (
     source_bounds_to_display_bounds,
 )
 from mipview.viewer.oriented_volume import OrientedVolume, build_oriented_volume
+from mipview.viewer.ruler import spatial_unit_to_mm
 from mipview.viewer.slice_geometry import (
     Orientation,
     center_cursor_for_volume,
@@ -130,13 +131,14 @@ class TriPlanarViewerWidget(QWidget):
             )
 
         self._display_volume = build_oriented_volume(volume.data, volume.affine)
+        unit_scale_to_mm = spatial_unit_to_mm(volume.header.get_xyzt_units()[0])
         # Reset cursor state before reloading the views so the initial cursor
         # is always re-emitted into the freshly cleared slice widgets.
         self.cursor_state.clear()
         self.cursor_state.set_volume_shape(self._display_volume.source_shape)
         self.patch_selector.set_volume_shape(self._display_volume.source_shape)
         for view in self._views:
-            view.load_volume(self._display_volume)
+            view.load_volume(self._display_volume, unit_scale_to_mm)
             if self._contrast_window is not None:
                 view.set_contrast_window(
                     self._contrast_window[0], self._contrast_window[1]
@@ -230,6 +232,10 @@ class TriPlanarViewerWidget(QWidget):
     def set_cursor_overlay_visible(self, visible: bool) -> None:
         for view in self._views:
             view.set_cursor_overlay_visible(visible)
+
+    def set_ruler_visible(self, visible: bool) -> None:
+        for view in self._views:
+            view.set_ruler_visible(visible)
 
     def set_patch_selection_enabled(self, enabled: bool) -> None:
         if enabled and self.cursor_state.cursor_position() is not None:

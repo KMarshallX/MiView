@@ -84,6 +84,7 @@ class MainWindow(QMainWindow):
         self.annotation_panel = AnnotationPanel()
         self.contrast_control_bar = ContrastControlBar(self)
         self.cursor_overlay_action: QAction | None = None
+        self.ruler_action: QAction | None = None
         self._cursor_overlay_checked_before_patch = True
         self.patch_toggle_action: QAction | None = None
         self.load_segmentation_action: QAction | None = None
@@ -236,6 +237,14 @@ class MainWindow(QMainWindow):
         self.patch_toggle_action.setChecked(True)
         self.patch_toggle_action.toggled.connect(self._on_patch_selection_toggled)
         tools_menu.addAction(self.patch_toggle_action)
+
+        self.ruler_action = QAction("Show &Ruler", self)
+        self.ruler_action.setCheckable(True)
+        self.ruler_action.setChecked(True)
+        self.ruler_action.toggled.connect(self.slice_viewer.set_ruler_visible)
+        tools_menu.addAction(self.ruler_action)
+
+        tools_menu.addSeparator()
         build_tools_submenu(
             self,
             tools_menu,
@@ -319,6 +328,7 @@ class MainWindow(QMainWindow):
             self.cursor_overlay_action.setEnabled(True)
             self.slice_viewer.set_cursor_overlay_visible(self.cursor_overlay_action.isChecked())
         self.cursor_panel.set_cursor_values(None, None, None, None)
+        self.cursor_panel.set_axis_directions(None)
         self._refresh_patch_selection_ui()
         self.statusBar().showMessage("Ready")
 
@@ -1420,6 +1430,7 @@ class MainWindow(QMainWindow):
 
         self.state.loaded_file_path = image_path
         self.state.volume = loaded
+        self.cursor_panel.set_axis_directions(loaded.affine)
         self.state.cursor_position = self.slice_viewer.current_cursor_position()
         self.state.selected_patch_bounds = None
         self.state.selected_patch_data = None
