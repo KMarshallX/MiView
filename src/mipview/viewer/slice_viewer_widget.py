@@ -1030,17 +1030,17 @@ class SliceViewerWidget(QWidget):
         top = overlay_rect.top()
         bottom = overlay_rect.bottom()
         mid_x = (left + right) / 2.0
+        mid_y = (top + bottom) / 2.0
 
-        if self.orientation == "axial":
-            return {
-                "top_left": QPointF(left, top),
-                "top_right": QPointF(right, top),
-                "bottom_left": QPointF(left, bottom),
-                "bottom_right": QPointF(right, bottom),
-            }
         return {
+            "top_left": QPointF(left, top),
             "top_mid": QPointF(mid_x, top),
+            "top_right": QPointF(right, top),
+            "right_mid": QPointF(right, mid_y),
+            "bottom_right": QPointF(right, bottom),
             "bottom_mid": QPointF(mid_x, bottom),
+            "bottom_left": QPointF(left, bottom),
+            "left_mid": QPointF(left, mid_y),
         }
 
     def _resize_handle_at_position(
@@ -1066,6 +1066,10 @@ class SliceViewerWidget(QWidget):
             return ("top",)
         if handle_name == "bottom_mid":
             return ("bottom",)
+        if handle_name == "left_mid":
+            return ("left",)
+        if handle_name == "right_mid":
+            return ("right",)
         return ()
 
     def _update_hover_cursor(self, label_position: QPointF) -> None:
@@ -1086,6 +1090,8 @@ class SliceViewerWidget(QWidget):
                         self.image_label.setCursor(Qt.CursorShape.SizeFDiagCursor)
                     elif handle_name in ("top_right", "bottom_left"):
                         self.image_label.setCursor(Qt.CursorShape.SizeBDiagCursor)
+                    elif handle_name in ("left_mid", "right_mid"):
+                        self.image_label.setCursor(Qt.CursorShape.SizeHorCursor)
                     else:
                         self.image_label.setCursor(Qt.CursorShape.SizeVerCursor)
                     return

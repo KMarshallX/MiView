@@ -7,6 +7,7 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QLabel,
     QPushButton,
+    QSizePolicy,
     QSlider,
     QSpinBox,
     QVBoxLayout,
@@ -25,9 +26,21 @@ class CursorInspectionPanel(QWidget):
 
     PANEL_WIDTH = 220
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        parent: QWidget | None = None,
+        *,
+        adaptable_width: bool = False,
+    ) -> None:
         super().__init__(parent)
-        self.setFixedWidth(self.PANEL_WIDTH)
+        if adaptable_width:
+            self.setMinimumWidth(self.PANEL_WIDTH)
+            self.setSizePolicy(
+                QSizePolicy.Policy.Expanding,
+                QSizePolicy.Policy.Preferred,
+            )
+        else:
+            self.setFixedWidth(self.PANEL_WIDTH)
 
         group = QGroupBox("Cursor Inspection", self)
         form = QFormLayout(group)

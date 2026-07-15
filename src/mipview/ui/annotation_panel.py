@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QPushButton,
+    QSizePolicy,
     QSlider,
     QSpinBox,
     QVBoxLayout,
@@ -37,9 +38,17 @@ class AnnotationPanel(QWidget):
         parent: QWidget | None = None,
         *,
         show_file_actions: bool = True,
+        adaptable_width: bool = False,
     ) -> None:
         super().__init__(parent)
-        self.setFixedWidth(self.PANEL_WIDTH)
+        if adaptable_width:
+            self.setMinimumWidth(self.PANEL_WIDTH)
+            self.setSizePolicy(
+                QSizePolicy.Policy.Expanding,
+                QSizePolicy.Policy.Preferred,
+            )
+        else:
+            self.setFixedWidth(self.PANEL_WIDTH)
         self._annotation_editing_enabled = False
         self._show_file_actions = bool(show_file_actions)
 

@@ -11,6 +11,7 @@ sample_data/
 /src/mipview.egg-info
 tests/
 tests/*.py
+test_data/
 
 debug.ipynb
 

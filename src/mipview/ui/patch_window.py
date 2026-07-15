@@ -123,9 +123,13 @@ class PatchViewerWindow(QMainWindow):
         self.contrast_state = ContrastState(self)
         self.contrast_control_bar = ContrastControlBar(self)
         self.slice_viewer = TriPlanarViewerWidget(self)
-        self.cursor_panel = CursorInspectionPanel(self)
+        self.cursor_panel = CursorInspectionPanel(self, adaptable_width=True)
         self.cursor_panel.set_patch_controls_visible(False)
-        self.annotation_panel = AnnotationPanel(self, show_file_actions=False)
+        self.annotation_panel = AnnotationPanel(
+            self,
+            show_file_actions=False,
+            adaptable_width=True,
+        )
         self.mip_minip_panel = self._build_mip_minip_panel(self)
         self.patch_save_panel = self._build_save_panel(self)
         self.patch_history_panel = PatchHistoryPanel(self)
