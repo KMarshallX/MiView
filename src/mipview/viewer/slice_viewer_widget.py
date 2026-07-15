@@ -53,6 +53,7 @@ class SliceViewerWidget(QWidget):
     ZOOM_DRAG_SENSITIVITY = 0.01
     PATCH_HANDLE_RADIUS = 3.0
     PATCH_HANDLE_HIT_RADIUS = 9.0
+    NEAREST_NEIGHBOR_ZOOM_THRESHOLD = 8.0
     RULER_COLOR = QColor("#39ff14")
     RULER_MARGIN = 8.0
     RULER_TICK_HEIGHT = 6.0
@@ -454,7 +455,10 @@ class SliceViewerWidget(QWidget):
         canvas = QPixmap(self.image_label.size())
         canvas.fill(QColor("#1a1a1a"))
         painter = QPainter(canvas)
-        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+        painter.setRenderHint(
+            QPainter.RenderHint.SmoothPixmapTransform,
+            self._zoom_factor < self.NEAREST_NEIGHBOR_ZOOM_THRESHOLD,
+        )
         painter.drawPixmap(
             int(display_rect.left),
             int(display_rect.top),

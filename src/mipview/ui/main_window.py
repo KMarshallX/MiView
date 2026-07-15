@@ -79,7 +79,7 @@ class MainWindow(QMainWindow):
             reference_height=700,
         )
         self.contrast_state = ContrastState(self)
-        self.slice_viewer = TriPlanarViewerWidget()
+        self.slice_viewer = TriPlanarViewerWidget(maximum_zoom=25.0)
         self.cursor_panel = CursorInspectionPanel()
         self.annotation_panel = AnnotationPanel()
         self.contrast_control_bar = ContrastControlBar(self)

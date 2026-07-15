@@ -47,7 +47,12 @@ class TriPlanarViewerWidget(QWidget):
     annotation_undo_availability_changed = Signal(bool)
     nifti_file_dropped = Signal(object)
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        parent: QWidget | None = None,
+        *,
+        maximum_zoom: float = ZoomState.MAX_ZOOM,
+    ) -> None:
         super().__init__(parent)
         self._display_volume: OrientedVolume | None = None
         self._segmentation_display_volume: OrientedVolume | None = None
@@ -72,7 +77,7 @@ class TriPlanarViewerWidget(QWidget):
             "on",
         )
         self.cursor_state = CursorState(self)
-        self.zoom_state = ZoomState(self)
+        self.zoom_state = ZoomState(self, maximum_zoom=maximum_zoom)
         self.patch_selector = PatchSelector(DEFAULT_PATCH_SIZE)
         self._projection_mode = "MIP"
         self._active_view: Orientation | None = None
