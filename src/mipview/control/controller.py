@@ -52,6 +52,7 @@ class MipViewController:
                 "annotation_active": state.annotation.active_mask is not None,
                 "annotation_editing_enabled": bool(state.annotation.editing_enabled),
                 "num_segmentations": len(state.loaded_segmentations),
+                "num_graph_sessions": len(self.main_window.graph_session_summaries()),
             },
         )
 
@@ -97,6 +98,7 @@ class MipViewController:
                 "brush_radius": int(annotation.brush_radius),
                 "brush_mode": annotation.brush_mode,
             },
+            "graph_sessions": self.main_window.graph_session_summaries(),
         }
         if volume is not None:
             data["affine"] = np.asarray(volume.affine, dtype=float).tolist()
@@ -293,6 +295,205 @@ class MipViewController:
             True,
             "Projection mode updated.",
             {"mode": normalized_mode},
+        )
+
+    def get_graph_status(self, session_id: str) -> CommandResult:
+        patch_window = self._graph_patch_window(session_id)
+        if patch_window is None:
+            return self._graph_session_not_found(session_id)
+        return CommandResult(
+            True,
+            "Graph session exported.",
+            patch_window.graph_status(),
+        )
+
+    def set_graph_active(self, session_id: str, enabled: bool) -> CommandResult:
+        patch_window = self._graph_patch_window(session_id)
+        if patch_window is None:
+            return self._graph_session_not_found(session_id)
+        try:
+            patch_window.set_graph_editing_enabled(bool(enabled))
+        except ValueError as exc:
+            return CommandResult(False, str(exc), {"session_id": session_id})
+        return CommandResult(
+            True,
+            "Graph mode activated." if enabled else "Graph mode exited.",
+            patch_window.graph_status(),
+        )
+
+    def set_graph_display(
+        self,
+        session_id: str,
+        visible: bool | None = None,
+        opacity: float | None = None,
+        node_size: int | None = None,
+        edge_thickness: int | None = None,
+    ) -> CommandResult:
+        patch_window = self._graph_patch_window(session_id)
+        if patch_window is None:
+            return self._graph_session_not_found(session_id)
+        if all(
+            value is None
+            for value in (visible, opacity, node_size, edge_thickness)
+        ):
+            return CommandResult(False, "At least one graph display option is required.")
+        if opacity is not None and not 0.0 <= float(opacity) <= 1.0:
+            return CommandResult(False, "Graph opacity must be between 0.0 and 1.0.")
+        if node_size is not None and not 1 <= int(node_size) <= 10:
+            return CommandResult(False, "Graph node size must be between 1 and 10.")
+        if edge_thickness is not None and not 1 <= int(edge_thickness) <= 10:
+            return CommandResult(False, "Graph edge thickness must be between 1 and 10.")
+        patch_window.set_graph_display_options(
+            visible=visible,
+            opacity=opacity,
+            node_size=node_size,
+            edge_thickness=edge_thickness,
+        )
+        return CommandResult(
+            True,
+            "Graph display options updated.",
+            patch_window.graph_status(),
+        )
+
+    def add_graph_node(
+        self,
+        session_id: str,
+        view: str,
+        horizontal: int,
+        vertical: int,
+    ) -> CommandResult:
+        patch_window = self._graph_patch_window(session_id)
+        if patch_window is None:
+            return self._graph_session_not_found(session_id)
+        orientation = _validate_orientation(view)
+        if orientation is None:
+            return CommandResult(False, "Graph view must be axial, coronal, or sagittal.")
+        try:
+            node = patch_window.add_graph_node(
+                orientation,
+                int(horizontal),
+                int(vertical),
+            )
+        except ValueError as exc:
+            return CommandResult(False, str(exc), {"session_id": session_id})
+        return CommandResult(
+            True,
+            "Graph node created.",
+            {
+                "session_id": session_id,
+                "view": orientation,
+                "node": {
+                    "id": node.id,
+                    "horizontal_index": node.horizontal_index,
+                    "vertical_index": node.vertical_index,
+                },
+            },
+        )
+
+    def delete_graph_node(
+        self,
+        session_id: str,
+        view: str,
+        node_id: int,
+    ) -> CommandResult:
+        patch_window = self._graph_patch_window(session_id)
+        if patch_window is None:
+            return self._graph_session_not_found(session_id)
+        orientation = _validate_orientation(view)
+        if orientation is None:
+            return CommandResult(False, "Graph view must be axial, coronal, or sagittal.")
+        try:
+            patch_window.delete_graph_node(orientation, int(node_id))
+        except ValueError as exc:
+            return CommandResult(False, str(exc), {"session_id": session_id})
+        return CommandResult(
+            True,
+            "Graph node deleted.",
+            {"session_id": session_id, "view": orientation, "node_id": int(node_id)},
+        )
+
+    def add_graph_edge(
+        self,
+        session_id: str,
+        view: str,
+        start_node_id: int,
+        end_node_id: int,
+    ) -> CommandResult:
+        return self._mutate_graph_edge(
+            session_id,
+            view,
+            start_node_id,
+            end_node_id,
+            delete=False,
+        )
+
+    def delete_graph_edge(
+        self,
+        session_id: str,
+        view: str,
+        start_node_id: int,
+        end_node_id: int,
+    ) -> CommandResult:
+        return self._mutate_graph_edge(
+            session_id,
+            view,
+            start_node_id,
+            end_node_id,
+            delete=True,
+        )
+
+    def _mutate_graph_edge(
+        self,
+        session_id: str,
+        view: str,
+        start_node_id: int,
+        end_node_id: int,
+        *,
+        delete: bool,
+    ) -> CommandResult:
+        patch_window = self._graph_patch_window(session_id)
+        if patch_window is None:
+            return self._graph_session_not_found(session_id)
+        orientation = _validate_orientation(view)
+        if orientation is None:
+            return CommandResult(False, "Graph view must be axial, coronal, or sagittal.")
+        try:
+            if delete:
+                edge = patch_window.delete_graph_edge(
+                    orientation,
+                    int(start_node_id),
+                    int(end_node_id),
+                )
+            else:
+                edge = patch_window.add_graph_edge(
+                    orientation,
+                    int(start_node_id),
+                    int(end_node_id),
+                )
+        except ValueError as exc:
+            return CommandResult(False, str(exc), {"session_id": session_id})
+        return CommandResult(
+            True,
+            "Graph edge deleted." if delete else "Graph edge created.",
+            {
+                "session_id": session_id,
+                "view": orientation,
+                "edge": {
+                    "start_node_id": edge.start_node_id,
+                    "end_node_id": edge.end_node_id,
+                },
+            },
+        )
+
+    def _graph_patch_window(self, session_id: str) -> Any | None:
+        return self.main_window.graph_patch_window(str(session_id))
+
+    @staticmethod
+    def _graph_session_not_found(session_id: str) -> CommandResult:
+        return CommandResult(
+            False,
+            f"Graph patch session was not found: {session_id}",
+            {"session_id": str(session_id)},
         )
 
     def save_projection(

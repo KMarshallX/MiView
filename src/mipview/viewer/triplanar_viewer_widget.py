@@ -11,6 +11,7 @@ from PySide6.QtWidgets import QGridLayout, QWidget
 from mipview.annotation.annotation_mask import AnnotationMask
 from mipview.annotation.brush import erase_disk, paint_disk
 from mipview.annotation.undo import AnnotationUndoStack
+from mipview.graph.state import ProjectionGraphState
 from mipview.ui.drop_loading import first_supported_local_nifti_path
 from mipview.state.cursor_state import CursorState
 from mipview.state.zoom_state import ZoomState
@@ -24,6 +25,7 @@ from mipview.patch.selector import (
     source_bounds_to_display_bounds,
 )
 from mipview.viewer.oriented_volume import OrientedVolume, build_oriented_volume
+from mipview.viewer.ruler import spatial_unit_to_mm
 from mipview.viewer.slice_geometry import (
     Orientation,
     center_cursor_for_volume,
@@ -45,8 +47,19 @@ class TriPlanarViewerWidget(QWidget):
     annotation_changed = Signal(object)
     annotation_undo_availability_changed = Signal(bool)
     nifti_file_dropped = Signal(object)
+    projection_state_changed = Signal(str, object)
+    graph_context_requested = Signal(str, object, object, object)
+    graph_edge_completion_requested = Signal(str, int)
+    graph_edge_cancel_requested = Signal()
+    graph_orientation_interacted = Signal(str)
+    graph_layers_cleared = Signal(object)
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        parent: QWidget | None = None,
+        *,
+        maximum_zoom: float = ZoomState.MAX_ZOOM,
+    ) -> None:
         super().__init__(parent)
         self._display_volume: OrientedVolume | None = None
         self._segmentation_display_volume: OrientedVolume | None = None
@@ -60,6 +73,7 @@ class TriPlanarViewerWidget(QWidget):
         self._annotation_brush_radius: int = 1
         self._annotation_brush_mode: str = "paint"
         self._annotation_undo_stack = AnnotationUndoStack()
+        self._projection_graph_state: ProjectionGraphState | None = None
         self._contrast_window: tuple[float, float] | None = None
         patch_debug_value = os.getenv("MIPVIEW_PATCH_DEBUG")
         if patch_debug_value is None:
@@ -71,7 +85,7 @@ class TriPlanarViewerWidget(QWidget):
             "on",
         )
         self.cursor_state = CursorState(self)
-        self.zoom_state = ZoomState(self)
+        self.zoom_state = ZoomState(self, maximum_zoom=maximum_zoom)
         self.patch_selector = PatchSelector(DEFAULT_PATCH_SIZE)
         self._projection_mode = "MIP"
         self._active_view: Orientation | None = None
@@ -108,6 +122,16 @@ class TriPlanarViewerWidget(QWidget):
             view.zoom_factor_requested.connect(self.zoom_state.set_zoom_factor)
             view.patch_axis_size_requested.connect(self._on_patch_axis_size_requested)
             view.viewport_resized.connect(self._update_shared_base_scale)
+            view.graph_context_requested.connect(self.graph_context_requested.emit)
+            view.graph_edge_completion_requested.connect(
+                self.graph_edge_completion_requested.emit
+            )
+            view.graph_edge_cancel_requested.connect(
+                self.graph_edge_cancel_requested.emit
+            )
+            view.graph_orientation_interacted.connect(
+                self._on_graph_orientation_interacted
+            )
         for widget in self._drop_event_sources:
             widget.installEventFilter(self)
         self.cursor_state.cursor_changed.connect(self._on_cursor_changed)
@@ -130,13 +154,15 @@ class TriPlanarViewerWidget(QWidget):
             )
 
         self._display_volume = build_oriented_volume(volume.data, volume.affine)
+        unit_scale_to_mm = spatial_unit_to_mm(volume.header.get_xyzt_units()[0])
         # Reset cursor state before reloading the views so the initial cursor
         # is always re-emitted into the freshly cleared slice widgets.
         self.cursor_state.clear()
         self.cursor_state.set_volume_shape(self._display_volume.source_shape)
         self.patch_selector.set_volume_shape(self._display_volume.source_shape)
+        self._sync_graph_plane_shapes()
         for view in self._views:
-            view.load_volume(self._display_volume)
+            view.load_volume(self._display_volume, unit_scale_to_mm)
             if self._contrast_window is not None:
                 view.set_contrast_window(
                     self._contrast_window[0], self._contrast_window[1]
@@ -231,6 +257,10 @@ class TriPlanarViewerWidget(QWidget):
         for view in self._views:
             view.set_cursor_overlay_visible(visible)
 
+    def set_ruler_visible(self, visible: bool) -> None:
+        for view in self._views:
+            view.set_ruler_visible(visible)
+
     def set_patch_selection_enabled(self, enabled: bool) -> None:
         if enabled and self.cursor_state.cursor_position() is not None:
             for axis, default_size in enumerate(DEFAULT_PATCH_SIZE):
@@ -297,6 +327,10 @@ class TriPlanarViewerWidget(QWidget):
             return
         self._projection_mode = normalized_mode
         self._update_projection_overrides()
+        self.projection_state_changed.emit(
+            self._projection_mode,
+            self.enabled_projection_orientations(),
+        )
 
     def set_projection_enabled(self, orientation: Orientation, enabled: bool) -> None:
         if orientation not in self._projection_enabled:
@@ -305,6 +339,66 @@ class TriPlanarViewerWidget(QWidget):
             return
         self._projection_enabled[orientation] = enabled
         self._update_projection_overrides()
+        self.projection_state_changed.emit(
+            self._projection_mode,
+            self.enabled_projection_orientations(),
+        )
+
+    def projection_mode(self) -> str:
+        return self._projection_mode
+
+    def projection_enabled(self, orientation: Orientation) -> bool:
+        return bool(self._projection_enabled.get(orientation, False))
+
+    def enabled_projection_orientations(self) -> tuple[Orientation, ...]:
+        return tuple(
+            view.orientation
+            for view in self._views
+            if self._projection_enabled.get(view.orientation, False)
+        )
+
+    def active_view(self) -> Orientation | None:
+        return self._active_view
+
+    def set_projection_graph_state(
+        self,
+        graph_state: ProjectionGraphState | None,
+    ) -> None:
+        self._projection_graph_state = graph_state
+        self._sync_graph_plane_shapes()
+        self.refresh_graph_overlay()
+
+    def refresh_graph_overlay(self) -> None:
+        graph_state = self._projection_graph_state
+        for view in self._views:
+            if graph_state is None:
+                view.set_graph_overlay(
+                    None,
+                    editing_enabled=False,
+                    visible=False,
+                    opacity=0.0,
+                    node_size=1,
+                    edge_thickness=1,
+                    pending_node_id=None,
+                )
+                continue
+            pending_node_id = (
+                graph_state.pending_edge_node_id
+                if graph_state.pending_edge_orientation == view.orientation
+                else None
+            )
+            view.set_graph_overlay(
+                graph_state.layer(view.orientation),
+                editing_enabled=(
+                    graph_state.editing_enabled
+                    and self.projection_enabled(view.orientation)
+                ),
+                visible=graph_state.visible,
+                opacity=graph_state.opacity,
+                node_size=graph_state.node_size,
+                edge_thickness=graph_state.edge_thickness,
+                pending_node_id=pending_node_id,
+            )
 
     def set_drop_loading_enabled(self, enabled: bool) -> None:
         self._drop_loading_enabled = enabled
@@ -547,6 +641,28 @@ class TriPlanarViewerWidget(QWidget):
         for view in self._views:
             view.set_zoom_factor(zoom_factor)
 
+    def _on_graph_orientation_interacted(self, orientation: str) -> None:
+        if orientation in ("axial", "coronal", "sagittal"):
+            self._active_view = orientation  # type: ignore[assignment]
+            self.graph_orientation_interacted.emit(orientation)
+
+    def _sync_graph_plane_shapes(self) -> None:
+        if self._display_volume is None or self._projection_graph_state is None:
+            return
+        cleared_orientations: list[Orientation] = []
+        for orientation in ("axial", "coronal", "sagittal"):
+            plane_shape = plane_shape_for_orientation(
+                self._display_volume.display_shape,
+                orientation,
+            )
+            if self._projection_graph_state.layer(orientation).set_plane_shape(
+                plane_shape
+            ):
+                cleared_orientations.append(orientation)
+        if cleared_orientations:
+            self._projection_graph_state.cancel_pending_edge()
+            self.graph_layers_cleared.emit(tuple(cleared_orientations))
+
     def _update_shared_base_scale(self) -> None:
         if self._display_volume is None:
             return
@@ -696,6 +812,7 @@ class TriPlanarViewerWidget(QWidget):
                 segmentation_slice_2d=segmentation_projection_slice,
                 annotation_slice_2d=annotation_projection_slice,
             )
+        self.refresh_graph_overlay()
 
     def _apply_segmentation_overlay_to_views(self) -> None:
         if self._segmentation_display_volume is None:

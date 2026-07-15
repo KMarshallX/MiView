@@ -24,6 +24,7 @@ Most state-changing commands require a NIfTI image to already be loaded in the r
 - [`patch.save`](#patchsave)
 - [`projection.mode`](#projectionmode)
 - [`projection.save`](#projectionsave)
+- [`graph.*`](#graph-commands)
 - [`annotation.create`](#annotationcreate)
 - [`annotation.paint_stroke`](#annotationpaint_stroke)
 - [`annotation.erase_stroke`](#annotationerase_stroke)
@@ -429,6 +430,29 @@ Example:
 mipview-ctl projection save axial ./patch_axial_minip.png
 mipview-ctl projection save axial ./patch_axial_minip.png --annotation-preview
 ```
+
+### Graph commands
+
+Graph commands target an open patch window by the session ID reported in
+`viewer.export_state` under `graph_sessions`. Coordinates are oriented 2D
+projection indices. The target orientation must be showing MIP/MinIP and Graph
+mode must be active for mutation commands.
+
+```bash
+mipview-ctl graph status SESSION_ID
+mipview-ctl graph activate SESSION_ID
+mipview-ctl graph display SESSION_ID --opacity 0.75 --node-size 3
+mipview-ctl graph add-node SESSION_ID axial 12 18
+mipview-ctl graph add-edge SESSION_ID axial 1 2
+mipview-ctl graph delete-edge SESSION_ID axial 1 2
+mipview-ctl graph delete-node SESSION_ID axial 1
+mipview-ctl graph exit SESSION_ID
+```
+
+The matching direct commands are `graph.status`, `graph.activate`,
+`graph.set_display`, `graph.add_node`, `graph.delete_node`, `graph.add_edge`, and
+`graph.delete_edge`. Graph sessions are in-memory only and disappear when their
+patch window closes.
 
 ### `annotation.create`
 

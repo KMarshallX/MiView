@@ -189,23 +189,31 @@ def editable_axes_for_orientation(orientation: Orientation) -> tuple[int, ...]:
     """Return source-space axes editable in a given orientation view."""
     if orientation == "axial":
         return (0, 1)
-    if orientation in ("sagittal", "coronal"):
-        return (2,)
+    if orientation == "coronal":
+        return (0, 2)
+    if orientation == "sagittal":
+        return (1, 2)
     raise ValueError(f"Unsupported orientation: {orientation}")
 
 
 def axis_for_resize_edge(orientation: Orientation, edge: str) -> int | None:
-    if orientation == "axial":
-        if edge in ("left", "right"):
-            return 0
-        if edge in ("top", "bottom"):
+    if edge in ("top", "bottom"):
+        if orientation == "axial":
             return 1
-        return None
-    if orientation in ("sagittal", "coronal"):
-        if edge in ("top", "bottom"):
+        if orientation in ("coronal", "sagittal"):
             return 2
-        return None
-    raise ValueError(f"Unsupported orientation: {orientation}")
+        raise ValueError(f"Unsupported orientation: {orientation}")
+
+    if edge in ("left", "right"):
+        if orientation in ("axial", "coronal"):
+            return 0
+        if orientation == "sagittal":
+            return 1
+        raise ValueError(f"Unsupported orientation: {orientation}")
+
+    if orientation not in ("axial", "coronal", "sagittal"):
+        raise ValueError(f"Unsupported orientation: {orientation}")
+    return None
 
 
 def resized_axis_size_from_edge(

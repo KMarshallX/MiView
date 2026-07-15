@@ -14,11 +14,14 @@ from PySide6.QtGui import (
     QResizeEvent,
     QWheelEvent,
 )
-from PySide6.QtWidgets import QLabel, QSlider, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QApplication, QLabel, QSlider, QVBoxLayout, QWidget
 
 from mipview.annotation.annotation_overlay import build_annotation_overlay_rgba
+from mipview.graph.geometry import point_to_segment_distance
+from mipview.graph.model import GraphEdge, ProjectionGraphLayer
 from mipview.viewer.intensity import normalize_slice_to_uint8, window_slice_to_uint8
 from mipview.viewer.oriented_volume import OrientedVolume
+from mipview.viewer.ruler import display_voxel_spacing_mm, select_ruler_geometry
 from mipview.patch.selector import (
     PatchPlaneBounds,
     axis_for_resize_edge,
@@ -48,10 +51,18 @@ class SliceViewerWidget(QWidget):
     zoom_factor_requested = Signal(float)
     patch_axis_size_requested = Signal(int, int)
     viewport_resized = Signal()
+    graph_context_requested = Signal(str, object, object, object)
+    graph_edge_completion_requested = Signal(str, int)
+    graph_edge_cancel_requested = Signal()
+    graph_orientation_interacted = Signal(str)
 
     ZOOM_DRAG_SENSITIVITY = 0.01
     PATCH_HANDLE_RADIUS = 3.0
     PATCH_HANDLE_HIT_RADIUS = 9.0
+    NEAREST_NEIGHBOR_ZOOM_THRESHOLD = 8.0
+    RULER_COLOR = QColor("#39ff14")
+    RULER_MARGIN = 8.0
+    RULER_TICK_HEIGHT = 6.0
 
     def __init__(
         self, orientation: Orientation, parent: QWidget | None = None
@@ -59,6 +70,7 @@ class SliceViewerWidget(QWidget):
         super().__init__(parent)
         self.orientation = orientation
         self._display_volume: OrientedVolume | None = None
+        self._spatial_unit_to_mm = 1.0
         self._source_cursor_position: tuple[int, int, int] | None = None
         self._contrast_window: tuple[float, float] | None = None
         self._current_pixmap: QPixmap | None = None
@@ -66,6 +78,7 @@ class SliceViewerWidget(QWidget):
         self._zoom_factor = 1.0
         self._pan_offset = (0.0, 0.0)
         self._cursor_overlay_visible = True
+        self._ruler_visible = True
         self._patch_overlay_visible = False
         self._patch_overlay_opacity = 0.5
         self._patch_plane_bounds: PatchPlaneBounds | None = None
@@ -85,9 +98,18 @@ class SliceViewerWidget(QWidget):
         self._projection_segmentation_slice_2d: np.ndarray | None = None
         self._projection_annotation_slice_2d: np.ndarray | None = None
         self._projection_label: str | None = None
+        self._graph_layer: ProjectionGraphLayer | None = None
+        self._graph_editing_enabled = False
+        self._graph_visible = True
+        self._graph_opacity = 1.0
+        self._graph_node_size = 4
+        self._graph_edge_thickness = 2
+        self._graph_pending_node_id: int | None = None
+        self._graph_preview_label_position: QPointF | None = None
         self._active_patch_resize_handle: str | None = None
         self._interaction_mode: str | None = None
         self._last_drag_position: QPointF | None = None
+        self._right_press_position: QPointF | None = None
 
         self.title_label = QLabel(self.orientation.title(), self)
         self.title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -119,8 +141,13 @@ class SliceViewerWidget(QWidget):
         layout.addWidget(self.slice_label)
         layout.setContentsMargins(8, 8, 8, 8)
 
-    def load_volume(self, display_volume: OrientedVolume) -> None:
+    def load_volume(
+        self,
+        display_volume: OrientedVolume,
+        spatial_unit_to_mm: float = 1.0,
+    ) -> None:
         self._display_volume = display_volume
+        self._spatial_unit_to_mm = float(spatial_unit_to_mm)
         self._source_cursor_position = None
         self._current_pixmap = None
         self._pan_offset = (0.0, 0.0)
@@ -180,6 +207,34 @@ class SliceViewerWidget(QWidget):
 
     def set_cursor_overlay_visible(self, visible: bool) -> None:
         self._cursor_overlay_visible = visible
+        self._update_scaled_pixmap()
+
+    def set_ruler_visible(self, visible: bool) -> None:
+        self._ruler_visible = bool(visible)
+        self._update_scaled_pixmap()
+
+    def set_graph_overlay(
+        self,
+        layer: ProjectionGraphLayer | None,
+        *,
+        editing_enabled: bool,
+        visible: bool,
+        opacity: float,
+        node_size: int,
+        edge_thickness: int,
+        pending_node_id: int | None,
+    ) -> None:
+        self._graph_layer = layer
+        self._graph_editing_enabled = bool(editing_enabled)
+        self._graph_visible = bool(visible)
+        self._graph_opacity = min(max(float(opacity), 0.0), 1.0)
+        self._graph_node_size = min(max(int(node_size), 1), 10)
+        self._graph_edge_thickness = min(max(int(edge_thickness), 1), 10)
+        self._graph_pending_node_id = (
+            None if pending_node_id is None else int(pending_node_id)
+        )
+        if self._graph_pending_node_id is None:
+            self._graph_preview_label_position = None
         self._update_scaled_pixmap()
 
     def set_patch_overlay(
@@ -258,6 +313,7 @@ class SliceViewerWidget(QWidget):
             self._projection_segmentation_slice_2d = None
             self._projection_annotation_slice_2d = None
             self._projection_label = None
+            self._graph_preview_label_position = None
         else:
             projection = np.asarray(slice_2d)
             if projection.ndim != 2:
@@ -316,7 +372,11 @@ class SliceViewerWidget(QWidget):
             elif event.type() == QEvent.Type.Leave:
                 self._interaction_mode = None
                 self._last_drag_position = None
+                self._right_press_position = None
                 self._active_patch_resize_handle = None
+                if self._graph_preview_label_position is not None:
+                    self._graph_preview_label_position = None
+                    self._update_scaled_pixmap()
                 self.image_label.setCursor(Qt.CursorShape.ArrowCursor)
         return super().eventFilter(watched, event)
 
@@ -439,7 +499,10 @@ class SliceViewerWidget(QWidget):
         canvas = QPixmap(self.image_label.size())
         canvas.fill(QColor("#1a1a1a"))
         painter = QPainter(canvas)
-        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+        painter.setRenderHint(
+            QPainter.RenderHint.SmoothPixmapTransform,
+            self._zoom_factor < self.NEAREST_NEIGHBOR_ZOOM_THRESHOLD,
+        )
         painter.drawPixmap(
             int(display_rect.left),
             int(display_rect.top),
@@ -459,22 +522,238 @@ class SliceViewerWidget(QWidget):
         ):
             self._draw_patch_overlay(painter, display_rect)
 
-        if self._source_cursor_position is None or self._display_volume is None or not self._cursor_overlay_visible:
-            painter.end()
-            self.image_label.setPixmap(canvas)
-            return
+        if (
+            self._source_cursor_position is not None
+            and self._display_volume is not None
+            and self._cursor_overlay_visible
+        ):
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+            pen = QPen(QColor("#ffb000"))
+            pen.setWidth(1)
+            painter.setPen(pen)
 
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
-        pen = QPen(QColor("#ffb000"))
-        pen.setWidth(1)
-        painter.setPen(pen)
+            crosshair_x, crosshair_y = self._crosshair_pixel_position(display_rect)
+            painter.drawLine(crosshair_x, 0, crosshair_x, canvas.height() - 1)
+            painter.drawLine(0, crosshair_y, canvas.width() - 1, crosshair_y)
 
-        crosshair_x, crosshair_y = self._crosshair_pixel_position(display_rect)
-        painter.drawLine(crosshair_x, 0, crosshair_x, canvas.height() - 1)
-        painter.drawLine(0, crosshair_y, canvas.width() - 1, crosshair_y)
+        self._draw_graph_overlay(painter, display_rect)
+        self._draw_ruler(painter, display_rect)
         painter.end()
 
         self.image_label.setPixmap(canvas)
+
+    def _draw_graph_overlay(
+        self,
+        painter: QPainter,
+        display_rect: DisplayRect,
+    ) -> None:
+        if not self._graph_overlay_available():
+            return
+        assert self._graph_layer is not None
+
+        node_positions = self._graph_node_screen_positions(display_rect)
+        alpha = int(round(self._graph_opacity * 255.0))
+        edge_color = QColor(57, 255, 20, alpha)
+        node_color = QColor(255, 0, 0, alpha)
+
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        edge_pen = QPen(edge_color, self._graph_edge_thickness)
+        edge_pen.setCosmetic(True)
+        painter.setPen(edge_pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        for edge in self._graph_layer.edges:
+            start = node_positions.get(edge.start_node_id)
+            end = node_positions.get(edge.end_node_id)
+            if start is not None and end is not None:
+                painter.drawLine(start, end)
+
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(node_color)
+        radius = float(self._graph_node_size)
+        for position in node_positions.values():
+            painter.drawEllipse(position, radius, radius)
+
+        if (
+            self._graph_pending_node_id is not None
+            and self._graph_preview_label_position is not None
+        ):
+            start = node_positions.get(self._graph_pending_node_id)
+            if start is not None:
+                preview_color = QColor(57, 255, 20, 255)
+                preview_pen = QPen(preview_color, self._graph_edge_thickness)
+                preview_pen.setCosmetic(True)
+                preview_pen.setStyle(Qt.PenStyle.DashLine)
+                painter.setPen(preview_pen)
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.drawLine(start, self._graph_preview_label_position)
+        painter.restore()
+
+    def _graph_overlay_available(self) -> bool:
+        if (
+            not self._graph_visible
+            or self._graph_opacity <= 0.0
+            or self._graph_layer is None
+            or self._projection_slice_2d is None
+            or self._graph_layer.plane_shape is None
+        ):
+            return False
+        projection_shape = (
+            int(self._projection_slice_2d.shape[1]),
+            int(self._projection_slice_2d.shape[0]),
+        )
+        return self._graph_layer.plane_shape == projection_shape
+
+    def _graph_interaction_available(self) -> bool:
+        return self._graph_editing_enabled and self._graph_overlay_available()
+
+    def _graph_node_screen_positions(
+        self,
+        display_rect: DisplayRect,
+    ) -> dict[int, QPointF]:
+        if self._graph_layer is None or self._graph_layer.plane_shape is None:
+            return {}
+        return {
+            node.id: QPointF(
+                *map_plane_indices_to_label_position(
+                    node.position(),
+                    self._graph_layer.plane_shape,
+                    display_rect,
+                )
+            )
+            for node in self._graph_layer.nodes.values()
+        }
+
+    def _graph_hit_at_label_position(self, label_position: QPointF) -> dict[str, object]:
+        if not self._graph_interaction_available() or self._graph_layer is None:
+            return {"kind": "empty"}
+        display_rect = self._display_rect()
+        if display_rect is None:
+            return {"kind": "empty"}
+        node_positions = self._graph_node_screen_positions(display_rect)
+        node_tolerance = max(float(self._graph_node_size + 4), 6.0)
+        node_hits = [
+            (
+                float(np.hypot(label_position.x() - point.x(), label_position.y() - point.y())),
+                node_id,
+            )
+            for node_id, point in node_positions.items()
+        ]
+        node_hits = [hit for hit in node_hits if hit[0] <= node_tolerance]
+        if node_hits:
+            _, node_id = min(node_hits)
+            return {"kind": "node", "node_id": node_id}
+
+        edge_tolerance = max((self._graph_edge_thickness / 2.0) + 4.0, 6.0)
+        edge_hits: list[tuple[float, GraphEdge]] = []
+        for edge in self._graph_layer.edges:
+            start = node_positions.get(edge.start_node_id)
+            end = node_positions.get(edge.end_node_id)
+            if start is None or end is None:
+                continue
+            distance = point_to_segment_distance(
+                (label_position.x(), label_position.y()),
+                (start.x(), start.y()),
+                (end.x(), end.y()),
+            )
+            if distance <= edge_tolerance:
+                edge_hits.append((distance, edge))
+        if edge_hits:
+            _, edge = min(
+                edge_hits,
+                key=lambda hit: (
+                    hit[0],
+                    hit[1].start_node_id,
+                    hit[1].end_node_id,
+                ),
+            )
+            return {
+                "kind": "edge",
+                "start_node_id": edge.start_node_id,
+                "end_node_id": edge.end_node_id,
+            }
+        return {"kind": "empty"}
+
+    def _projection_position_from_label_position(
+        self,
+        label_position: QPointF,
+    ) -> tuple[int, int] | None:
+        if self._projection_slice_2d is None:
+            return None
+        display_rect = self._display_rect()
+        if display_rect is None:
+            return None
+        plane_fraction = map_label_position_to_plane_fraction(
+            (label_position.x(), label_position.y()),
+            display_rect,
+        )
+        if plane_fraction is None:
+            return None
+        width = int(self._projection_slice_2d.shape[1])
+        height = int(self._projection_slice_2d.shape[0])
+        horizontal = min(int(plane_fraction[0] * width), width - 1)
+        vertical = min(int(plane_fraction[1] * height), height - 1)
+        return (horizontal, vertical)
+
+    def _draw_ruler(self, painter: QPainter, display_rect: DisplayRect) -> None:
+        if not self._ruler_visible or self._display_volume is None:
+            return
+
+        horizontal_axis, _, _ = plane_axes_for_orientation(self.orientation)
+        horizontal_voxels = self._display_volume.display_shape[horizontal_axis]
+        if horizontal_voxels <= 0:
+            return
+
+        voxel_spacings = display_voxel_spacing_mm(
+            self._display_volume.affine,
+            self._display_volume.display_to_source_affine,
+            self._spatial_unit_to_mm,
+        )
+        horizontal_spacing_mm = voxel_spacings[horizontal_axis]
+        if not np.isfinite(horizontal_spacing_mm) or horizontal_spacing_mm <= 0.0:
+            return
+
+        pixels_per_voxel = display_rect.width / float(horizontal_voxels)
+        ruler = select_ruler_geometry(
+            pixels_per_voxel / horizontal_spacing_mm,
+            self.image_label.width(),
+        )
+        if ruler is None:
+            return
+
+        start_x = self.RULER_MARGIN
+        end_x = start_x + ruler.pixel_length
+        baseline_y = self.image_label.height() - self.RULER_MARGIN
+        tick_top = baseline_y - self.RULER_TICK_HEIGHT
+
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+        ruler_pen = QPen(self.RULER_COLOR, 2)
+        painter.setPen(ruler_pen)
+        painter.drawLine(QPointF(start_x, baseline_y), QPointF(end_x, baseline_y))
+        painter.drawLine(QPointF(start_x, tick_top), QPointF(start_x, baseline_y))
+        painter.drawLine(QPointF(end_x, tick_top), QPointF(end_x, baseline_y))
+
+        label_font = QFont(self._fixed_orientation_indicator_font)
+        label_font.setBold(True)
+        painter.setFont(label_font)
+        label_height = painter.fontMetrics().height()
+        painter.drawText(
+            QRectF(
+                start_x,
+                tick_top - label_height - 2.0,
+                max(
+                    ruler.pixel_length,
+                    float(
+                        painter.fontMetrics().horizontalAdvance(ruler.scale.label)
+                    ),
+                ),
+                float(label_height),
+            ),
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+            ruler.scale.label,
+        )
+        painter.restore()
 
     def _draw_segmentation_overlay(
         self, painter: QPainter, display_rect: DisplayRect
@@ -580,6 +859,21 @@ class SliceViewerWidget(QWidget):
     def _handle_mouse_press(self, mouse_event: QMouseEvent) -> None:
         self._last_drag_position = mouse_event.position()
         if mouse_event.button() == Qt.MouseButton.LeftButton:
+            if (
+                self._graph_interaction_available()
+                and self._graph_pending_node_id is not None
+            ):
+                self._interaction_mode = "left_graph_edge"
+                hit = self._graph_hit_at_label_position(mouse_event.position())
+                if hit.get("kind") == "node":
+                    self.graph_orientation_interacted.emit(self.orientation)
+                    self.graph_edge_completion_requested.emit(
+                        self.orientation,
+                        int(hit["node_id"]),
+                    )
+                else:
+                    self.graph_edge_cancel_requested.emit()
+                return
             if self._start_patch_resize_if_hit(mouse_event.position()):
                 self._interaction_mode = "left_patch_resize"
                 return
@@ -591,9 +885,28 @@ class SliceViewerWidget(QWidget):
         elif mouse_event.button() == Qt.MouseButton.MiddleButton:
             self._interaction_mode = "middle_pan"
         elif mouse_event.button() == Qt.MouseButton.RightButton:
-            self._interaction_mode = "right_zoom"
+            if self._graph_interaction_available():
+                self._interaction_mode = "right_graph_pending"
+                self._right_press_position = mouse_event.position()
+            else:
+                self._interaction_mode = "right_zoom"
 
     def _handle_mouse_move(self, mouse_event: QMouseEvent) -> None:
+        if (
+            self._graph_interaction_available()
+            and self._graph_pending_node_id is not None
+            and not mouse_event.buttons()
+        ):
+            preview_position = (
+                mouse_event.position()
+                if self._projection_position_from_label_position(mouse_event.position())
+                is not None
+                else None
+            )
+            if preview_position != self._graph_preview_label_position:
+                self._graph_preview_label_position = preview_position
+                self._update_scaled_pixmap()
+
         if (
             self._interaction_mode is None
             and not mouse_event.buttons()
@@ -608,6 +921,23 @@ class SliceViewerWidget(QWidget):
         if self._interaction_mode == "left_patch_drag":
             if mouse_event.buttons() & Qt.MouseButton.LeftButton:
                 self._emit_patch_center_from_label_position(mouse_event.position())
+            return
+
+        if self._interaction_mode == "left_graph_edge":
+            return
+
+        if self._interaction_mode == "right_graph_pending":
+            if (
+                mouse_event.buttons() & Qt.MouseButton.RightButton
+                and self._right_press_position is not None
+            ):
+                movement = mouse_event.position() - self._right_press_position
+                if float(np.hypot(movement.x(), movement.y())) >= float(
+                    QApplication.startDragDistance()
+                ):
+                    self._interaction_mode = "right_zoom"
+                    self._last_drag_position = mouse_event.position()
+                    self._right_press_position = None
             return
 
         if self._interaction_mode == "left_cursor":
@@ -633,13 +963,31 @@ class SliceViewerWidget(QWidget):
             "left_cursor",
             "left_patch_resize",
             "left_patch_drag",
+            "left_graph_edge",
         ):
             self._interaction_mode = None
         elif release_button == Qt.MouseButton.MiddleButton and self._interaction_mode == "middle_pan":
             self._interaction_mode = None
         elif release_button == Qt.MouseButton.RightButton and self._interaction_mode == "right_zoom":
             self._interaction_mode = None
+        elif (
+            release_button == Qt.MouseButton.RightButton
+            and self._interaction_mode == "right_graph_pending"
+        ):
+            projection_position = self._projection_position_from_label_position(
+                mouse_event.position()
+            )
+            if projection_position is not None:
+                self.graph_orientation_interacted.emit(self.orientation)
+                self.graph_context_requested.emit(
+                    self.orientation,
+                    projection_position,
+                    self._graph_hit_at_label_position(mouse_event.position()),
+                    self.image_label.mapToGlobal(mouse_event.position().toPoint()),
+                )
+            self._interaction_mode = None
         self._last_drag_position = None
+        self._right_press_position = None
         self._active_patch_resize_handle = None
         self._update_hover_cursor(mouse_event.position())
 
@@ -689,6 +1037,10 @@ class SliceViewerWidget(QWidget):
         if (
             self._annotation_editing_enabled
             and self._annotation_brush_mode in {"paint", "erase"}
+            and not (
+                self._graph_editing_enabled
+                and self._projection_slice_2d is not None
+            )
         ):
             self.annotation_voxel_selected.emit(self.orientation, *source_cursor)
 
@@ -1030,17 +1382,17 @@ class SliceViewerWidget(QWidget):
         top = overlay_rect.top()
         bottom = overlay_rect.bottom()
         mid_x = (left + right) / 2.0
+        mid_y = (top + bottom) / 2.0
 
-        if self.orientation == "axial":
-            return {
-                "top_left": QPointF(left, top),
-                "top_right": QPointF(right, top),
-                "bottom_left": QPointF(left, bottom),
-                "bottom_right": QPointF(right, bottom),
-            }
         return {
+            "top_left": QPointF(left, top),
             "top_mid": QPointF(mid_x, top),
+            "top_right": QPointF(right, top),
+            "right_mid": QPointF(right, mid_y),
+            "bottom_right": QPointF(right, bottom),
             "bottom_mid": QPointF(mid_x, bottom),
+            "bottom_left": QPointF(left, bottom),
+            "left_mid": QPointF(left, mid_y),
         }
 
     def _resize_handle_at_position(
@@ -1066,6 +1418,10 @@ class SliceViewerWidget(QWidget):
             return ("top",)
         if handle_name == "bottom_mid":
             return ("bottom",)
+        if handle_name == "left_mid":
+            return ("left",)
+        if handle_name == "right_mid":
+            return ("right",)
         return ()
 
     def _update_hover_cursor(self, label_position: QPointF) -> None:
@@ -1086,6 +1442,8 @@ class SliceViewerWidget(QWidget):
                         self.image_label.setCursor(Qt.CursorShape.SizeFDiagCursor)
                     elif handle_name in ("top_right", "bottom_left"):
                         self.image_label.setCursor(Qt.CursorShape.SizeBDiagCursor)
+                    elif handle_name in ("left_mid", "right_mid"):
+                        self.image_label.setCursor(Qt.CursorShape.SizeHorCursor)
                     else:
                         self.image_label.setCursor(Qt.CursorShape.SizeVerCursor)
                     return

@@ -242,6 +242,65 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Overlay active annotation MIP onto the image projection.",
     )
 
+    graph_parser = subparsers.add_parser(
+        "graph",
+        help="Inspect and edit projection graphs in open patch windows.",
+        description=(
+            "Graph commands use an open patch window session ID and 2D oriented "
+            "projection coordinates, not source voxel or screen coordinates."
+        ),
+        formatter_class=_HelpFormatter,
+    )
+    graph_subparsers = graph_parser.add_subparsers(
+        dest="graph_command",
+        required=True,
+    )
+    graph_status = graph_subparsers.add_parser("status", help="Show graph session state.")
+    graph_status.add_argument("session_id", metavar="SESSION_ID")
+    graph_activate = graph_subparsers.add_parser("activate", help="Activate Graph mode.")
+    graph_activate.add_argument("session_id", metavar="SESSION_ID")
+    graph_exit = graph_subparsers.add_parser("exit", help="Exit Graph mode.")
+    graph_exit.add_argument("session_id", metavar="SESSION_ID")
+    graph_display = graph_subparsers.add_parser(
+        "display",
+        help="Update graph visibility and rendering options.",
+    )
+    graph_display.add_argument("session_id", metavar="SESSION_ID")
+    graph_display.add_argument(
+        "--visible",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Show or hide graph overlays.",
+    )
+    graph_display.add_argument("--opacity", type=float, default=None)
+    graph_display.add_argument("--node-size", type=int, default=None)
+    graph_display.add_argument("--edge-thickness", type=int, default=None)
+
+    graph_add_node = graph_subparsers.add_parser("add-node", help="Create a graph node.")
+    graph_add_node.add_argument("session_id", metavar="SESSION_ID")
+    graph_add_node.add_argument("view", metavar="VIEW")
+    graph_add_node.add_argument("horizontal", metavar="HORIZONTAL", type=int)
+    graph_add_node.add_argument("vertical", metavar="VERTICAL", type=int)
+    graph_delete_node = graph_subparsers.add_parser(
+        "delete-node", help="Delete a graph node and its connected edges."
+    )
+    graph_delete_node.add_argument("session_id", metavar="SESSION_ID")
+    graph_delete_node.add_argument("view", metavar="VIEW")
+    graph_delete_node.add_argument("node_id", metavar="NODE_ID", type=int)
+
+    graph_add_edge = graph_subparsers.add_parser("add-edge", help="Create a graph edge.")
+    graph_add_edge.add_argument("session_id", metavar="SESSION_ID")
+    graph_add_edge.add_argument("view", metavar="VIEW")
+    graph_add_edge.add_argument("start_node_id", metavar="START_NODE_ID", type=int)
+    graph_add_edge.add_argument("end_node_id", metavar="END_NODE_ID", type=int)
+    graph_delete_edge = graph_subparsers.add_parser(
+        "delete-edge", help="Delete a graph edge."
+    )
+    graph_delete_edge.add_argument("session_id", metavar="SESSION_ID")
+    graph_delete_edge.add_argument("view", metavar="VIEW")
+    graph_delete_edge.add_argument("start_node_id", metavar="START_NODE_ID", type=int)
+    graph_delete_edge.add_argument("end_node_id", metavar="END_NODE_ID", type=int)
+
     annotation_parser = subparsers.add_parser(
         "annotation",
         help="Create, edit, and save voxel-space annotations.",
@@ -384,6 +443,67 @@ def _command_from_args(args: argparse.Namespace) -> tuple[str, dict[str, Any], A
                     "view": args.view,
                     "path": args.path,
                     "annotation_preview": bool(args.annotation_preview),
+                },
+                None,
+            )
+
+    if args.group == "graph":
+        if args.graph_command == "status":
+            return "graph.status", {"session_id": args.session_id}, None
+        if args.graph_command in {"activate", "exit"}:
+            return (
+                "graph.activate",
+                {
+                    "session_id": args.session_id,
+                    "enabled": args.graph_command == "activate",
+                },
+                None,
+            )
+        if args.graph_command == "display":
+            return (
+                "graph.set_display",
+                {
+                    "session_id": args.session_id,
+                    "visible": args.visible,
+                    "opacity": args.opacity,
+                    "node_size": args.node_size,
+                    "edge_thickness": args.edge_thickness,
+                },
+                None,
+            )
+        if args.graph_command == "add-node":
+            return (
+                "graph.add_node",
+                {
+                    "session_id": args.session_id,
+                    "view": args.view,
+                    "horizontal": args.horizontal,
+                    "vertical": args.vertical,
+                },
+                None,
+            )
+        if args.graph_command == "delete-node":
+            return (
+                "graph.delete_node",
+                {
+                    "session_id": args.session_id,
+                    "view": args.view,
+                    "node_id": args.node_id,
+                },
+                None,
+            )
+        if args.graph_command in {"add-edge", "delete-edge"}:
+            return (
+                (
+                    "graph.add_edge"
+                    if args.graph_command == "add-edge"
+                    else "graph.delete_edge"
+                ),
+                {
+                    "session_id": args.session_id,
+                    "view": args.view,
+                    "start_node_id": args.start_node_id,
+                    "end_node_id": args.end_node_id,
                 },
                 None,
             )
