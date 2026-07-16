@@ -444,15 +444,33 @@ mipview-ctl graph activate SESSION_ID
 mipview-ctl graph display SESSION_ID --opacity 0.75 --node-size 3
 mipview-ctl graph add-node SESSION_ID axial 12 18
 mipview-ctl graph add-edge SESSION_ID axial 1 2
+mipview-ctl graph curve-edge SESSION_ID axial 1 2 18.5 24.0
+mipview-ctl graph straighten-edge SESSION_ID axial 1 2
+mipview-ctl graph split-edge SESSION_ID axial 1 2 18 24
+mipview-ctl graph calculate-angle SESSION_ID axial 1 2 3 4
+mipview-ctl graph clear-angle SESSION_ID
 mipview-ctl graph delete-edge SESSION_ID axial 1 2
 mipview-ctl graph delete-node SESSION_ID axial 1
 mipview-ctl graph exit SESSION_ID
 ```
 
 The matching direct commands are `graph.status`, `graph.activate`,
-`graph.set_display`, `graph.add_node`, `graph.delete_node`, `graph.add_edge`, and
-`graph.delete_edge`. Graph sessions are in-memory only and disappear when their
-patch window closes.
+`graph.set_display`, `graph.add_node`, `graph.delete_node`, `graph.add_edge`,
+`graph.delete_edge`, `graph.curve_edge`, `graph.straighten_edge`, `graph.split_edge`,
+`graph.calculate_angle`, and `graph.clear_angle`.
+
+Curve controls use floating-point oriented projection coordinates and must be
+finite and inside the projection plane. Angle node IDs are ordered as vector 1
+source/target followed by vector 2 source/target. Both vectors use the command's
+single orientation, and calculation scales their horizontal and vertical
+components by physical in-plane voxel spacing before evaluating the unsigned
+angle. Graph status includes curve controls, active tool/selection state, both
+directed vectors, and `angle_degrees`. Graph sessions are in-memory only and
+disappear when their patch window closes.
+
+`graph.split_edge` takes the clicked oriented projection index, inserts a node at
+the nearest point on the target edge, and replaces it with two connected edges.
+Quadratic edges retain their shape through Bezier subdivision.
 
 ### `annotation.create`
 

@@ -1,15 +1,18 @@
 # MipView
 
-**MipView** is a lightweight Linux-first desktop viewer for `.nii` / `.nii.gz` medical images.
+**MipView** is a lightweight Linux-first desktop visualization and annotation tool for `.nii` / `.nii.gz` medical images.
 
 It is designed as a focused research tool for:
 
 - ITK-SNAP inspired image viewing,
 - segmentation overlay inspection,
+- voxel-space annotation with editable label masks,
 - interactive patch selection,
 - patch saving,
 - patch-wise volumetric computation (e.g., normalization, standardization, filtering, etc.),
-- orthogonal **MIP / MinIP** inspection of selected, modified patches.
+- orthogonal **MIP / MinIP** inspection of selected, modified patches,
+- projection-graph editing with nodes, straight or curved edges, and physical-spacing-aware angle measurement,
+- controlled local IPC and `mipview-ctl` commands for viewer, patch, annotation, projection, and graph workflows.
 
 MipView is intentionally minimal. The goal is to build a small, reliable viewer before adding more advanced features.
 
@@ -108,7 +111,20 @@ The current codebase is organized around a small top-level `mipview` package:
     ├── __main__.py
     ├── main.py
     ├── annotation/
+    │   ├── annotation_mask.py
+    │   ├── brush.py
+    │   └── annotation_state.py
+    ├── control/
+    │   ├── cli.py
+    │   ├── command_registry.py
+    │   ├── controller.py
+    │   └── ipc_server.py
     ├── graph/
+    │   ├── curve.py
+    │   ├── geometry.py
+    │   ├── measurement.py
+    │   ├── model.py
+    │   └── state.py
     ├── io/
     │   └── nifti_io.py
     ├── patch/
@@ -129,6 +145,8 @@ In practice, the main runtime flow is:
 
 1. `python -m mipview` enters through `mipview/__main__.py`.
 2. `main.py` creates the Qt application and main window.
-3. `ui/main_window.py` coordinates loading, viewer updates, patch actions, segmentation overlay state, and tool execution.
-4. `viewer/` modules render slices and manage tri-planar interactions.
-5. `state/`, `io/`, `patch/`, `segmentation/`, and `tools/` provide the supporting logic behind those UI actions.
+3. `ui/main_window.py` coordinates loading, viewer updates, patch actions, segmentation and annotation state, and tool execution; patch-window Graph mode is coordinated by `ui/patch_window.py`.
+4. `viewer/` modules render slices and projections and manage tri-planar, zoom, pan, annotation, and graph interactions.
+5. `graph/` keeps graph identity, curve geometry, measurement calculations, and interaction state outside the Qt panel code.
+6. `control/` exposes structured local IPC commands through the command registry, controller, and `mipview-ctl` CLI.
+7. `state/`, `io/`, `patch/`, `segmentation/`, `annotation/`, and `tools/` provide the remaining supporting logic.
