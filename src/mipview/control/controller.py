@@ -442,6 +442,183 @@ class MipViewController:
             delete=True,
         )
 
+    def curve_graph_edge(
+        self,
+        session_id: str,
+        view: str,
+        start_node_id: int,
+        end_node_id: int,
+        control_horizontal: float,
+        control_vertical: float,
+    ) -> CommandResult:
+        patch_window = self._graph_patch_window(session_id)
+        if patch_window is None:
+            return self._graph_session_not_found(session_id)
+        orientation = _validate_orientation(view)
+        if orientation is None:
+            return CommandResult(False, "Graph view must be axial, coronal, or sagittal.")
+        try:
+            edge = patch_window.curve_graph_edge(
+                orientation,
+                int(start_node_id),
+                int(end_node_id),
+                float(control_horizontal),
+                float(control_vertical),
+            )
+        except (TypeError, ValueError) as exc:
+            return CommandResult(False, str(exc), {"session_id": session_id})
+        control = patch_window.graph_state.layer(orientation).curve_control_points[edge]
+        return CommandResult(
+            True,
+            "Graph edge curved.",
+            {
+                "session_id": session_id,
+                "view": orientation,
+                "edge": {
+                    "start_node_id": edge.start_node_id,
+                    "end_node_id": edge.end_node_id,
+                    "control_point": [float(control[0]), float(control[1])],
+                },
+            },
+        )
+
+    def straighten_graph_edge(
+        self,
+        session_id: str,
+        view: str,
+        start_node_id: int,
+        end_node_id: int,
+    ) -> CommandResult:
+        patch_window = self._graph_patch_window(session_id)
+        if patch_window is None:
+            return self._graph_session_not_found(session_id)
+        orientation = _validate_orientation(view)
+        if orientation is None:
+            return CommandResult(False, "Graph view must be axial, coronal, or sagittal.")
+        try:
+            edge = patch_window.straighten_graph_edge(
+                orientation,
+                int(start_node_id),
+                int(end_node_id),
+            )
+        except (TypeError, ValueError) as exc:
+            return CommandResult(False, str(exc), {"session_id": session_id})
+        return CommandResult(
+            True,
+            "Graph edge straightened.",
+            {
+                "session_id": session_id,
+                "view": orientation,
+                "edge": {
+                    "start_node_id": edge.start_node_id,
+                    "end_node_id": edge.end_node_id,
+                },
+            },
+        )
+
+    def split_graph_edge(
+        self,
+        session_id: str,
+        view: str,
+        start_node_id: int,
+        end_node_id: int,
+        horizontal: int,
+        vertical: int,
+    ) -> CommandResult:
+        patch_window = self._graph_patch_window(session_id)
+        if patch_window is None:
+            return self._graph_session_not_found(session_id)
+        orientation = _validate_orientation(view)
+        if orientation is None:
+            return CommandResult(False, "Graph view must be axial, coronal, or sagittal.")
+        try:
+            node, first_edge, second_edge = patch_window.split_graph_edge(
+                orientation,
+                int(start_node_id),
+                int(end_node_id),
+                int(horizontal),
+                int(vertical),
+            )
+        except (TypeError, ValueError) as exc:
+            return CommandResult(False, str(exc), {"session_id": session_id})
+        return CommandResult(
+            True,
+            "Graph edge split with a new node.",
+            {
+                "session_id": session_id,
+                "view": orientation,
+                "node": {
+                    "id": node.id,
+                    "horizontal_index": node.horizontal_index,
+                    "vertical_index": node.vertical_index,
+                },
+                "edges": [
+                    {
+                        "start_node_id": first_edge.start_node_id,
+                        "end_node_id": first_edge.end_node_id,
+                    },
+                    {
+                        "start_node_id": second_edge.start_node_id,
+                        "end_node_id": second_edge.end_node_id,
+                    },
+                ],
+            },
+        )
+
+    def calculate_graph_angle(
+        self,
+        session_id: str,
+        view: str,
+        vector_1_source: int,
+        vector_1_target: int,
+        vector_2_source: int,
+        vector_2_target: int,
+    ) -> CommandResult:
+        patch_window = self._graph_patch_window(session_id)
+        if patch_window is None:
+            return self._graph_session_not_found(session_id)
+        orientation = _validate_orientation(view)
+        if orientation is None:
+            return CommandResult(False, "Graph view must be axial, coronal, or sagittal.")
+        try:
+            angle = patch_window.calculate_graph_angle(
+                orientation,
+                int(vector_1_source),
+                int(vector_1_target),
+                int(vector_2_source),
+                int(vector_2_target),
+            )
+        except (TypeError, ValueError) as exc:
+            return CommandResult(False, str(exc), {"session_id": session_id})
+        return CommandResult(
+            True,
+            "Graph angle calculated.",
+            {
+                "session_id": session_id,
+                "view": orientation,
+                "angle_degrees": float(angle),
+                "vector_1": {
+                    "source_node_id": int(vector_1_source),
+                    "target_node_id": int(vector_1_target),
+                },
+                "vector_2": {
+                    "source_node_id": int(vector_2_source),
+                    "target_node_id": int(vector_2_target),
+                },
+            },
+        )
+
+    def clear_graph_angle(self, session_id: str) -> CommandResult:
+        patch_window = self._graph_patch_window(session_id)
+        if patch_window is None:
+            return self._graph_session_not_found(session_id)
+        patch_window.clear_graph_angle()
+        return CommandResult(
+            True,
+            "Graph angle cleared.",
+            patch_window.graph_status(),
+        )
+
     def _mutate_graph_edge(
         self,
         session_id: str,
