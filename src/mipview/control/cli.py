@@ -301,6 +301,45 @@ def _build_parser() -> argparse.ArgumentParser:
     graph_delete_edge.add_argument("start_node_id", metavar="START_NODE_ID", type=int)
     graph_delete_edge.add_argument("end_node_id", metavar="END_NODE_ID", type=int)
 
+    graph_curve_edge = graph_subparsers.add_parser(
+        "curve-edge", help="Set a quadratic control point for an existing edge."
+    )
+    graph_curve_edge.add_argument("session_id", metavar="SESSION_ID")
+    graph_curve_edge.add_argument("view", metavar="VIEW")
+    graph_curve_edge.add_argument("start_node_id", metavar="START_NODE_ID", type=int)
+    graph_curve_edge.add_argument("end_node_id", metavar="END_NODE_ID", type=int)
+    graph_curve_edge.add_argument("control_horizontal", metavar="CONTROL_H", type=float)
+    graph_curve_edge.add_argument("control_vertical", metavar="CONTROL_V", type=float)
+    graph_straighten_edge = graph_subparsers.add_parser(
+        "straighten-edge", help="Remove the control point from an existing edge."
+    )
+    graph_straighten_edge.add_argument("session_id", metavar="SESSION_ID")
+    graph_straighten_edge.add_argument("view", metavar="VIEW")
+    graph_straighten_edge.add_argument("start_node_id", metavar="START_NODE_ID", type=int)
+    graph_straighten_edge.add_argument("end_node_id", metavar="END_NODE_ID", type=int)
+    graph_split_edge = graph_subparsers.add_parser(
+        "split-edge", help="Create a node on an edge and replace it with two edges."
+    )
+    graph_split_edge.add_argument("session_id", metavar="SESSION_ID")
+    graph_split_edge.add_argument("view", metavar="VIEW")
+    graph_split_edge.add_argument("start_node_id", metavar="START_NODE_ID", type=int)
+    graph_split_edge.add_argument("end_node_id", metavar="END_NODE_ID", type=int)
+    graph_split_edge.add_argument("horizontal", metavar="HORIZONTAL", type=int)
+    graph_split_edge.add_argument("vertical", metavar="VERTICAL", type=int)
+    graph_calculate_angle = graph_subparsers.add_parser(
+        "calculate-angle", help="Calculate an angle from four ordered graph node IDs."
+    )
+    graph_calculate_angle.add_argument("session_id", metavar="SESSION_ID")
+    graph_calculate_angle.add_argument("view", metavar="VIEW")
+    graph_calculate_angle.add_argument("vector_1_source", metavar="V1_SOURCE", type=int)
+    graph_calculate_angle.add_argument("vector_1_target", metavar="V1_TARGET", type=int)
+    graph_calculate_angle.add_argument("vector_2_source", metavar="V2_SOURCE", type=int)
+    graph_calculate_angle.add_argument("vector_2_target", metavar="V2_TARGET", type=int)
+    graph_clear_angle = graph_subparsers.add_parser(
+        "clear-angle", help="Clear the stored graph angle measurement."
+    )
+    graph_clear_angle.add_argument("session_id", metavar="SESSION_ID")
+
     annotation_parser = subparsers.add_parser(
         "annotation",
         help="Create, edit, and save voxel-space annotations.",
@@ -507,6 +546,57 @@ def _command_from_args(args: argparse.Namespace) -> tuple[str, dict[str, Any], A
                 },
                 None,
             )
+        if args.graph_command in {"curve-edge", "straighten-edge"}:
+            arguments = {
+                "session_id": args.session_id,
+                "view": args.view,
+                "start_node_id": args.start_node_id,
+                "end_node_id": args.end_node_id,
+            }
+            if args.graph_command == "curve-edge":
+                arguments.update(
+                    {
+                        "control_horizontal": args.control_horizontal,
+                        "control_vertical": args.control_vertical,
+                    }
+                )
+            return (
+                (
+                    "graph.curve_edge"
+                    if args.graph_command == "curve-edge"
+                    else "graph.straighten_edge"
+                ),
+                arguments,
+                None,
+            )
+        if args.graph_command == "split-edge":
+            return (
+                "graph.split_edge",
+                {
+                    "session_id": args.session_id,
+                    "view": args.view,
+                    "start_node_id": args.start_node_id,
+                    "end_node_id": args.end_node_id,
+                    "horizontal": args.horizontal,
+                    "vertical": args.vertical,
+                },
+                None,
+            )
+        if args.graph_command == "calculate-angle":
+            return (
+                "graph.calculate_angle",
+                {
+                    "session_id": args.session_id,
+                    "view": args.view,
+                    "vector_1_source": args.vector_1_source,
+                    "vector_1_target": args.vector_1_target,
+                    "vector_2_source": args.vector_2_source,
+                    "vector_2_target": args.vector_2_target,
+                },
+                None,
+            )
+        if args.graph_command == "clear-angle":
+            return "graph.clear_angle", {"session_id": args.session_id}, None
 
     if args.group == "annotation":
         if args.annotation_command == "create":

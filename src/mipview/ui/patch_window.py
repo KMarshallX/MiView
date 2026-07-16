@@ -61,8 +61,9 @@ from mipview.ui.window_styling import (
 )
 from mipview.viewer.intensity import normalize_slice_to_uint8, window_slice_to_uint8
 from mipview.viewer.oriented_volume import build_oriented_volume
+from mipview.viewer.ruler import display_voxel_spacing_mm, spatial_unit_to_mm
 from mipview.viewer.slice_geometry import project_oriented_volume
-from mipview.viewer.slice_geometry import Orientation
+from mipview.viewer.slice_geometry import Orientation, plane_axes_for_orientation
 from mipview.viewer.triplanar_viewer_widget import TriPlanarViewerWidget
 
 
@@ -210,6 +211,21 @@ class PatchViewerWindow(QMainWindow):
         self.slice_viewer.graph_layers_cleared.connect(
             self._on_graph_layers_cleared
         )
+        self.slice_viewer.graph_curve_edge_selected.connect(
+            self._on_graph_curve_edge_selected
+        )
+        self.slice_viewer.graph_curve_control_changed.connect(
+            self._on_graph_curve_control_changed
+        )
+        self.slice_viewer.graph_curve_drag_state_changed.connect(
+            self._on_graph_curve_drag_state_changed
+        )
+        self.slice_viewer.graph_curve_exit_requested.connect(
+            self._cancel_graph_interaction
+        )
+        self.slice_viewer.graph_angle_node_selected.connect(
+            self._on_graph_angle_node_selected
+        )
         self.annotation_panel.create_requested.connect(
             lambda: self.annotation_create_requested.emit(self)
         )
@@ -236,11 +252,22 @@ class PatchViewerWindow(QMainWindow):
         self.graph_panel.edge_thickness_changed.connect(
             self._on_graph_edge_thickness_changed
         )
+        self.graph_panel.curve_tool_requested.connect(
+            self._on_graph_curve_tool_requested
+        )
+        self.graph_panel.straighten_edge_requested.connect(
+            self._on_graph_straighten_requested
+        )
+        self.graph_panel.calculate_angle_requested.connect(
+            self._on_graph_calculate_angle_requested
+        )
+        self.graph_panel.cancel_requested.connect(self._cancel_graph_interaction)
+        self.graph_panel.clear_angle_requested.connect(self.clear_graph_angle)
         self._graph_cancel_shortcut = QShortcut(
             QKeySequence(QKeySequence.StandardKey.Cancel),
             self,
         )
-        self._graph_cancel_shortcut.activated.connect(self._cancel_pending_graph_edge)
+        self._graph_cancel_shortcut.activated.connect(self._cancel_graph_interaction)
         connect_contrast_controls(
             self.contrast_control_bar,
             self.contrast_state,
@@ -456,6 +483,14 @@ class PatchViewerWindow(QMainWindow):
                 {
                     "start_node_id": edge.start_node_id,
                     "end_node_id": edge.end_node_id,
+                    "control_point": (
+                        None
+                        if edge not in layer.curve_control_points
+                        else [
+                            float(layer.curve_control_points[edge][0]),
+                            float(layer.curve_control_points[edge][1]),
+                        ]
+                    ),
                 }
                 for edge in sorted(layer.edges)
             ]
@@ -467,6 +502,7 @@ class PatchViewerWindow(QMainWindow):
             changed = self.graph_state.editing_enabled
             self.graph_state.exit_editing()
             self.graph_panel.set_editing_enabled(False)
+            self._refresh_graph_panel_tool_state()
             self.slice_viewer.refresh_graph_overlay()
             return changed
 
@@ -483,6 +519,7 @@ class PatchViewerWindow(QMainWindow):
         changed = not self.graph_state.editing_enabled
         self.graph_state.editing_enabled = True
         self.graph_panel.set_editing_enabled(True)
+        self._refresh_graph_panel_tool_state()
         self.slice_viewer.refresh_graph_overlay()
         return changed
 
@@ -499,6 +536,7 @@ class PatchViewerWindow(QMainWindow):
             self.graph_panel.set_visible_checked(self.graph_state.visible)
             if not self.graph_state.visible:
                 self.graph_state.cancel_pending_edge()
+                self.graph_state.cancel_active_tool()
         if opacity is not None:
             self.graph_state.set_opacity(opacity)
             self.graph_panel.set_opacity(self.graph_state.opacity)
@@ -509,6 +547,7 @@ class PatchViewerWindow(QMainWindow):
             self.graph_state.set_edge_thickness(edge_thickness)
             self.graph_panel.set_edge_thickness(self.graph_state.edge_thickness)
         self.slice_viewer.refresh_graph_overlay()
+        self._refresh_graph_panel_tool_state()
 
     def add_graph_node(
         self,
@@ -528,18 +567,21 @@ class PatchViewerWindow(QMainWindow):
     def delete_graph_node(self, orientation: Orientation, node_id: int) -> GraphNode:
         self._validate_graph_edit_operation(orientation)
         node = self.graph_state.layer(orientation).delete_node(node_id)
+        self.graph_state.invalidate_node(orientation, node.id)
         if (
             self.graph_state.pending_edge_orientation == orientation
             and self.graph_state.pending_edge_node_id == node.id
         ):
             self.graph_state.cancel_pending_edge()
         self.slice_viewer.refresh_graph_overlay()
+        self._refresh_graph_panel_tool_state()
         return node
 
     def begin_graph_edge(self, orientation: Orientation, node_id: int) -> None:
         self._validate_graph_edit_operation(orientation)
         self.graph_state.begin_edge(orientation, node_id)
         self.slice_viewer.refresh_graph_overlay()
+        self._refresh_graph_panel_tool_state()
 
     def add_graph_edge(
         self,
@@ -554,6 +596,7 @@ class PatchViewerWindow(QMainWindow):
         )
         self.graph_state.cancel_pending_edge()
         self.slice_viewer.refresh_graph_overlay()
+        self._refresh_graph_panel_tool_state()
         return edge
 
     def delete_graph_edge(
@@ -567,8 +610,109 @@ class PatchViewerWindow(QMainWindow):
             first_node_id,
             second_node_id,
         )
+        if (
+            self.graph_state.selected_edge_orientation == orientation
+            and self.graph_state.selected_edge == edge
+        ):
+            self.graph_state.cancel_active_tool()
         self.slice_viewer.refresh_graph_overlay()
+        self._refresh_graph_panel_tool_state()
         return edge
+
+    def split_graph_edge(
+        self,
+        orientation: Orientation,
+        first_node_id: int,
+        second_node_id: int,
+        horizontal_index: int,
+        vertical_index: int,
+    ) -> tuple[GraphNode, GraphEdge, GraphEdge]:
+        self._validate_graph_edit_operation(orientation)
+        original_edge = GraphEdge.between(first_node_id, second_node_id)
+        result = self.graph_state.layer(orientation).split_edge(
+            first_node_id,
+            second_node_id,
+            (horizontal_index, vertical_index),
+        )
+        if (
+            self.graph_state.selected_edge_orientation == orientation
+            and self.graph_state.selected_edge == original_edge
+        ):
+            self.graph_state.cancel_active_tool()
+        self.graph_state.active_orientation = orientation
+        self.slice_viewer.refresh_graph_overlay()
+        self._refresh_graph_panel_tool_state()
+        return result
+
+    def curve_graph_edge(
+        self,
+        orientation: Orientation,
+        first_node_id: int,
+        second_node_id: int,
+        control_horizontal: float,
+        control_vertical: float,
+    ) -> GraphEdge:
+        self._validate_graph_edit_operation(orientation)
+        layer = self.graph_state.layer(orientation)
+        edge = layer.set_curve_control_point(
+            first_node_id,
+            second_node_id,
+            (control_horizontal, control_vertical),
+        )
+        self.graph_state.active_orientation = orientation
+        self.slice_viewer.refresh_graph_overlay()
+        self._refresh_graph_panel_tool_state()
+        return edge
+
+    def straighten_graph_edge(
+        self,
+        orientation: Orientation,
+        first_node_id: int,
+        second_node_id: int,
+    ) -> GraphEdge:
+        self._validate_graph_edit_operation(orientation)
+        edge = self.graph_state.layer(orientation).straighten_edge(
+            first_node_id,
+            second_node_id,
+        )
+        if (
+            self.graph_state.selected_edge_orientation == orientation
+            and self.graph_state.selected_edge == edge
+        ):
+            self.graph_state.selected_edge = None
+            self.graph_state.selected_edge_orientation = None
+            self.graph_state.curve_drag_active = False
+        self.slice_viewer.refresh_graph_overlay()
+        self._refresh_graph_panel_tool_state()
+        return edge
+
+    def calculate_graph_angle(
+        self,
+        orientation: Orientation,
+        vector_1_source: int,
+        vector_1_target: int,
+        vector_2_source: int,
+        vector_2_target: int,
+    ) -> float:
+        self._validate_graph_edit_operation(orientation)
+        angle = self.graph_state.calculate_angle(
+            orientation,
+            vector_1_source,
+            vector_1_target,
+            vector_2_source,
+            vector_2_target,
+            self._graph_in_plane_spacing(orientation),
+        )
+        self.graph_state.active_orientation = orientation
+        self.slice_viewer.refresh_graph_overlay()
+        self._refresh_graph_panel_tool_state()
+        return angle
+
+    def clear_graph_angle(self) -> None:
+        self.graph_state.clear_angle()
+        self.slice_viewer.refresh_graph_overlay()
+        self._refresh_graph_panel_tool_state()
+        self.statusBar().showMessage("Graph angle cleared")
 
     def _validate_graph_edit_operation(self, orientation: Orientation) -> None:
         if not self.graph_state.editing_enabled:
@@ -618,6 +762,7 @@ class PatchViewerWindow(QMainWindow):
         self._graph_projection_mode = mode
         if mode_changed:
             self.graph_state.cancel_pending_edge()
+            self.graph_state.cancel_active_tool()
         self.graph_panel.set_projection_available(bool(enabled))
         if self.graph_state.editing_enabled and not enabled:
             self.set_graph_editing_enabled(False)
@@ -628,7 +773,13 @@ class PatchViewerWindow(QMainWindow):
         if self.graph_state.active_orientation not in enabled:
             self.graph_state.cancel_pending_edge()
             self.graph_state.active_orientation = enabled[0] if enabled else None
+        transient_orientation = self.graph_state.selected_edge_orientation
+        if self.graph_state.angle_draft_nodes:
+            transient_orientation = self.graph_state.angle_draft_nodes[0][0]
+        if transient_orientation is not None and transient_orientation not in enabled:
+            self.graph_state.cancel_active_tool()
         self.slice_viewer.refresh_graph_overlay()
+        self._refresh_graph_panel_tool_state()
 
     def _on_graph_orientation_interacted(self, orientation: str) -> None:
         if orientation in self.slice_viewer.enabled_projection_orientations():
@@ -672,9 +823,42 @@ class PatchViewerWindow(QMainWindow):
         elif hit_kind == "edge":
             start_node_id = int(hit["start_node_id"])
             end_node_id = int(hit["end_node_id"])
+            horizontal_index = int(projection_position[0])
+            vertical_index = int(projection_position[1])
+            create_node_action = menu.addAction("Create a node here")
+            create_node_action.triggered.connect(
+                lambda _checked=False: self._split_graph_edge_from_ui(
+                    graph_orientation,
+                    start_node_id,
+                    end_node_id,
+                    horizontal_index,
+                    vertical_index,
+                )
+            )
             delete_action = menu.addAction("Delete this edge")
             delete_action.triggered.connect(
                 lambda _checked=False: self._delete_graph_edge_from_ui(
+                    graph_orientation,
+                    start_node_id,
+                    end_node_id,
+                )
+            )
+            menu.addSeparator()
+            curve_action = menu.addAction("Curve Edge")
+            curve_action.triggered.connect(
+                lambda _checked=False: self._select_graph_curve_from_ui(
+                    graph_orientation,
+                    start_node_id,
+                    end_node_id,
+                )
+            )
+            straighten_action = menu.addAction("Straighten Edge")
+            straighten_action.setEnabled(
+                GraphEdge.between(start_node_id, end_node_id)
+                in self.graph_state.layer(graph_orientation).curve_control_points
+            )
+            straighten_action.triggered.connect(
+                lambda _checked=False: self._straighten_graph_edge_from_ui(
                     graph_orientation,
                     start_node_id,
                     end_node_id,
@@ -782,14 +966,233 @@ class PatchViewerWindow(QMainWindow):
             f"Deleted {orientation} graph edge {start_node_id}-{end_node_id}"
         )
 
+    def _split_graph_edge_from_ui(
+        self,
+        orientation: Orientation,
+        start_node_id: int,
+        end_node_id: int,
+        horizontal_index: int,
+        vertical_index: int,
+    ) -> None:
+        try:
+            node, first_edge, second_edge = self.split_graph_edge(
+                orientation,
+                start_node_id,
+                end_node_id,
+                horizontal_index,
+                vertical_index,
+            )
+        except ValueError as exc:
+            self.statusBar().showMessage(str(exc))
+            return
+        self.statusBar().showMessage(
+            f"Created {orientation} graph node {node.id} and split edge "
+            f"{start_node_id}-{end_node_id} into "
+            f"{first_edge.start_node_id}-{first_edge.end_node_id} and "
+            f"{second_edge.start_node_id}-{second_edge.end_node_id}"
+        )
+
     def _cancel_pending_graph_edge(self) -> None:
         if self.graph_state.pending_edge_node_id is None:
             return
         self.graph_state.cancel_pending_edge()
         self.slice_viewer.refresh_graph_overlay()
+        self._refresh_graph_panel_tool_state()
         self.statusBar().showMessage("Graph edge creation canceled")
 
+    def _cancel_graph_interaction(self) -> None:
+        if self.graph_state.pending_edge_node_id is not None:
+            self._cancel_pending_graph_edge()
+            return
+        if self.graph_state.active_tool is None:
+            return
+        tool = self.graph_state.active_tool
+        self.graph_state.cancel_active_tool()
+        self.slice_viewer.refresh_graph_overlay()
+        self._refresh_graph_panel_tool_state()
+        self.statusBar().showMessage(
+            "Angle selection canceled" if tool == "calculate_angle" else "Curve tool exited"
+        )
+
+    def _on_graph_curve_tool_requested(self, enabled: bool) -> None:
+        if not enabled:
+            if self.graph_state.active_tool == "curve_edge":
+                self.graph_state.cancel_active_tool()
+        else:
+            if not self.graph_state.editing_enabled:
+                self._refresh_graph_panel_tool_state()
+                return
+            self.graph_state.activate_curve_tool()
+            self.statusBar().showMessage("Select an existing graph edge to curve")
+        self.slice_viewer.refresh_graph_overlay()
+        self._refresh_graph_panel_tool_state()
+
+    def _on_graph_calculate_angle_requested(self) -> None:
+        if not self.graph_state.editing_enabled:
+            return
+        self.graph_state.activate_angle_tool()
+        self.slice_viewer.refresh_graph_overlay()
+        self._refresh_graph_panel_tool_state()
+        self.statusBar().showMessage("Vector 1: select source node")
+
+    def _on_graph_curve_edge_selected(
+        self,
+        orientation: str,
+        start_node_id: int,
+        end_node_id: int,
+    ) -> None:
+        if orientation not in ("axial", "coronal", "sagittal"):
+            return
+        try:
+            self.graph_state.select_curve_edge(
+                orientation,  # type: ignore[arg-type]
+                start_node_id,
+                end_node_id,
+            )
+        except ValueError as exc:
+            self.statusBar().showMessage(str(exc))
+            return
+        self.slice_viewer.refresh_graph_overlay()
+        self._refresh_graph_panel_tool_state()
+        self.statusBar().showMessage("Drag the curve control point")
+
+    def _on_graph_curve_control_changed(
+        self,
+        orientation: str,
+        start_node_id: int,
+        end_node_id: int,
+        horizontal: float,
+        vertical: float,
+    ) -> None:
+        if orientation not in ("axial", "coronal", "sagittal"):
+            return
+        try:
+            self.graph_state.layer(orientation).set_curve_control_point(
+                start_node_id,
+                end_node_id,
+                (horizontal, vertical),
+            )
+        except ValueError as exc:
+            self.statusBar().showMessage(str(exc))
+            return
+        self.slice_viewer.refresh_graph_overlay()
+
+    def _on_graph_curve_drag_state_changed(self, dragging: bool) -> None:
+        self.graph_state.curve_drag_active = bool(dragging)
+        self._refresh_graph_panel_tool_state()
+
+    def _on_graph_angle_node_selected(self, orientation: str, node_id: int) -> None:
+        if orientation not in ("axial", "coronal", "sagittal"):
+            return
+        try:
+            angle = self.graph_state.select_angle_node(
+                orientation,  # type: ignore[arg-type]
+                node_id,
+                self._graph_in_plane_spacing(orientation),  # type: ignore[arg-type]
+            )
+        except ValueError as exc:
+            self.statusBar().showMessage(str(exc))
+            return
+        self.slice_viewer.refresh_graph_overlay()
+        self._refresh_graph_panel_tool_state()
+        if angle is None:
+            prompts = (
+                "Vector 1: select source node",
+                "Vector 1: select target node",
+                "Vector 2: select source node",
+                "Vector 2: select target node",
+            )
+            self.statusBar().showMessage(
+                prompts[min(self.graph_state.angle_selection_step, 3)]
+            )
+        else:
+            self.statusBar().showMessage(f"Calculated graph angle: {angle:.1f}°")
+
+    def _select_graph_curve_from_ui(
+        self,
+        orientation: Orientation,
+        start_node_id: int,
+        end_node_id: int,
+    ) -> None:
+        self.graph_state.activate_curve_tool()
+        self._on_graph_curve_edge_selected(
+            orientation,
+            start_node_id,
+            end_node_id,
+        )
+
+    def _straighten_graph_edge_from_ui(
+        self,
+        orientation: Orientation,
+        start_node_id: int,
+        end_node_id: int,
+    ) -> None:
+        try:
+            self.straighten_graph_edge(
+                orientation,
+                start_node_id,
+                end_node_id,
+            )
+        except ValueError as exc:
+            self.statusBar().showMessage(str(exc))
+            return
+        self.statusBar().showMessage(
+            f"Straightened {orientation} graph edge {start_node_id}-{end_node_id}"
+        )
+
+    def _on_graph_straighten_requested(self) -> None:
+        orientation = self.graph_state.selected_edge_orientation
+        edge = self.graph_state.selected_edge
+        if orientation is None or edge is None:
+            return
+        self._straighten_graph_edge_from_ui(
+            orientation,
+            edge.start_node_id,
+            edge.end_node_id,
+        )
+
+    def _refresh_graph_panel_tool_state(self) -> None:
+        selected_curved = False
+        if (
+            self.graph_state.selected_edge_orientation is not None
+            and self.graph_state.selected_edge is not None
+        ):
+            selected_curved = (
+                self.graph_state.selected_edge
+                in self.graph_state.layer(
+                    self.graph_state.selected_edge_orientation
+                ).curve_control_points
+            )
+        self.graph_panel.set_tool_state(
+            active_tool=self.graph_state.active_tool,
+            selected_edge_curved=selected_curved,
+            angle_selection_step=self.graph_state.angle_selection_step,
+            angle_degrees=self.graph_state.calculated_angle_degrees,
+            has_angle_data=(
+                self.graph_state.angle_vector_1 is not None
+                or self.graph_state.angle_vector_2 is not None
+            ),
+        )
+
+    def _graph_in_plane_spacing(
+        self,
+        orientation: Orientation,
+    ) -> tuple[float, float]:
+        oriented = build_oriented_volume(
+            self._patch_volume.data,
+            self._patch_volume.affine,
+        )
+        unit_scale = spatial_unit_to_mm(self._patch_volume.header.get_xyzt_units()[0])
+        spacings = display_voxel_spacing_mm(
+            oriented.affine,
+            oriented.display_to_source_affine,
+            unit_scale,
+        )
+        horizontal_axis, vertical_axis, _ = plane_axes_for_orientation(orientation)
+        return (spacings[horizontal_axis], spacings[vertical_axis])
+
     def _on_graph_layers_cleared(self, orientations: object) -> None:
+        self._refresh_graph_panel_tool_state()
         if isinstance(orientations, tuple) and orientations:
             self.statusBar().showMessage(
                 "Cleared graph layers after projection shape changed: "

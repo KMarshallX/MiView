@@ -53,6 +53,11 @@ class TriPlanarViewerWidget(QWidget):
     graph_edge_cancel_requested = Signal()
     graph_orientation_interacted = Signal(str)
     graph_layers_cleared = Signal(object)
+    graph_curve_edge_selected = Signal(str, int, int)
+    graph_curve_control_changed = Signal(str, int, int, float, float)
+    graph_curve_drag_state_changed = Signal(bool)
+    graph_curve_exit_requested = Signal()
+    graph_angle_node_selected = Signal(str, int)
 
     def __init__(
         self,
@@ -131,6 +136,21 @@ class TriPlanarViewerWidget(QWidget):
             )
             view.graph_orientation_interacted.connect(
                 self._on_graph_orientation_interacted
+            )
+            view.graph_curve_edge_selected.connect(
+                self.graph_curve_edge_selected.emit
+            )
+            view.graph_curve_control_changed.connect(
+                self.graph_curve_control_changed.emit
+            )
+            view.graph_curve_drag_state_changed.connect(
+                self.graph_curve_drag_state_changed.emit
+            )
+            view.graph_curve_exit_requested.connect(
+                self.graph_curve_exit_requested.emit
+            )
+            view.graph_angle_node_selected.connect(
+                self.graph_angle_node_selected.emit
             )
         for widget in self._drop_event_sources:
             widget.installEventFilter(self)
@@ -380,6 +400,10 @@ class TriPlanarViewerWidget(QWidget):
                     node_size=1,
                     edge_thickness=1,
                     pending_node_id=None,
+                    active_tool=None,
+                    selected_edge=None,
+                    curve_handle_visible=False,
+                    angle_vectors=(),
                 )
                 continue
             pending_node_id = (
@@ -398,6 +422,22 @@ class TriPlanarViewerWidget(QWidget):
                 node_size=graph_state.node_size,
                 edge_thickness=graph_state.edge_thickness,
                 pending_node_id=pending_node_id,
+                active_tool=graph_state.active_tool,
+                selected_edge=(
+                    graph_state.selected_edge
+                    if graph_state.selected_edge_orientation == view.orientation
+                    else None
+                ),
+                curve_handle_visible=graph_state.selected_edge is not None,
+                angle_vectors=tuple(
+                    vector
+                    for vector in (
+                        graph_state.angle_vector_1,
+                        graph_state.angle_vector_2,
+                        *graph_state.draft_angle_vectors(),
+                    )
+                    if vector is not None and vector.orientation == view.orientation
+                ),
             )
 
     def set_drop_loading_enabled(self, enabled: bool) -> None:
@@ -660,7 +700,9 @@ class TriPlanarViewerWidget(QWidget):
             ):
                 cleared_orientations.append(orientation)
         if cleared_orientations:
-            self._projection_graph_state.cancel_pending_edge()
+            self._projection_graph_state.invalidate_orientations(
+                tuple(cleared_orientations)
+            )
             self.graph_layers_cleared.emit(tuple(cleared_orientations))
 
     def _update_shared_base_scale(self) -> None:

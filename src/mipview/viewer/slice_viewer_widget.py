@@ -9,7 +9,9 @@ from PySide6.QtGui import (
     QImage,
     QMouseEvent,
     QPainter,
+    QPainterPath,
     QPen,
+    QPolygonF,
     QPixmap,
     QResizeEvent,
     QWheelEvent,
@@ -17,7 +19,9 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import QApplication, QLabel, QSlider, QVBoxLayout, QWidget
 
 from mipview.annotation.annotation_overlay import build_annotation_overlay_rgba
+from mipview.graph.curve import point_to_quadratic_bezier_distance
 from mipview.graph.geometry import point_to_segment_distance
+from mipview.graph.measurement import DirectedGraphVector
 from mipview.graph.model import GraphEdge, ProjectionGraphLayer
 from mipview.viewer.intensity import normalize_slice_to_uint8, window_slice_to_uint8
 from mipview.viewer.oriented_volume import OrientedVolume
@@ -55,6 +59,11 @@ class SliceViewerWidget(QWidget):
     graph_edge_completion_requested = Signal(str, int)
     graph_edge_cancel_requested = Signal()
     graph_orientation_interacted = Signal(str)
+    graph_curve_edge_selected = Signal(str, int, int)
+    graph_curve_control_changed = Signal(str, int, int, float, float)
+    graph_curve_drag_state_changed = Signal(bool)
+    graph_curve_exit_requested = Signal()
+    graph_angle_node_selected = Signal(str, int)
 
     ZOOM_DRAG_SENSITIVITY = 0.01
     PATCH_HANDLE_RADIUS = 3.0
@@ -106,6 +115,10 @@ class SliceViewerWidget(QWidget):
         self._graph_edge_thickness = 2
         self._graph_pending_node_id: int | None = None
         self._graph_preview_label_position: QPointF | None = None
+        self._graph_active_tool: str | None = None
+        self._graph_selected_edge: GraphEdge | None = None
+        self._graph_curve_handle_visible = False
+        self._graph_angle_vectors: tuple[DirectedGraphVector, ...] = ()
         self._active_patch_resize_handle: str | None = None
         self._interaction_mode: str | None = None
         self._last_drag_position: QPointF | None = None
@@ -223,6 +236,10 @@ class SliceViewerWidget(QWidget):
         node_size: int,
         edge_thickness: int,
         pending_node_id: int | None,
+        active_tool: str | None,
+        selected_edge: GraphEdge | None,
+        curve_handle_visible: bool,
+        angle_vectors: tuple[DirectedGraphVector, ...],
     ) -> None:
         self._graph_layer = layer
         self._graph_editing_enabled = bool(editing_enabled)
@@ -233,6 +250,10 @@ class SliceViewerWidget(QWidget):
         self._graph_pending_node_id = (
             None if pending_node_id is None else int(pending_node_id)
         )
+        self._graph_active_tool = active_tool
+        self._graph_selected_edge = selected_edge
+        self._graph_curve_handle_visible = bool(curve_handle_visible)
+        self._graph_angle_vectors = tuple(angle_vectors)
         if self._graph_pending_node_id is None:
             self._graph_preview_label_position = None
         self._update_scaled_pixmap()
@@ -370,6 +391,8 @@ class SliceViewerWidget(QWidget):
                     self._handle_mouse_wheel(wheel_event)
                     return True
             elif event.type() == QEvent.Type.Leave:
+                if self._interaction_mode == "left_graph_curve_drag":
+                    self.graph_curve_drag_state_changed.emit(False)
                 self._interaction_mode = None
                 self._last_drag_position = None
                 self._right_press_position = None
@@ -566,13 +589,43 @@ class SliceViewerWidget(QWidget):
             start = node_positions.get(edge.start_node_id)
             end = node_positions.get(edge.end_node_id)
             if start is not None and end is not None:
-                painter.drawLine(start, end)
+                control = self._graph_layer.curve_control_points.get(edge)
+                if control is None:
+                    painter.drawLine(start, end)
+                else:
+                    control_position = self._graph_projection_point_to_screen(
+                        control,
+                        display_rect,
+                    )
+                    path = QPainterPath(start)
+                    path.quadTo(control_position, end)
+                    painter.drawPath(path)
+
+        self._draw_graph_angle_vectors(painter, node_positions, alpha)
 
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(node_color)
         radius = float(self._graph_node_size)
         for position in node_positions.values():
             painter.drawEllipse(position, radius, radius)
+
+        if (
+            self._graph_active_tool == "curve_edge"
+            and self._graph_selected_edge is not None
+        ):
+            control = self._graph_layer.curve_control_points.get(
+                self._graph_selected_edge
+            )
+            if control is not None:
+                control_position = self._graph_projection_point_to_screen(
+                    control,
+                    display_rect,
+                )
+                handle_pen = QPen(QColor(255, 255, 255, 255), 2)
+                handle_pen.setCosmetic(True)
+                painter.setPen(handle_pen)
+                painter.setBrush(QColor(0, 220, 255, 255))
+                painter.drawEllipse(control_position, 6.0, 6.0)
 
         if (
             self._graph_pending_node_id is not None
@@ -588,6 +641,52 @@ class SliceViewerWidget(QWidget):
                 painter.setBrush(Qt.BrushStyle.NoBrush)
                 painter.drawLine(start, self._graph_preview_label_position)
         painter.restore()
+
+    def _draw_graph_angle_vectors(
+        self,
+        painter: QPainter,
+        node_positions: dict[int, QPointF],
+        alpha: int,
+    ) -> None:
+        arrow_color = QColor(255, 255, 0, alpha)
+        arrow_pen = QPen(arrow_color, max(self._graph_edge_thickness, 2))
+        arrow_pen.setCosmetic(True)
+        painter.setPen(arrow_pen)
+        painter.setBrush(arrow_color)
+        for vector in self._graph_angle_vectors:
+            start = node_positions.get(vector.source_node_id)
+            end = node_positions.get(vector.target_node_id)
+            if start is None or end is None:
+                continue
+            delta_x = end.x() - start.x()
+            delta_y = end.y() - start.y()
+            length = float(np.hypot(delta_x, delta_y))
+            if length <= 0.0:
+                continue
+            painter.drawLine(start, end)
+            unit_x = delta_x / length
+            unit_y = delta_y / length
+            head_length = min(10.0, max(length * 0.3, 5.0))
+            head_width = head_length * 0.55
+            base_x = end.x() - (unit_x * head_length)
+            base_y = end.y() - (unit_y * head_length)
+            perpendicular_x = -unit_y
+            perpendicular_y = unit_x
+            painter.drawPolygon(
+                QPolygonF(
+                    [
+                        end,
+                        QPointF(
+                            base_x + (perpendicular_x * head_width),
+                            base_y + (perpendicular_y * head_width),
+                        ),
+                        QPointF(
+                            base_x - (perpendicular_x * head_width),
+                            base_y - (perpendicular_y * head_width),
+                        ),
+                    ]
+                )
+            )
 
     def _graph_overlay_available(self) -> bool:
         if (
@@ -624,6 +723,56 @@ class SliceViewerWidget(QWidget):
             for node in self._graph_layer.nodes.values()
         }
 
+    def _graph_projection_point_to_screen(
+        self,
+        point: tuple[float, float],
+        display_rect: DisplayRect,
+    ) -> QPointF:
+        assert self._graph_layer is not None
+        assert self._graph_layer.plane_shape is not None
+        width, height = self._graph_layer.plane_shape
+        return QPointF(
+            display_rect.left + (((float(point[0]) + 0.5) / width) * display_rect.width),
+            display_rect.top + (((float(point[1]) + 0.5) / height) * display_rect.height),
+        )
+
+    def _graph_curve_handle_hit(self, label_position: QPointF) -> bool:
+        if (
+            self._graph_active_tool != "curve_edge"
+            or self._graph_layer is None
+            or self._graph_selected_edge is None
+        ):
+            return False
+        control = self._graph_layer.curve_control_points.get(self._graph_selected_edge)
+        display_rect = self._display_rect()
+        if control is None or display_rect is None:
+            return False
+        position = self._graph_projection_point_to_screen(control, display_rect)
+        return float(
+            np.hypot(label_position.x() - position.x(), label_position.y() - position.y())
+        ) <= 9.0
+
+    def _clamped_graph_control_from_label_position(
+        self,
+        label_position: QPointF,
+    ) -> tuple[float, float] | None:
+        if self._graph_layer is None or self._graph_layer.plane_shape is None:
+            return None
+        display_rect = self._display_rect()
+        if display_rect is None or display_rect.width <= 0.0 or display_rect.height <= 0.0:
+            return None
+        width, height = self._graph_layer.plane_shape
+        horizontal = (
+            ((label_position.x() - display_rect.left) / display_rect.width) * width
+        ) - 0.5
+        vertical = (
+            ((label_position.y() - display_rect.top) / display_rect.height) * height
+        ) - 0.5
+        return (
+            min(max(horizontal, 0.0), float(width - 1)),
+            min(max(vertical, 0.0), float(height - 1)),
+        )
+
     def _graph_hit_at_label_position(self, label_position: QPointF) -> dict[str, object]:
         if not self._graph_interaction_available() or self._graph_layer is None:
             return {"kind": "empty"}
@@ -651,11 +800,24 @@ class SliceViewerWidget(QWidget):
             end = node_positions.get(edge.end_node_id)
             if start is None or end is None:
                 continue
-            distance = point_to_segment_distance(
-                (label_position.x(), label_position.y()),
-                (start.x(), start.y()),
-                (end.x(), end.y()),
-            )
+            control = self._graph_layer.curve_control_points.get(edge)
+            if control is None:
+                distance = point_to_segment_distance(
+                    (label_position.x(), label_position.y()),
+                    (start.x(), start.y()),
+                    (end.x(), end.y()),
+                )
+            else:
+                control_position = self._graph_projection_point_to_screen(
+                    control,
+                    display_rect,
+                )
+                distance = point_to_quadratic_bezier_distance(
+                    (label_position.x(), label_position.y()),
+                    (start.x(), start.y()),
+                    (control_position.x(), control_position.y()),
+                    (end.x(), end.y()),
+                )
             if distance <= edge_tolerance:
                 edge_hits.append((distance, edge))
         if edge_hits:
@@ -861,6 +1023,42 @@ class SliceViewerWidget(QWidget):
         if mouse_event.button() == Qt.MouseButton.LeftButton:
             if (
                 self._graph_interaction_available()
+                and self._graph_active_tool == "curve_edge"
+            ):
+                self.graph_orientation_interacted.emit(self.orientation)
+                if self._graph_curve_handle_hit(mouse_event.position()):
+                    self._interaction_mode = "left_graph_curve_drag"
+                    self.graph_curve_drag_state_changed.emit(True)
+                    self._emit_graph_curve_control(mouse_event.position())
+                    return
+                if self._graph_curve_handle_visible:
+                    self._interaction_mode = "left_graph_curve_select"
+                    self.graph_curve_exit_requested.emit()
+                    return
+                hit = self._graph_hit_at_label_position(mouse_event.position())
+                self._interaction_mode = "left_graph_curve_select"
+                if hit.get("kind") == "edge":
+                    self.graph_curve_edge_selected.emit(
+                        self.orientation,
+                        int(hit["start_node_id"]),
+                        int(hit["end_node_id"]),
+                    )
+                return
+            if (
+                self._graph_interaction_available()
+                and self._graph_active_tool == "calculate_angle"
+            ):
+                self._interaction_mode = "left_graph_angle"
+                self.graph_orientation_interacted.emit(self.orientation)
+                hit = self._graph_hit_at_label_position(mouse_event.position())
+                if hit.get("kind") == "node":
+                    self.graph_angle_node_selected.emit(
+                        self.orientation,
+                        int(hit["node_id"]),
+                    )
+                return
+            if (
+                self._graph_interaction_available()
                 and self._graph_pending_node_id is not None
             ):
                 self._interaction_mode = "left_graph_edge"
@@ -926,6 +1124,14 @@ class SliceViewerWidget(QWidget):
         if self._interaction_mode == "left_graph_edge":
             return
 
+        if self._interaction_mode == "left_graph_curve_drag":
+            if mouse_event.buttons() & Qt.MouseButton.LeftButton:
+                self._emit_graph_curve_control(mouse_event.position())
+            return
+
+        if self._interaction_mode in ("left_graph_curve_select", "left_graph_angle"):
+            return
+
         if self._interaction_mode == "right_graph_pending":
             if (
                 mouse_event.buttons() & Qt.MouseButton.RightButton
@@ -964,7 +1170,12 @@ class SliceViewerWidget(QWidget):
             "left_patch_resize",
             "left_patch_drag",
             "left_graph_edge",
+            "left_graph_curve_drag",
+            "left_graph_curve_select",
+            "left_graph_angle",
         ):
+            if self._interaction_mode == "left_graph_curve_drag":
+                self.graph_curve_drag_state_changed.emit(False)
             self._interaction_mode = None
         elif release_button == Qt.MouseButton.MiddleButton and self._interaction_mode == "middle_pan":
             self._interaction_mode = None
@@ -990,6 +1201,20 @@ class SliceViewerWidget(QWidget):
         self._right_press_position = None
         self._active_patch_resize_handle = None
         self._update_hover_cursor(mouse_event.position())
+
+    def _emit_graph_curve_control(self, label_position: QPointF) -> None:
+        if self._graph_selected_edge is None:
+            return
+        control = self._clamped_graph_control_from_label_position(label_position)
+        if control is None:
+            return
+        self.graph_curve_control_changed.emit(
+            self.orientation,
+            self._graph_selected_edge.start_node_id,
+            self._graph_selected_edge.end_node_id,
+            control[0],
+            control[1],
+        )
 
     def _handle_mouse_wheel(self, wheel_event: QWheelEvent) -> None:
         if self._display_volume is None or self._source_cursor_position is None:
