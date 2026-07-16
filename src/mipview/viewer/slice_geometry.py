@@ -126,17 +126,50 @@ def extract_oriented_slice(
 
 
 def project_oriented_volume(
-    volume: np.ndarray, orientation: Orientation, mode: str
+    volume: np.ndarray,
+    orientation: Orientation,
+    mode: str,
+    mask: np.ndarray | None = None,
 ) -> np.ndarray:
-    """Project canonical RAS data using the same display orientation rules as slices."""
+    """Project canonical RAS data using the same display orientation rules as slices.
+
+    When ``mask`` is provided, only non-zero mask voxels contribute to each
+    projection ray. Rays without any masked voxels are returned as NaN so the
+    display layer can render them as black without inventing an image intensity.
+    """
     normalized_mode = mode.strip().upper()
     reducer = np.max if normalized_mode == "MIP" else np.min
+    projection_volume = np.asarray(volume)
+    projection_mask = None
+    if mask is not None:
+        projection_mask = np.asarray(mask)
+        if projection_mask.shape != projection_volume.shape:
+            raise ValueError(
+                "Projection mask shape must match the projected volume shape."
+            )
+        projection_mask = projection_mask != 0
+
+    def reduce_axis(axis: int) -> np.ndarray:
+        if projection_mask is None:
+            return reducer(projection_volume, axis=axis)
+
+        fill_value = -np.inf if normalized_mode == "MIP" else np.inf
+        masked_volume = np.where(
+            projection_mask,
+            np.asarray(projection_volume, dtype=np.float64),
+            fill_value,
+        )
+        projection = reducer(masked_volume, axis=axis)
+        valid_rays = np.any(projection_mask, axis=axis)
+        projection[~valid_rays] = np.nan
+        return projection
+
     if orientation == "axial":
-        return reducer(volume, axis=2).T[::-1, ::-1]
+        return reduce_axis(2).T[::-1, ::-1]
     if orientation == "coronal":
-        return reducer(volume, axis=1).T[::-1, ::-1]
+        return reduce_axis(1).T[::-1, ::-1]
     if orientation == "sagittal":
-        return reducer(volume, axis=0).T[::-1, ::-1]
+        return reduce_axis(0).T[::-1, ::-1]
     raise ValueError(f"Unsupported orientation: {orientation}")
 
 

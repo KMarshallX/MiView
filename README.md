@@ -10,7 +10,8 @@ It is designed as a focused research tool for:
 - interactive patch selection,
 - patch saving,
 - patch-wise volumetric computation (e.g., normalization, standardization, filtering, etc.),
-- orthogonal **MIP / MinIP** inspection of selected, modified patches,
+- orthogonal **MIP / MinIP** inspection of selected, modified patches, optionally
+  restricted to a loaded file-backed segmentation mask,
 - projection-graph editing with nodes, straight or curved edges, and physical-spacing-aware angle measurement,
 - controlled local IPC and `mipview-ctl` commands for viewer, patch, annotation, projection, and graph workflows.
 

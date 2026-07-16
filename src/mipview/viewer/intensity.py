@@ -6,14 +6,21 @@ import numpy as np
 def normalize_slice_to_uint8(slice_data: np.ndarray) -> np.ndarray:
     """Normalize a 2D slice to 8-bit grayscale for display."""
     float_slice = np.asarray(slice_data, dtype=np.float32)
-    min_value = float(float_slice.min())
-    max_value = float(float_slice.max())
+    finite_mask = np.isfinite(float_slice)
+    finite_values = float_slice[finite_mask]
+    if finite_values.size == 0:
+        return np.zeros(float_slice.shape, dtype=np.uint8)
+
+    min_value = float(finite_values.min())
+    max_value = float(finite_values.max())
 
     if max_value <= min_value:
         return np.zeros(float_slice.shape, dtype=np.uint8)
 
-    scaled = (float_slice - min_value) / (max_value - min_value)
-    return np.clip(scaled * 255.0, 0.0, 255.0).astype(np.uint8)
+    output = np.zeros(float_slice.shape, dtype=np.uint8)
+    scaled = (finite_values - min_value) / (max_value - min_value)
+    output[finite_mask] = np.clip(scaled * 255.0, 0.0, 255.0).astype(np.uint8)
+    return output
 
 
 def window_slice_to_uint8(
@@ -24,8 +31,11 @@ def window_slice_to_uint8(
     if window_max <= window_min:
         return np.zeros(float_slice.shape, dtype=np.uint8)
 
-    scaled = (float_slice - window_min) / (window_max - window_min)
-    return np.clip(scaled * 255.0, 0.0, 255.0).astype(np.uint8)
+    finite_mask = np.isfinite(float_slice)
+    output = np.zeros(float_slice.shape, dtype=np.uint8)
+    scaled = (float_slice[finite_mask] - window_min) / (window_max - window_min)
+    output[finite_mask] = np.clip(scaled * 255.0, 0.0, 255.0).astype(np.uint8)
+    return output
 
 
 def volume_intensity_range(volume_data: np.ndarray) -> tuple[float, float]:

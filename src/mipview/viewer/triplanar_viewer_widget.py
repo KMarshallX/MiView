@@ -68,6 +68,7 @@ class TriPlanarViewerWidget(QWidget):
         super().__init__(parent)
         self._display_volume: OrientedVolume | None = None
         self._segmentation_display_volume: OrientedVolume | None = None
+        self._projection_mask_display_volume: OrientedVolume | None = None
         self._segmentation_opacity: float = 0.5
         self._annotation_mask: AnnotationMask | None = None
         self._annotation_display_volume: OrientedVolume | None = None
@@ -229,6 +230,7 @@ class TriPlanarViewerWidget(QWidget):
     def unload_volume(self) -> None:
         self._display_volume = None
         self._segmentation_display_volume = None
+        self._projection_mask_display_volume = None
         self._annotation_mask = None
         self._annotation_display_volume = None
         self._annotation_editing_enabled = False
@@ -476,6 +478,29 @@ class TriPlanarViewerWidget(QWidget):
 
     def segmentation_overlay_opacity(self) -> float:
         return self._segmentation_opacity
+
+    def set_projection_mask(self, mask_volume: NiftiLoadResult | None) -> None:
+        """Restrict MIP/MinIP calculations to non-zero voxels in ``mask_volume``."""
+        if mask_volume is None:
+            self._projection_mask_display_volume = None
+            self._update_projection_overrides()
+            return
+
+        if mask_volume.data.ndim != 3:
+            raise ValueError(
+                f"Projection mask expects a 3D volume, got {mask_volume.data.ndim}D."
+            )
+        if (
+            self._display_volume is not None
+            and mask_volume.shape != self._display_volume.source_shape
+        ):
+            raise ValueError("Projection mask shape does not match the loaded image shape.")
+
+        self._projection_mask_display_volume = build_oriented_volume(
+            mask_volume.data,
+            mask_volume.affine,
+        )
+        self._update_projection_overrides()
 
     def set_annotation_overlay(
         self,
@@ -833,6 +858,11 @@ class TriPlanarViewerWidget(QWidget):
                 volume,
                 view.orientation,
                 self._projection_mode,
+                mask=(
+                    None
+                    if self._projection_mask_display_volume is None
+                    else self._projection_mask_display_volume.display_data
+                ),
             )
             segmentation_projection_slice = None
             if self._segmentation_display_volume is not None:

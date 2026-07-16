@@ -427,6 +427,7 @@ class MainWindow(QMainWindow):
                 if active_segmentation is not None and active_segmentation.kind == "file"
                 else None
             ),
+            projection_mask_layers=self._projection_mask_layers_for_bounds(bounds),
             segmentation_opacity=self.state.segmentation_opacity,
             annotation_mask=active_annotation_patch,
             annotation_opacity=self.state.annotation.opacity,
@@ -1251,6 +1252,7 @@ class MainWindow(QMainWindow):
             if self._active_segmentation_is_annotation()
             else self.state.segmentation_opacity
         )
+        self._update_patch_windows_projection_masks_for_current_image()
         self._sync_patch_windows_segmentation_menu_state()
 
     def _clear_segmentation_session(self) -> None:
@@ -1310,6 +1312,30 @@ class MainWindow(QMainWindow):
             patch_window.update_segmentation_overlay(
                 extract_patch(active_segmentation.volume, bounds),
                 opacity=self.state.segmentation_opacity,
+            )
+
+    def _projection_mask_layers_for_bounds(
+        self,
+        bounds: PatchBounds,
+    ) -> list[tuple[str, str, NiftiLoadResult]]:
+        return [
+            (
+                segmentation.id,
+                segmentation.display_name,
+                extract_patch(segmentation.volume, bounds),
+            )
+            for segmentation in self.state.loaded_segmentations
+            if segmentation.kind == "file"
+        ]
+
+    def _update_patch_windows_projection_masks_for_current_image(self) -> None:
+        for patch_window in self._patch_windows_for_current_image():
+            bounds = patch_window.source_patch_bounds()
+            if bounds is None:
+                patch_window.update_projection_mask_layers(())
+                continue
+            patch_window.update_projection_mask_layers(
+                self._projection_mask_layers_for_bounds(bounds)
             )
 
     def _sync_patch_windows_segmentation_menu_state(self) -> None:

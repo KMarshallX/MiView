@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from pathlib import Path
 from uuid import uuid4
 
@@ -101,6 +102,9 @@ class PatchViewerWindow(QMainWindow):
         source_patch_bounds: PatchBounds | None = None,
         patch_center: tuple[int, int, int] | None = None,
         patch_size: tuple[int, int, int] | None = None,
+        projection_mask_layers: Sequence[
+            tuple[str, str, NiftiLoadResult]
+        ] | None = None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Selected Patch")
@@ -115,6 +119,7 @@ class PatchViewerWindow(QMainWindow):
         self._patch_data = patch_volume.data
         self._patch_volume = patch_volume
         self._segmentation_patch_volume = segmentation_volume
+        self._projection_mask_layers: dict[str, NiftiLoadResult] = {}
         self._annotation_patch_mask = annotation_mask
         self._annotation_opacity = min(max(float(annotation_opacity), 0.0), 1.0)
         self._annotation_visible = bool(annotation_visible)
@@ -275,6 +280,7 @@ class PatchViewerWindow(QMainWindow):
             self._on_auto_contrast,
         )
         self.slice_viewer.load_volume(patch_volume)
+        self.update_projection_mask_layers(projection_mask_layers or ())
         self.slice_viewer.set_projection_graph_state(self.graph_state)
         if segmentation_volume is not None:
             self.slice_viewer.set_segmentation_overlay(
@@ -373,6 +379,12 @@ class PatchViewerWindow(QMainWindow):
         self.projection_mode_combo.addItems(["MIP", "MinIP"])
         self.projection_mode_combo.currentTextChanged.connect(self._on_projection_mode_changed)
 
+        self.projection_mask_combo = QComboBox(panel)
+        self.projection_mask_combo.addItem("---", None)
+        self.projection_mask_combo.currentIndexChanged.connect(
+            self._on_projection_mask_changed
+        )
+
         direction_row = QWidget(panel)
         direction_layout = QHBoxLayout(direction_row)
         direction_layout.setContentsMargins(0, 0, 0, 0)
@@ -400,6 +412,7 @@ class PatchViewerWindow(QMainWindow):
         direction_layout.addWidget(self.sagittal_toggle_button)
 
         form.addRow("Mode:", self.projection_mode_combo)
+        form.addRow("Mask:", self.projection_mask_combo)
         form.addRow("Direction:", direction_row)
         return panel
 
@@ -433,6 +446,15 @@ class PatchViewerWindow(QMainWindow):
     def _on_projection_mode_changed(self, mode: str) -> None:
         self.slice_viewer.set_projection_mode(mode)
 
+    def _on_projection_mask_changed(self, _index: int) -> None:
+        segmentation_id = self.projection_mask_combo.currentData()
+        mask_volume = (
+            self._projection_mask_layers.get(segmentation_id)
+            if isinstance(segmentation_id, str)
+            else None
+        )
+        self.slice_viewer.set_projection_mask(mask_volume)
+
     def _on_projection_direction_toggled(self, orientation: str, enabled: bool) -> None:
         self.slice_viewer.set_projection_enabled(orientation, enabled)
 
@@ -460,6 +482,12 @@ class PatchViewerWindow(QMainWindow):
                     }
                 ),
                 "projection_mode": self.slice_viewer.projection_mode(),
+                "projection_mask_id": self.selected_projection_mask_id(),
+                "projection_mask_name": (
+                    None
+                    if self.selected_projection_mask_id() is None
+                    else self.projection_mask_combo.currentText()
+                ),
                 "enabled_orientations": list(
                     self.slice_viewer.enabled_projection_orientations()
                 ),
@@ -1551,10 +1579,23 @@ class PatchViewerWindow(QMainWindow):
             self._patch_volume.data,
             self._patch_volume.affine,
         ).display_data
+        selected_mask = self.selected_projection_mask_volume()
+        mask_data = (
+            None
+            if selected_mask is None
+            else build_oriented_volume(
+                selected_mask.data,
+                selected_mask.affine,
+            ).display_data
+        )
         planes: dict[str, np.ndarray | dict[str, np.ndarray]] = {
-            "axial": project_oriented_volume(volume, "axial", mode),
-            "coronal": project_oriented_volume(volume, "coronal", mode),
-            "sagittal": project_oriented_volume(volume, "sagittal", mode),
+            "axial": project_oriented_volume(volume, "axial", mode, mask=mask_data),
+            "coronal": project_oriented_volume(
+                volume, "coronal", mode, mask=mask_data
+            ),
+            "sagittal": project_oriented_volume(
+                volume, "sagittal", mode, mask=mask_data
+            ),
         }
         if self._segmentation_patch_volume is not None:
             segmentation_volume = build_oriented_volume(
@@ -1602,6 +1643,39 @@ class PatchViewerWindow(QMainWindow):
         self._segmentation_patch_volume = segmentation_volume
         self.slice_viewer.set_segmentation_overlay(segmentation_volume, opacity=opacity)
         self._refresh_seg_patch_save_enabled()
+
+    def update_projection_mask_layers(
+        self,
+        layers: Sequence[tuple[str, str, NiftiLoadResult]],
+    ) -> None:
+        """Refresh file-backed masks while preserving a still-loaded selection."""
+        selected_id = self.selected_projection_mask_id()
+        self._projection_mask_layers = {
+            segmentation_id: volume
+            for segmentation_id, _display_name, volume in layers
+        }
+
+        was_blocked = self.projection_mask_combo.blockSignals(True)
+        self.projection_mask_combo.clear()
+        self.projection_mask_combo.addItem("---", None)
+        selected_index = 0
+        for segmentation_id, display_name, _volume in layers:
+            self.projection_mask_combo.addItem(display_name, segmentation_id)
+            if segmentation_id == selected_id:
+                selected_index = self.projection_mask_combo.count() - 1
+        self.projection_mask_combo.setCurrentIndex(selected_index)
+        self.projection_mask_combo.blockSignals(was_blocked)
+        self._on_projection_mask_changed(selected_index)
+
+    def selected_projection_mask_id(self) -> str | None:
+        segmentation_id = self.projection_mask_combo.currentData()
+        return segmentation_id if isinstance(segmentation_id, str) else None
+
+    def selected_projection_mask_volume(self) -> NiftiLoadResult | None:
+        segmentation_id = self.selected_projection_mask_id()
+        if segmentation_id is None:
+            return None
+        return self._projection_mask_layers.get(segmentation_id)
 
     def update_segmentation_opacity(self, opacity: float) -> None:
         self.slice_viewer.set_segmentation_overlay_opacity(opacity)
