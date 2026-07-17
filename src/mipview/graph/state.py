@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Literal, Mapping
+
+import numpy as np
 
 from mipview.graph.measurement import (
     DirectedGraphVector,
     calculate_unsigned_angle_degrees,
 )
-from mipview.graph.model import GraphEdge, ProjectionGraphLayer
+from mipview.graph.model import GraphEdge, ProjectionGraphLayer, VoxelGraph
+from mipview.graph.spatial import build_projected_graph_layer
+from mipview.viewer.oriented_volume import OrientedVolume
 from mipview.viewer.slice_geometry import Orientation
 
 
@@ -17,12 +21,7 @@ GraphTool = Literal["curve_edge", "calculate_angle"]
 
 @dataclass
 class ProjectionGraphState:
-    layers: dict[Orientation, ProjectionGraphLayer] = field(
-        default_factory=lambda: {
-            orientation: ProjectionGraphLayer(orientation)
-            for orientation in ORIENTATIONS
-        }
-    )
+    graph: VoxelGraph = field(default_factory=VoxelGraph)
     editing_enabled: bool = False
     visible: bool = True
     opacity: float = 1.0
@@ -40,11 +39,45 @@ class ProjectionGraphState:
     angle_vector_1: DirectedGraphVector | None = None
     angle_vector_2: DirectedGraphVector | None = None
     calculated_angle_degrees: float | None = None
+    _orientation_signature: tuple[float, ...] | None = field(
+        default=None,
+        repr=False,
+    )
 
-    def layer(self, orientation: Orientation) -> ProjectionGraphLayer:
-        if orientation not in self.layers:
-            raise ValueError(f"Unsupported graph orientation: {orientation}.")
-        return self.layers[orientation]
+    def projected_layer(
+        self,
+        orientation: Orientation,
+        oriented_volume: OrientedVolume,
+    ) -> ProjectionGraphLayer:
+        return build_projected_graph_layer(self.graph, oriented_volume, orientation)
+
+    def set_volume_shape(self, volume_shape: tuple[int, int, int]) -> bool:
+        cleared = self.graph.set_volume_shape(volume_shape)
+        if cleared:
+            self._clear_after_geometry_change()
+        return cleared
+
+    def set_volume_geometry(
+        self,
+        volume_shape: tuple[int, int, int],
+        source_to_display_affine: np.ndarray,
+    ) -> bool:
+        signature = tuple(
+            float(value)
+            for value in np.asarray(source_to_display_affine, dtype=np.float64).ravel()
+        )
+        orientation_changed = (
+            self._orientation_signature is not None
+            and signature != self._orientation_signature
+        )
+        cleared = self.graph.set_volume_shape(volume_shape)
+        if orientation_changed and not cleared:
+            cleared = bool(self.graph.nodes or self.graph.edges)
+            self.graph.clear()
+        self._orientation_signature = signature
+        if cleared:
+            self._clear_after_geometry_change()
+        return cleared
 
     def set_opacity(self, opacity: float) -> None:
         self.opacity = min(max(float(opacity), 0.0), 1.0)
@@ -56,9 +89,8 @@ class ProjectionGraphState:
         self.edge_thickness = min(max(int(edge_thickness), 1), 10)
 
     def begin_edge(self, orientation: Orientation, node_id: int) -> None:
-        layer = self.layer(orientation)
-        if int(node_id) not in layer.nodes:
-            raise ValueError(f"Graph node {node_id} does not exist in {orientation}.")
+        if int(node_id) not in self.graph.nodes:
+            raise ValueError(f"Graph node {node_id} does not exist.")
         self.cancel_active_tool()
         self.pending_edge_orientation = orientation
         self.pending_edge_node_id = int(node_id)
@@ -80,9 +112,8 @@ class ProjectionGraphState:
         first_node_id: int,
         second_node_id: int,
     ) -> GraphEdge:
-        layer = self.layer(orientation)
         edge = GraphEdge.between(first_node_id, second_node_id)
-        layer.ensure_curve_control_point(edge)
+        self.graph.ensure_curve_control_point(edge)
         self.active_tool = "curve_edge"
         self.selected_edge_orientation = orientation
         self.selected_edge = edge
@@ -102,14 +133,14 @@ class ProjectionGraphState:
         self,
         orientation: Orientation,
         node_id: int,
+        node_positions: Mapping[int, tuple[float, float]],
         in_plane_spacing: tuple[float, float],
     ) -> float | None:
         if self.active_tool != "calculate_angle":
             raise ValueError("Calculate Angle tool is not active.")
-        layer = self.layer(orientation)
         normalized_id = int(node_id)
-        if normalized_id not in layer.nodes:
-            raise ValueError(f"Graph node {normalized_id} does not exist in {orientation}.")
+        if normalized_id not in self.graph.nodes:
+            raise ValueError(f"Graph node {normalized_id} does not exist.")
         if self.angle_draft_nodes and orientation != self.angle_draft_nodes[0][0]:
             raise ValueError("Both vectors must use the same projection orientation.")
         if self.angle_selection_step in (1, 3):
@@ -133,11 +164,10 @@ class ProjectionGraphState:
             self.angle_draft_nodes[2][1],
             self.angle_draft_nodes[3][1],
         )
-        positions = {node.id: node.position() for node in layer.nodes.values()}
         angle = calculate_unsigned_angle_degrees(
             first,
             second,
-            positions,
+            node_positions,
             in_plane_spacing,
         )
         self.angle_vector_1 = first
@@ -154,10 +184,9 @@ class ProjectionGraphState:
         vector_1_target: int,
         vector_2_source: int,
         vector_2_target: int,
+        node_positions: Mapping[int, tuple[float, float]],
         in_plane_spacing: tuple[float, float],
     ) -> float:
-        """Validate and replace the committed measurement atomically."""
-        layer = self.layer(orientation)
         first = DirectedGraphVector(
             orientation,
             int(vector_1_source),
@@ -168,11 +197,10 @@ class ProjectionGraphState:
             int(vector_2_source),
             int(vector_2_target),
         )
-        positions = {node.id: node.position() for node in layer.nodes.values()}
         angle = calculate_unsigned_angle_degrees(
             first,
             second,
-            positions,
+            node_positions,
             in_plane_spacing,
         )
         self.angle_vector_1 = first
@@ -215,53 +243,30 @@ class ProjectionGraphState:
         if self.active_tool == "calculate_angle":
             self.active_tool = None
 
-    def invalidate_node(self, orientation: Orientation, node_id: int) -> None:
+    def invalidate_node(self, node_id: int) -> None:
         normalized_id = int(node_id)
-        if (
-            self.selected_edge_orientation == orientation
-            and self.selected_edge is not None
-            and normalized_id
-            in (self.selected_edge.start_node_id, self.selected_edge.end_node_id)
+        if self.selected_edge is not None and normalized_id in (
+            self.selected_edge.start_node_id,
+            self.selected_edge.end_node_id,
         ):
             self.selected_edge_orientation = None
             self.selected_edge = None
             self.curve_drag_active = False
-        invalidated_measurement = False
-        if self.angle_vector_1 is not None and self.angle_vector_1.references_node(
-            orientation, normalized_id
-        ):
-            self.angle_vector_1 = None
-            invalidated_measurement = True
-        if self.angle_vector_2 is not None and self.angle_vector_2.references_node(
-            orientation, normalized_id
-        ):
-            self.angle_vector_2 = None
-            invalidated_measurement = True
-        if invalidated_measurement:
-            self.calculated_angle_degrees = None
-        if (orientation, normalized_id) in self.angle_draft_nodes:
-            self._clear_angle_draft()
-
-    def invalidate_orientations(self, orientations: tuple[Orientation, ...]) -> None:
-        cleared = set(orientations)
-        if not cleared:
-            return
-        if self.pending_edge_orientation in cleared:
+        if self.pending_edge_node_id == normalized_id:
             self.cancel_pending_edge()
-        if self.selected_edge_orientation in cleared:
-            self.selected_edge_orientation = None
-            self.selected_edge = None
-            self.curve_drag_active = False
         measurement_invalidated = False
-        if self.angle_vector_1 is not None and self.angle_vector_1.orientation in cleared:
-            self.angle_vector_1 = None
-            measurement_invalidated = True
-        if self.angle_vector_2 is not None and self.angle_vector_2.orientation in cleared:
-            self.angle_vector_2 = None
-            measurement_invalidated = True
+        for vector_name in ("angle_vector_1", "angle_vector_2"):
+            vector = getattr(self, vector_name)
+            if vector is not None and normalized_id in (
+                vector.source_node_id,
+                vector.target_node_id,
+            ):
+                setattr(self, vector_name, None)
+                measurement_invalidated = True
         if measurement_invalidated:
             self.calculated_angle_degrees = None
-        self.cancel_active_tool()
+        if any(draft_id == normalized_id for _, draft_id in self.angle_draft_nodes):
+            self._clear_angle_draft()
 
     def exit_editing(self) -> None:
         self.editing_enabled = False
@@ -281,8 +286,7 @@ class ProjectionGraphState:
             "curve_drag_active": self.curve_drag_active,
             "pending_edge": (
                 None
-                if self.pending_edge_orientation is None
-                or self.pending_edge_node_id is None
+                if self.pending_edge_node_id is None
                 else {
                     "orientation": self.pending_edge_orientation,
                     "start_node_id": self.pending_edge_node_id,
@@ -292,24 +296,21 @@ class ProjectionGraphState:
                 "step": self.angle_selection_step,
                 "node_ids": [node_id for _, node_id in self.angle_draft_nodes],
                 "orientation": (
-                    None
-                    if not self.angle_draft_nodes
-                    else self.angle_draft_nodes[0][0]
+                    None if not self.angle_draft_nodes else self.angle_draft_nodes[0][0]
                 ),
             },
             "angle_vector_1": _vector_summary(self.angle_vector_1),
             "angle_vector_2": _vector_summary(self.angle_vector_2),
             "angle_degrees": self.calculated_angle_degrees,
-            "layers": {
-                orientation: {
-                    "plane_shape": (
-                        None if layer.plane_shape is None else list(layer.plane_shape)
-                    ),
-                    "num_nodes": len(layer.nodes),
-                    "num_edges": len(layer.edges),
-                    "num_curved_edges": len(layer.curve_control_points),
-                }
-                for orientation, layer in self.layers.items()
+            "voxel_graph": {
+                "volume_shape": (
+                    None
+                    if self.graph.volume_shape is None
+                    else list(self.graph.volume_shape)
+                ),
+                "num_nodes": len(self.graph.nodes),
+                "num_edges": len(self.graph.edges),
+                "num_curved_edges": len(self.graph.curve_control_points),
             },
         }
 
@@ -317,8 +318,13 @@ class ProjectionGraphState:
         self.angle_draft_nodes.clear()
         self.angle_selection_step = 0
 
+    def _clear_after_geometry_change(self) -> None:
+        self.cancel_pending_edge()
+        self.cancel_active_tool()
+        self.clear_angle()
+
     def _selected_edge_summary(self) -> dict[str, object] | None:
-        if self.selected_edge_orientation is None or self.selected_edge is None:
+        if self.selected_edge is None:
             return None
         return {
             "orientation": self.selected_edge_orientation,

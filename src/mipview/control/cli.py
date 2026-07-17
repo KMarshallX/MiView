@@ -246,8 +246,9 @@ def _build_parser() -> argparse.ArgumentParser:
         "graph",
         help="Inspect and edit projection graphs in open patch windows.",
         description=(
-            "Graph commands use an open patch window session ID and 2D oriented "
-            "projection coordinates, not source voxel or screen coordinates."
+            "Graph commands use an open patch window session ID. Projection nodes "
+            "resolve depth from the current MIP/MinIP; voxel nodes use patch-local "
+            "source-array coordinates."
         ),
         formatter_class=_HelpFormatter,
     )
@@ -281,6 +282,14 @@ def _build_parser() -> argparse.ArgumentParser:
     graph_add_node.add_argument("view", metavar="VIEW")
     graph_add_node.add_argument("horizontal", metavar="HORIZONTAL", type=int)
     graph_add_node.add_argument("vertical", metavar="VERTICAL", type=int)
+    graph_add_voxel_node = graph_subparsers.add_parser(
+        "add-voxel-node",
+        help="Create a node at an explicit patch-local source voxel.",
+    )
+    graph_add_voxel_node.add_argument("session_id", metavar="SESSION_ID")
+    graph_add_voxel_node.add_argument("x", metavar="X", type=int)
+    graph_add_voxel_node.add_argument("y", metavar="Y", type=int)
+    graph_add_voxel_node.add_argument("z", metavar="Z", type=int)
     graph_delete_node = graph_subparsers.add_parser(
         "delete-node", help="Delete a graph node and its connected edges."
     )
@@ -518,6 +527,17 @@ def _command_from_args(args: argparse.Namespace) -> tuple[str, dict[str, Any], A
                     "view": args.view,
                     "horizontal": args.horizontal,
                     "vertical": args.vertical,
+                },
+                None,
+            )
+        if args.graph_command == "add-voxel-node":
+            return (
+                "graph.add_voxel_node",
+                {
+                    "session_id": args.session_id,
+                    "x": args.x,
+                    "y": args.y,
+                    "z": args.z,
                 },
                 None,
             )

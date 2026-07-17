@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import logging
 import os
 from pathlib import Path
@@ -12,6 +13,11 @@ from mipview.annotation.annotation_mask import AnnotationMask
 from mipview.annotation.brush import erase_disk, paint_disk
 from mipview.annotation.undo import AnnotationUndoStack
 from mipview.graph.state import ProjectionGraphState
+from mipview.graph.model import ProjectionGraphLayer, VoxelPoint
+from mipview.graph.spatial import (
+    resolve_projection_voxel,
+    update_control_point_from_projection,
+)
 from mipview.ui.drop_loading import first_supported_local_nifti_path
 from mipview.state.cursor_state import CursorState
 from mipview.state.zoom_state import ZoomState
@@ -94,6 +100,8 @@ class TriPlanarViewerWidget(QWidget):
         self.zoom_state = ZoomState(self, maximum_zoom=maximum_zoom)
         self.patch_selector = PatchSelector(DEFAULT_PATCH_SIZE)
         self._projection_mode = "MIP"
+        self._projection_segmentation_enabled = True
+        self._projection_segmentation_source: str | None = "all"
         self._active_view: Orientation | None = None
         self._drop_loading_enabled = False
         self._projection_enabled: dict[str, bool] = {
@@ -369,6 +377,23 @@ class TriPlanarViewerWidget(QWidget):
     def projection_mode(self) -> str:
         return self._projection_mode
 
+    def set_projection_segmentation_enabled(self, enabled: bool) -> None:
+        normalized = bool(enabled)
+        if self._projection_segmentation_enabled == normalized:
+            return
+        self._projection_segmentation_enabled = normalized
+        self._update_projection_overrides()
+
+    def set_projection_segmentation_source(self, source: str | None) -> None:
+        if source not in {None, "file", "annotation", "all"}:
+            raise ValueError(
+                "Projection segmentation source must be file, annotation, all, or None."
+            )
+        if self._projection_segmentation_source == source:
+            return
+        self._projection_segmentation_source = source
+        self._update_projection_overrides()
+
     def projection_enabled(self, orientation: Orientation) -> bool:
         return bool(self._projection_enabled.get(orientation, False))
 
@@ -393,7 +418,7 @@ class TriPlanarViewerWidget(QWidget):
     def refresh_graph_overlay(self) -> None:
         graph_state = self._projection_graph_state
         for view in self._views:
-            if graph_state is None:
+            if graph_state is None or self._display_volume is None:
                 view.set_graph_overlay(
                     None,
                     editing_enabled=False,
@@ -408,13 +433,16 @@ class TriPlanarViewerWidget(QWidget):
                     angle_vectors=(),
                 )
                 continue
-            pending_node_id = (
-                graph_state.pending_edge_node_id
-                if graph_state.pending_edge_orientation == view.orientation
-                else None
+            layer = graph_state.projected_layer(
+                view.orientation,
+                self._display_volume,
+            )
+            layer = replace(
+                layer,
+                node_hit_priorities=self._graph_node_hit_priorities(layer),
             )
             view.set_graph_overlay(
-                graph_state.layer(view.orientation),
+                layer,
                 editing_enabled=(
                     graph_state.editing_enabled
                     and self.projection_enabled(view.orientation)
@@ -423,13 +451,9 @@ class TriPlanarViewerWidget(QWidget):
                 opacity=graph_state.opacity,
                 node_size=graph_state.node_size,
                 edge_thickness=graph_state.edge_thickness,
-                pending_node_id=pending_node_id,
+                pending_node_id=graph_state.pending_edge_node_id,
                 active_tool=graph_state.active_tool,
-                selected_edge=(
-                    graph_state.selected_edge
-                    if graph_state.selected_edge_orientation == view.orientation
-                    else None
-                ),
+                selected_edge=graph_state.selected_edge,
                 curve_handle_visible=graph_state.selected_edge is not None,
                 angle_vectors=tuple(
                     vector
@@ -441,6 +465,62 @@ class TriPlanarViewerWidget(QWidget):
                     if vector is not None and vector.orientation == view.orientation
                 ),
             )
+
+    def graph_projected_layer(
+        self,
+        orientation: Orientation,
+    ) -> ProjectionGraphLayer:
+        if self._projection_graph_state is None or self._display_volume is None:
+            raise ValueError("Graph projection geometry is not available.")
+        return self._projection_graph_state.projected_layer(
+            orientation,
+            self._display_volume,
+        )
+
+    def resolve_graph_projection_voxel(
+        self,
+        orientation: Orientation,
+        horizontal_index: int,
+        vertical_index: int,
+    ) -> tuple[int, int, int]:
+        if self._display_volume is None:
+            raise ValueError("Graph projection geometry is not available.")
+        source_cursor = self.cursor_state.cursor_position()
+        preferred_display = (
+            None
+            if source_cursor is None
+            else self._display_volume.source_to_display(source_cursor)
+        )
+        return resolve_projection_voxel(
+            self._display_volume,
+            orientation,
+            self._projection_mode,
+            horizontal_index,
+            vertical_index,
+            mask_display_data=(
+                None
+                if self._projection_mask_display_volume is None
+                else self._projection_mask_display_volume.display_data
+            ),
+            preferred_display_voxel=preferred_display,
+        )
+
+    def graph_control_point_from_projection(
+        self,
+        source_control_point: VoxelPoint,
+        orientation: Orientation,
+        horizontal: float,
+        vertical: float,
+    ) -> VoxelPoint:
+        if self._display_volume is None:
+            raise ValueError("Graph projection geometry is not available.")
+        return update_control_point_from_projection(
+            source_control_point,
+            self._display_volume,
+            orientation,
+            horizontal,
+            vertical,
+        )
 
     def set_drop_loading_enabled(self, enabled: bool) -> None:
         self._drop_loading_enabled = enabled
@@ -714,21 +794,34 @@ class TriPlanarViewerWidget(QWidget):
     def _sync_graph_plane_shapes(self) -> None:
         if self._display_volume is None or self._projection_graph_state is None:
             return
-        cleared_orientations: list[Orientation] = []
-        for orientation in ("axial", "coronal", "sagittal"):
-            plane_shape = plane_shape_for_orientation(
-                self._display_volume.display_shape,
-                orientation,
+        if self._projection_graph_state.set_volume_geometry(
+            self._display_volume.source_shape,
+            self._display_volume.source_to_display_affine,
+        ):
+            self.graph_layers_cleared.emit(("axial", "coronal", "sagittal"))
+
+    def _graph_node_hit_priorities(
+        self,
+        layer: ProjectionGraphLayer,
+    ) -> dict[int, int]:
+        if self._projection_graph_state is None:
+            return {}
+        priorities: dict[int, int] = {}
+        for node_id, projected_node in layer.nodes.items():
+            try:
+                extremum_voxel = self.resolve_graph_projection_voxel(
+                    layer.orientation,
+                    int(round(projected_node.horizontal_index)),
+                    int(round(projected_node.vertical_index)),
+                )
+            except ValueError:
+                priorities[node_id] = 1
+                continue
+            priorities[node_id] = int(
+                self._projection_graph_state.graph.nodes[node_id].position()
+                != extremum_voxel
             )
-            if self._projection_graph_state.layer(orientation).set_plane_shape(
-                plane_shape
-            ):
-                cleared_orientations.append(orientation)
-        if cleared_orientations:
-            self._projection_graph_state.invalidate_orientations(
-                tuple(cleared_orientations)
-            )
-            self.graph_layers_cleared.emit(tuple(cleared_orientations))
+        return priorities
 
     def _update_shared_base_scale(self) -> None:
         if self._display_volume is None:
@@ -865,14 +958,26 @@ class TriPlanarViewerWidget(QWidget):
                 ),
             )
             segmentation_projection_slice = None
-            if self._segmentation_display_volume is not None:
+            if (
+                self._projection_segmentation_enabled
+                and self._projection_segmentation_source in {"file", "all"}
+                and self._segmentation_display_volume is not None
+            ):
                 segmentation_projection_slice = project_oriented_volume(
                     self._segmentation_display_volume.display_data,
                     view.orientation,
-                    self._projection_mode,
+                    (
+                        self._projection_mode
+                        if self._projection_segmentation_source == "all"
+                        else "MIP"
+                    ),
                 )
             annotation_projection_slice = None
-            if self._annotation_display_volume is not None:
+            if (
+                self._projection_segmentation_enabled
+                and self._projection_segmentation_source in {"annotation", "all"}
+                and self._annotation_display_volume is not None
+            ):
                 annotation_projection_slice = project_oriented_volume(
                     self._annotation_display_volume.display_data,
                     view.orientation,

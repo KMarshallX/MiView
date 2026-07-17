@@ -382,11 +382,30 @@ class MipViewController:
             {
                 "session_id": session_id,
                 "view": orientation,
-                "node": {
-                    "id": node.id,
-                    "horizontal_index": node.horizontal_index,
-                    "vertical_index": node.vertical_index,
-                },
+                "node": patch_window.graph_node_payload(node, orientation),
+            },
+        )
+
+    def add_graph_voxel_node(
+        self,
+        session_id: str,
+        x: int,
+        y: int,
+        z: int,
+    ) -> CommandResult:
+        patch_window = self._graph_patch_window(session_id)
+        if patch_window is None:
+            return self._graph_session_not_found(session_id)
+        try:
+            node = patch_window.add_graph_voxel_node(int(x), int(y), int(z))
+        except ValueError as exc:
+            return CommandResult(False, str(exc), {"session_id": session_id})
+        return CommandResult(
+            True,
+            "Graph voxel node created.",
+            {
+                "session_id": session_id,
+                "node": patch_window.graph_node_payload(node),
             },
         )
 
@@ -467,7 +486,10 @@ class MipViewController:
             )
         except (TypeError, ValueError) as exc:
             return CommandResult(False, str(exc), {"session_id": session_id})
-        control = patch_window.graph_state.layer(orientation).curve_control_points[edge]
+        projected_control = patch_window.slice_viewer.graph_projected_layer(
+            orientation
+        ).curve_control_points[edge]
+        voxel_control = patch_window.graph_state.graph.curve_control_points[edge]
         return CommandResult(
             True,
             "Graph edge curved.",
@@ -477,7 +499,13 @@ class MipViewController:
                 "edge": {
                     "start_node_id": edge.start_node_id,
                     "end_node_id": edge.end_node_id,
-                    "control_point": [float(control[0]), float(control[1])],
+                    "control_point": [
+                        float(projected_control[0]),
+                        float(projected_control[1]),
+                    ],
+                    "control_patch_voxel": [
+                        float(value) for value in voxel_control
+                    ],
                 },
             },
         )
@@ -547,11 +575,7 @@ class MipViewController:
             {
                 "session_id": session_id,
                 "view": orientation,
-                "node": {
-                    "id": node.id,
-                    "horizontal_index": node.horizontal_index,
-                    "vertical_index": node.vertical_index,
-                },
+                "node": patch_window.graph_node_payload(node, orientation),
                 "edges": [
                     {
                         "start_node_id": first_edge.start_node_id,

@@ -46,6 +46,7 @@ from mipview.ui.annotation_panel import AnnotationPanel
 from mipview.ui.cursor_panel import CursorInspectionPanel
 from mipview.ui.drop_load_choice_dialog import DropLoadChoice, DropLoadChoiceDialog
 from mipview.ui.drop_loading import first_supported_local_nifti_path
+from mipview.ui.overlay_opacity_control_bar import OverlayOpacityControlBar
 from mipview.ui.patch_window import PatchViewerWindow
 from mipview.ui.segmentation_config_window import SegmentationConfigWindow
 from mipview.ui.tool_actions import apply_tool_to_volume
@@ -83,6 +84,10 @@ class MainWindow(QMainWindow):
         self.cursor_panel = CursorInspectionPanel()
         self.annotation_panel = AnnotationPanel()
         self.contrast_control_bar = ContrastControlBar(self)
+        self.overlay_opacity_control_bar = OverlayOpacityControlBar(
+            self,
+            opacity=self.state.segmentation_opacity,
+        )
         self.cursor_overlay_action: QAction | None = None
         self.ruler_action: QAction | None = None
         self._cursor_overlay_checked_before_patch = True
@@ -103,6 +108,9 @@ class MainWindow(QMainWindow):
             self._on_active_segmentation_changed
         )
         self.segmentation_config_window.opacity_changed.connect(
+            self._on_segmentation_opacity_changed
+        )
+        self.overlay_opacity_control_bar.opacity_changed.connect(
             self._on_segmentation_opacity_changed
         )
         self.segmentation_config_window.unload_segmentation_requested.connect(
@@ -188,6 +196,7 @@ class MainWindow(QMainWindow):
         self._main_splitter = splitter
 
         content_layout.addWidget(self.contrast_control_bar)
+        content_layout.addWidget(self.overlay_opacity_control_bar)
         content_layout.addWidget(splitter, 1)
         self._setup_loading_progress_bar()
         content_layout.addWidget(self.loading_progress_bar)
@@ -427,6 +436,9 @@ class MainWindow(QMainWindow):
                 if active_segmentation is not None and active_segmentation.kind == "file"
                 else None
             ),
+            active_segmentation_kind=(
+                None if active_segmentation is None else active_segmentation.kind
+            ),
             projection_mask_layers=self._projection_mask_layers_for_bounds(bounds),
             segmentation_opacity=self.state.segmentation_opacity,
             annotation_mask=active_annotation_patch,
@@ -458,6 +470,9 @@ class MainWindow(QMainWindow):
         )
         patch_window.annotation_opacity_changed.connect(
             self._on_annotation_opacity_changed
+        )
+        patch_window.overlay_opacity_changed.connect(
+            self._on_segmentation_opacity_changed
         )
         patch_window.annotation_active_label_changed.connect(
             self._on_annotation_active_label_changed
@@ -1191,6 +1206,10 @@ class MainWindow(QMainWindow):
             self._on_annotation_opacity_changed(opacity)
             return
         self.state.segmentation_opacity = min(max(opacity, 0.0), 1.0)
+        self.segmentation_config_window.set_opacity(self.state.segmentation_opacity)
+        self.overlay_opacity_control_bar.set_opacity(
+            self.state.segmentation_opacity
+        )
         self.slice_viewer.set_segmentation_overlay_opacity(self.state.segmentation_opacity)
         self._update_patch_windows_segmentation_opacity_for_current_image()
 
@@ -1204,12 +1223,21 @@ class MainWindow(QMainWindow):
 
     def _apply_active_segmentation_overlay(self) -> None:
         active_segmentation = self._active_segmentation()
-        if active_segmentation is None or active_segmentation.kind == "annotation":
+        if active_segmentation is None:
             self.slice_viewer.set_segmentation_overlay(
                 None,
                 opacity=self.state.segmentation_opacity,
             )
             self._update_patch_windows_segmentation_for_current_image(None)
+            return
+        if active_segmentation.kind == "annotation":
+            self.slice_viewer.set_segmentation_overlay(
+                None,
+                opacity=self.state.segmentation_opacity,
+            )
+            self._update_patch_windows_segmentation_for_current_image(
+                active_segmentation
+            )
             return
         self.slice_viewer.set_segmentation_overlay(
             active_segmentation.volume,
@@ -1247,11 +1275,13 @@ class MainWindow(QMainWindow):
             ],
             self.state.active_segmentation_id,
         )
-        self.segmentation_config_window.set_opacity(
+        active_opacity = (
             self.state.annotation.opacity
             if self._active_segmentation_is_annotation()
             else self.state.segmentation_opacity
         )
+        self.segmentation_config_window.set_opacity(active_opacity)
+        self.overlay_opacity_control_bar.set_opacity(active_opacity)
         self._update_patch_windows_projection_masks_for_current_image()
         self._sync_patch_windows_segmentation_menu_state()
 
@@ -1307,11 +1337,17 @@ class MainWindow(QMainWindow):
                 patch_window.update_segmentation_overlay(
                     None,
                     opacity=self.state.segmentation_opacity,
+                    active_segmentation_kind=(
+                        None
+                        if active_segmentation is None
+                        else active_segmentation.kind
+                    ),
                 )
                 continue
             patch_window.update_segmentation_overlay(
                 extract_patch(active_segmentation.volume, bounds),
                 opacity=self.state.segmentation_opacity,
+                active_segmentation_kind=active_segmentation.kind,
             )
 
     def _projection_mask_layers_for_bounds(

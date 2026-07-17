@@ -784,13 +784,14 @@ class SliceViewerWidget(QWidget):
         node_hits = [
             (
                 float(np.hypot(label_position.x() - point.x(), label_position.y() - point.y())),
+                self._graph_layer.node_hit_priorities.get(node_id, 1),
                 node_id,
             )
             for node_id, point in node_positions.items()
         ]
         node_hits = [hit for hit in node_hits if hit[0] <= node_tolerance]
         if node_hits:
-            _, node_id = min(node_hits)
+            _, _, node_id = min(node_hits)
             return {"kind": "node", "node_id": node_id}
 
         edge_tolerance = max((self._graph_edge_thickness / 2.0) + 4.0, 6.0)

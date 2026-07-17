@@ -3,20 +3,34 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import math
 
-from mipview.graph.curve import (
-    nearest_quadratic_bezier_parameter,
-    split_quadratic_bezier,
-)
 from mipview.viewer.slice_geometry import Orientation
+
+
+VoxelPoint = tuple[float, float, float]
 
 
 @dataclass(frozen=True)
 class GraphNode:
-    id: int
-    horizontal_index: int
-    vertical_index: int
+    """A graph node in patch-local source voxel coordinates."""
 
-    def position(self) -> tuple[int, int]:
+    id: int
+    x: int
+    y: int
+    z: int
+
+    def position(self) -> tuple[int, int, int]:
+        return (self.x, self.y, self.z)
+
+
+@dataclass(frozen=True)
+class ProjectedGraphNode:
+    """A read-only 2D projection of a shared graph node."""
+
+    id: int
+    horizontal_index: float
+    vertical_index: float
+
+    def position(self) -> tuple[float, float]:
         return (self.horizontal_index, self.vertical_index)
 
 
@@ -34,38 +48,45 @@ class GraphEdge:
         return cls(min(first, second), max(first, second))
 
 
-@dataclass
+@dataclass(frozen=True)
 class ProjectionGraphLayer:
+    """Read-only rendering geometry derived from one shared voxel graph."""
+
     orientation: Orientation
-    plane_shape: tuple[int, int] | None = None
+    plane_shape: tuple[int, int]
+    nodes: dict[int, ProjectedGraphNode]
+    edges: frozenset[GraphEdge]
+    curve_control_points: dict[GraphEdge, tuple[float, float]]
+    node_hit_priorities: dict[int, int] = field(default_factory=dict)
+
+
+@dataclass
+class VoxelGraph:
+    """Session graph whose authoritative coordinates are patch-local voxels."""
+
+    volume_shape: tuple[int, int, int] | None = None
     nodes: dict[int, GraphNode] = field(default_factory=dict)
     edges: set[GraphEdge] = field(default_factory=set)
-    curve_control_points: dict[GraphEdge, tuple[float, float]] = field(
-        default_factory=dict
-    )
+    curve_control_points: dict[GraphEdge, VoxelPoint] = field(default_factory=dict)
     _next_node_id: int = 1
 
-    def set_plane_shape(self, plane_shape: tuple[int, int]) -> bool:
-        width, height = (int(plane_shape[0]), int(plane_shape[1]))
-        if width <= 0 or height <= 0:
-            raise ValueError(f"Graph projection shape must be positive, got {(width, height)}.")
-        normalized_shape = (width, height)
-        if self.plane_shape == normalized_shape:
+    def set_volume_shape(self, volume_shape: tuple[int, int, int]) -> bool:
+        normalized = tuple(int(value) for value in volume_shape)
+        if len(normalized) != 3 or any(value <= 0 for value in normalized):
+            raise ValueError(f"Graph volume shape must be positive 3D, got {normalized}.")
+        if self.volume_shape == normalized:
             return False
         cleared = bool(self.nodes or self.edges)
         self.clear()
-        self.plane_shape = normalized_shape
+        self.volume_shape = normalized
         return cleared
 
-    def add_node(self, horizontal_index: int, vertical_index: int) -> GraphNode:
-        horizontal = int(horizontal_index)
-        vertical = int(vertical_index)
-        self._validate_position(horizontal, vertical)
-        if any(node.position() == (horizontal, vertical) for node in self.nodes.values()):
-            raise ValueError(
-                f"A graph node already exists at projection coordinate {(horizontal, vertical)}."
-            )
-        node = GraphNode(self._next_node_id, horizontal, vertical)
+    def add_node(self, x: int, y: int, z: int) -> GraphNode:
+        position = (int(x), int(y), int(z))
+        self._validate_node_position(position)
+        if any(node.position() == position for node in self.nodes.values()):
+            raise ValueError(f"A graph node already exists at patch voxel {position}.")
+        node = GraphNode(self._next_node_id, *position)
         self.nodes[node.id] = node
         self._next_node_id += 1
         return node
@@ -81,11 +102,7 @@ class ProjectionGraphLayer:
             for edge in self.edges
             if normalized_id in (edge.start_node_id, edge.end_node_id)
         }
-        self.edges = {
-            edge
-            for edge in self.edges
-            if normalized_id not in (edge.start_node_id, edge.end_node_id)
-        }
+        self.edges.difference_update(removed_edges)
         for edge in removed_edges:
             self.curve_control_points.pop(edge, None)
         return node
@@ -114,16 +131,16 @@ class ProjectionGraphLayer:
         self,
         first_node_id: int,
         second_node_id: int,
-        control_point: tuple[float, float],
+        control_point: VoxelPoint,
     ) -> GraphEdge:
         edge = GraphEdge.between(first_node_id, second_node_id)
         if edge not in self.edges:
             raise ValueError(
                 f"Graph edge {edge.start_node_id}-{edge.end_node_id} does not exist."
             )
-        horizontal, vertical = (float(control_point[0]), float(control_point[1]))
-        self._validate_control_point(horizontal, vertical)
-        self.curve_control_points[edge] = (horizontal, vertical)
+        normalized = tuple(float(value) for value in control_point)
+        self._validate_control_point(normalized)
+        self.curve_control_points[edge] = normalized
         return edge
 
     def straighten_edge(self, first_node_id: int, second_node_id: int) -> GraphEdge:
@@ -135,7 +152,12 @@ class ProjectionGraphLayer:
         self.curve_control_points.pop(edge, None)
         return edge
 
-    def ensure_curve_control_point(self, edge: GraphEdge) -> tuple[float, float]:
+    def ensure_curve_control_point(self, edge: GraphEdge) -> VoxelPoint:
+        control_point = self.curve_control_point_or_midpoint(edge)
+        self.curve_control_points[edge] = control_point
+        return control_point
+
+    def curve_control_point_or_midpoint(self, edge: GraphEdge) -> VoxelPoint:
         if edge not in self.edges:
             raise ValueError(
                 f"Graph edge {edge.start_node_id}-{edge.end_node_id} does not exist."
@@ -143,61 +165,56 @@ class ProjectionGraphLayer:
         existing = self.curve_control_points.get(edge)
         if existing is not None:
             return existing
-        start = self.nodes[edge.start_node_id]
-        end = self.nodes[edge.end_node_id]
-        midpoint = (
-            (start.horizontal_index + end.horizontal_index) / 2.0,
-            (start.vertical_index + end.vertical_index) / 2.0,
-        )
-        self.curve_control_points[edge] = midpoint
-        return midpoint
+        start = self.nodes[edge.start_node_id].position()
+        end = self.nodes[edge.end_node_id].position()
+        midpoint = tuple((start[index] + end[index]) / 2.0 for index in range(3))
+        return midpoint  # type: ignore[return-value]
 
-    def split_edge(
+    def split_edge_at_parameter(
         self,
         first_node_id: int,
         second_node_id: int,
-        near_position: tuple[int, int] | tuple[float, float],
+        parameter: float,
     ) -> tuple[GraphNode, GraphEdge, GraphEdge]:
-        """Insert a node at the nearest edge point and replace the edge in two."""
+        """Split an edge transactionally at a parameter derived from a projection."""
         edge = GraphEdge.between(first_node_id, second_node_id)
         if edge not in self.edges:
             raise ValueError(
                 f"Graph edge {edge.start_node_id}-{edge.end_node_id} does not exist."
             )
-        start_node = self.nodes[edge.start_node_id]
-        end_node = self.nodes[edge.end_node_id]
-        start = (float(start_node.horizontal_index), float(start_node.vertical_index))
-        end = (float(end_node.horizontal_index), float(end_node.vertical_index))
-        point = (float(near_position[0]), float(near_position[1]))
+        t = min(max(float(parameter), 0.0), 1.0)
+        start = tuple(float(v) for v in self.nodes[edge.start_node_id].position())
+        end = tuple(float(v) for v in self.nodes[edge.end_node_id].position())
         control = self.curve_control_points.get(edge)
         if control is None:
-            parameter = _nearest_segment_parameter(point, start, end)
-            split_point = (
-                start[0] + ((end[0] - start[0]) * parameter),
-                start[1] + ((end[1] - start[1]) * parameter),
-            )
+            split_point = _interpolate_3d(start, end, t)
             left_control = None
             right_control = None
         else:
-            parameter = nearest_quadratic_bezier_parameter(
-                point,
-                start,
-                control,
-                end,
-            )
-            split_point, left_control, right_control = split_quadratic_bezier(
-                start,
-                control,
-                end,
-                parameter,
-            )
+            left_control = _interpolate_3d(start, control, t)
+            right_control = _interpolate_3d(control, end, t)
+            split_point = _interpolate_3d(left_control, right_control, t)
 
-        horizontal = int(round(split_point[0]))
-        vertical = int(round(split_point[1]))
-        new_node = self.add_node(horizontal, vertical)
-        self.delete_edge(edge.start_node_id, edge.end_node_id)
-        first_edge = self.add_edge(edge.start_node_id, new_node.id)
-        second_edge = self.add_edge(new_node.id, edge.end_node_id)
+        rounded = tuple(int(round(value)) for value in split_point)
+        self._validate_node_position(rounded)
+        endpoint_positions = {
+            self.nodes[edge.start_node_id].position(),
+            self.nodes[edge.end_node_id].position(),
+        }
+        if rounded in endpoint_positions:
+            raise ValueError("Graph edge split is too close to an endpoint voxel.")
+        if any(node.position() == rounded for node in self.nodes.values()):
+            raise ValueError(f"A graph node already exists at patch voxel {rounded}.")
+
+        new_node = GraphNode(self._next_node_id, *rounded)
+        first_edge = GraphEdge.between(edge.start_node_id, new_node.id)
+        second_edge = GraphEdge.between(new_node.id, edge.end_node_id)
+
+        self.edges.remove(edge)
+        self.curve_control_points.pop(edge, None)
+        self.nodes[new_node.id] = new_node
+        self._next_node_id += 1
+        self.edges.update((first_edge, second_edge))
         if left_control is not None and right_control is not None:
             self.curve_control_points[first_edge] = left_control
             self.curve_control_points[second_edge] = right_control
@@ -209,14 +226,15 @@ class ProjectionGraphLayer:
         self.curve_control_points.clear()
         self._next_node_id = 1
 
-    def _validate_position(self, horizontal_index: int, vertical_index: int) -> None:
-        if self.plane_shape is None:
-            raise ValueError("Graph projection shape is not available.")
-        width, height = self.plane_shape
-        if not (0 <= horizontal_index < width and 0 <= vertical_index < height):
+    def _validate_node_position(self, position: tuple[int, int, int]) -> None:
+        if self.volume_shape is None:
+            raise ValueError("Graph volume shape is not available.")
+        if any(
+            coordinate < 0 or coordinate >= self.volume_shape[axis]
+            for axis, coordinate in enumerate(position)
+        ):
             raise ValueError(
-                "Graph node projection coordinate "
-                f"{(horizontal_index, vertical_index)} is outside shape {self.plane_shape}."
+                f"Graph node patch voxel {position} is outside shape {self.volume_shape}."
             )
 
     def _validate_edge_endpoints(self, edge: GraphEdge) -> None:
@@ -228,31 +246,22 @@ class ProjectionGraphLayer:
         if missing:
             raise ValueError(f"Graph edge references missing node(s): {missing}.")
 
-    def _validate_control_point(self, horizontal: float, vertical: float) -> None:
-        if self.plane_shape is None:
-            raise ValueError("Graph projection shape is not available.")
-        if not math.isfinite(horizontal) or not math.isfinite(vertical):
+    def _validate_control_point(self, point: VoxelPoint) -> None:
+        if self.volume_shape is None:
+            raise ValueError("Graph volume shape is not available.")
+        if not all(math.isfinite(value) for value in point):
             raise ValueError("Curve control point coordinates must be finite.")
-        width, height = self.plane_shape
-        if not (0.0 <= horizontal <= width - 1 and 0.0 <= vertical <= height - 1):
+        if any(
+            coordinate < 0.0 or coordinate > self.volume_shape[axis] - 1
+            for axis, coordinate in enumerate(point)
+        ):
             raise ValueError(
-                "Curve control point "
-                f"{(horizontal, vertical)} is outside shape {self.plane_shape}."
+                f"Curve control point {point} is outside shape {self.volume_shape}."
             )
 
 
-def _nearest_segment_parameter(
-    point: tuple[float, float],
-    start: tuple[float, float],
-    end: tuple[float, float],
-) -> float:
-    delta_x = end[0] - start[0]
-    delta_y = end[1] - start[1]
-    squared_length = (delta_x * delta_x) + (delta_y * delta_y)
-    if squared_length <= 0.0:
-        return 0.0
-    parameter = (
-        ((point[0] - start[0]) * delta_x)
-        + ((point[1] - start[1]) * delta_y)
-    ) / squared_length
-    return min(max(parameter, 0.0), 1.0)
+def _interpolate_3d(start: VoxelPoint, end: VoxelPoint, t: float) -> VoxelPoint:
+    return tuple(
+        start[index] + ((end[index] - start[index]) * t)
+        for index in range(3)
+    )  # type: ignore[return-value]

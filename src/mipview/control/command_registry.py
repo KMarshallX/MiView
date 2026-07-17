@@ -57,6 +57,7 @@ class CommandRegistry:
         self.register("graph.activate", self.controller.set_graph_active)
         self.register("graph.set_display", self.controller.set_graph_display)
         self.register("graph.add_node", self.controller.add_graph_node)
+        self.register("graph.add_voxel_node", self.controller.add_graph_voxel_node)
         self.register("graph.delete_node", self.controller.delete_graph_node)
         self.register("graph.add_edge", self.controller.add_graph_edge)
         self.register("graph.delete_edge", self.controller.delete_graph_edge)

@@ -42,7 +42,7 @@ class SegmentationConfigWindow(QMainWindow):
             self._on_segmentation_context_menu_requested
         )
 
-        self.opacity_label = QLabel("Overlay Opacity", container)
+        self.opacity_label = QLabel("Overlay Opacity:", container)
         self.opacity_slider = QSlider(Qt.Orientation.Horizontal, container)
         self.opacity_slider.setRange(0, 100)
         self.opacity_slider.setValue(50)
