@@ -38,12 +38,30 @@ node is placed at the nearest projection index on the edge, the original edge is
 replaced by two connected edges, and quadratic subdivision preserves curved-edge
 geometry.
 
+Right-clicking a straight edge also offers **Display the normal line**. It draws
+a one-pixel fluorescent-yellow dashed line through the projected edge midpoint,
+normal to the edge and extended to the projection boundaries. The menu changes
+to **Hide the normal line** while that view-specific construction line is shown.
+Only one normal line is retained at a time, and curving, splitting, deleting, or
+clearing its edge removes it.
+
+The same straight-edge menu offers **Display the extension line**. It draws a
+one-pixel fluorescent-blue dashed supporting line through both projected edge
+endpoints and extends it to the projection boundaries. The original solid edge
+is drawn above the construction line, leaving the dashed extensions visible
+beyond its endpoints. The menu changes to **Hide the extension line** while it
+is shown. One view-specific extension line is retained at a time, independently
+of the normal line, and it follows the same automatic removal rules.
+
 **Calculate Angle** selects four shared nodes in source/target order for two
 directed vectors. All four selections must use one orientation because the result
 is the projected view angle, not a 3D angle. It uses physical in-plane voxel
 spacing and is therefore not distorted by anisotropic voxels. Yellow arrows and
 the result remain until **Clear Angle**; **Cancel** discards only an incomplete
 replacement measurement.
+
+**Clear All Nodes & Edges** clears the shared graph in every orientation,
+including curve controls, pending interactions, and stored angle measurements.
 
 Rendering uses direct `QPainter` primitives and `QPainterPath`, so graph memory
 grows with node and edge count rather than patch-volume size.
