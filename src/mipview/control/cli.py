@@ -246,8 +246,9 @@ def _build_parser() -> argparse.ArgumentParser:
         "graph",
         help="Inspect and edit projection graphs in open patch windows.",
         description=(
-            "Graph commands use an open patch window session ID and 2D oriented "
-            "projection coordinates, not source voxel or screen coordinates."
+            "Graph commands use an open patch window session ID. Projection nodes "
+            "resolve depth from the current MIP/MinIP; voxel nodes use patch-local "
+            "source-array coordinates."
         ),
         formatter_class=_HelpFormatter,
     )
@@ -281,6 +282,14 @@ def _build_parser() -> argparse.ArgumentParser:
     graph_add_node.add_argument("view", metavar="VIEW")
     graph_add_node.add_argument("horizontal", metavar="HORIZONTAL", type=int)
     graph_add_node.add_argument("vertical", metavar="VERTICAL", type=int)
+    graph_add_voxel_node = graph_subparsers.add_parser(
+        "add-voxel-node",
+        help="Create a node at an explicit patch-local source voxel.",
+    )
+    graph_add_voxel_node.add_argument("session_id", metavar="SESSION_ID")
+    graph_add_voxel_node.add_argument("x", metavar="X", type=int)
+    graph_add_voxel_node.add_argument("y", metavar="Y", type=int)
+    graph_add_voxel_node.add_argument("z", metavar="Z", type=int)
     graph_delete_node = graph_subparsers.add_parser(
         "delete-node", help="Delete a graph node and its connected edges."
     )
@@ -317,6 +326,28 @@ def _build_parser() -> argparse.ArgumentParser:
     graph_straighten_edge.add_argument("view", metavar="VIEW")
     graph_straighten_edge.add_argument("start_node_id", metavar="START_NODE_ID", type=int)
     graph_straighten_edge.add_argument("end_node_id", metavar="END_NODE_ID", type=int)
+    graph_normal_line = graph_subparsers.add_parser(
+        "normal-line",
+        help="Show or hide the projected normal through a straight graph edge.",
+    )
+    graph_normal_line.add_argument("session_id", metavar="SESSION_ID")
+    graph_normal_line.add_argument("view", metavar="VIEW")
+    graph_normal_line.add_argument("start_node_id", metavar="START_NODE_ID", type=int)
+    graph_normal_line.add_argument("end_node_id", metavar="END_NODE_ID", type=int)
+    graph_normal_line.add_argument("visibility", choices=("show", "hide"))
+    graph_extension_line = graph_subparsers.add_parser(
+        "extension-line",
+        help="Show or hide the projected extension through a straight graph edge.",
+    )
+    graph_extension_line.add_argument("session_id", metavar="SESSION_ID")
+    graph_extension_line.add_argument("view", metavar="VIEW")
+    graph_extension_line.add_argument(
+        "start_node_id", metavar="START_NODE_ID", type=int
+    )
+    graph_extension_line.add_argument(
+        "end_node_id", metavar="END_NODE_ID", type=int
+    )
+    graph_extension_line.add_argument("visibility", choices=("show", "hide"))
     graph_split_edge = graph_subparsers.add_parser(
         "split-edge", help="Create a node on an edge and replace it with two edges."
     )
@@ -339,6 +370,10 @@ def _build_parser() -> argparse.ArgumentParser:
         "clear-angle", help="Clear the stored graph angle measurement."
     )
     graph_clear_angle.add_argument("session_id", metavar="SESSION_ID")
+    graph_clear = graph_subparsers.add_parser(
+        "clear", help="Clear all graph nodes, edges, curves, and measurements."
+    )
+    graph_clear.add_argument("session_id", metavar="SESSION_ID")
 
     annotation_parser = subparsers.add_parser(
         "annotation",
@@ -521,6 +556,17 @@ def _command_from_args(args: argparse.Namespace) -> tuple[str, dict[str, Any], A
                 },
                 None,
             )
+        if args.graph_command == "add-voxel-node":
+            return (
+                "graph.add_voxel_node",
+                {
+                    "session_id": args.session_id,
+                    "x": args.x,
+                    "y": args.y,
+                    "z": args.z,
+                },
+                None,
+            )
         if args.graph_command == "delete-node":
             return (
                 "graph.delete_node",
@@ -569,6 +615,30 @@ def _command_from_args(args: argparse.Namespace) -> tuple[str, dict[str, Any], A
                 arguments,
                 None,
             )
+        if args.graph_command == "normal-line":
+            return (
+                "graph.set_normal_line",
+                {
+                    "session_id": args.session_id,
+                    "view": args.view,
+                    "start_node_id": args.start_node_id,
+                    "end_node_id": args.end_node_id,
+                    "visible": args.visibility == "show",
+                },
+                None,
+            )
+        if args.graph_command == "extension-line":
+            return (
+                "graph.set_extension_line",
+                {
+                    "session_id": args.session_id,
+                    "view": args.view,
+                    "start_node_id": args.start_node_id,
+                    "end_node_id": args.end_node_id,
+                    "visible": args.visibility == "show",
+                },
+                None,
+            )
         if args.graph_command == "split-edge":
             return (
                 "graph.split_edge",
@@ -597,6 +667,8 @@ def _command_from_args(args: argparse.Namespace) -> tuple[str, dict[str, Any], A
             )
         if args.graph_command == "clear-angle":
             return "graph.clear_angle", {"session_id": args.session_id}, None
+        if args.graph_command == "clear":
+            return "graph.clear", {"session_id": args.session_id}, None
 
     if args.group == "annotation":
         if args.annotation_command == "create":

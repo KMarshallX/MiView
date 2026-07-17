@@ -10,16 +10,24 @@ from mipview.graph.measurement import (
     DirectedGraphVector,
     calculate_unsigned_angle_degrees,
 )
-from mipview.graph.model import GraphEdge, GraphNode, ProjectionGraphLayer
+from mipview.graph.model import (
+    GraphEdge,
+    GraphNode,
+    ProjectedGraphNode,
+    ProjectionGraphLayer,
+    VoxelGraph,
+)
 from mipview.graph.state import ORIENTATIONS, ProjectionGraphState
 
 __all__ = [
     "GraphEdge",
     "GraphNode",
+    "ProjectedGraphNode",
     "DirectedGraphVector",
     "ORIENTATIONS",
     "ProjectionGraphLayer",
     "ProjectionGraphState",
+    "VoxelGraph",
     "calculate_unsigned_angle_degrees",
     "nearest_quadratic_bezier_parameter",
     "point_to_quadratic_bezier_distance",

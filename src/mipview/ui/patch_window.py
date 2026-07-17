@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from pathlib import Path
 from uuid import uuid4
 
@@ -17,6 +18,7 @@ from PySide6.QtGui import (
     QShortcut,
 )
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QFileDialog,
     QFormLayout,
@@ -36,10 +38,16 @@ from PySide6.QtWidgets import (
 from mipview.annotation import AnnotationMask
 from mipview.annotation.annotation_overlay import build_annotation_overlay_rgba
 from mipview.graph import GraphEdge, GraphNode, ProjectionGraphState
+from mipview.graph.spatial import (
+    extension_line_plane_endpoints,
+    nearest_projected_edge_parameter,
+    normal_line_plane_endpoints,
+)
 from mipview.io.nifti_io import NiftiLoadResult
 from mipview.patch.history import PatchHistoryManager
 from mipview.patch.saver import build_patch_default_filename, save_patch_nifti
 from mipview.patch.selector import PatchBounds
+from mipview.segmentation.overlay import build_segmentation_overlay_rgba
 from mipview.state.contrast_state import ContrastState
 from mipview.tools import derive_volume, get_tool
 from mipview.tools.patch_utility import patch_utility_from_tool
@@ -52,6 +60,7 @@ from mipview.ui.contrast_control_bar import ContrastControlBar
 from mipview.ui.cursor_panel import CursorInspectionPanel
 from mipview.ui.annotation_panel import AnnotationPanel
 from mipview.ui.graph_panel import GraphPanel
+from mipview.ui.overlay_opacity_control_bar import OverlayOpacityControlBar
 from mipview.ui.patch_history_panel import PatchHistoryPanel
 from mipview.ui.tool_actions import apply_tool_to_volume_with_metadata
 from mipview.ui.tools_menu import build_tools_submenu
@@ -78,6 +87,7 @@ class PatchViewerWindow(QMainWindow):
     annotation_active_label_changed = Signal(int)
     annotation_brush_radius_changed = Signal(int)
     annotation_brush_mode_changed = Signal(str)
+    overlay_opacity_changed = Signal(float)
     unload_current_segmentation_requested = Signal()
     open_segmentation_configuration_requested = Signal()
 
@@ -101,6 +111,10 @@ class PatchViewerWindow(QMainWindow):
         source_patch_bounds: PatchBounds | None = None,
         patch_center: tuple[int, int, int] | None = None,
         patch_size: tuple[int, int, int] | None = None,
+        projection_mask_layers: Sequence[
+            tuple[str, str, NiftiLoadResult]
+        ] | None = None,
+        active_segmentation_kind: str | None = None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Selected Patch")
@@ -115,7 +129,22 @@ class PatchViewerWindow(QMainWindow):
         self._patch_data = patch_volume.data
         self._patch_volume = patch_volume
         self._segmentation_patch_volume = segmentation_volume
+        if active_segmentation_kind not in {None, "file", "annotation"}:
+            raise ValueError(
+                "Active segmentation kind must be file, annotation, or None."
+            )
+        self._active_segmentation_kind = active_segmentation_kind
+        if self._active_segmentation_kind is None:
+            if segmentation_volume is not None:
+                self._active_segmentation_kind = "file"
+            elif annotation_mask is not None:
+                self._active_segmentation_kind = "annotation"
+        self._projection_mask_layers: dict[str, NiftiLoadResult] = {}
         self._annotation_patch_mask = annotation_mask
+        self._segmentation_opacity = min(
+            max(float(segmentation_opacity), 0.0),
+            1.0,
+        )
         self._annotation_opacity = min(max(float(annotation_opacity), 0.0), 1.0)
         self._annotation_visible = bool(annotation_visible)
         self._annotation_active_label = max(int(annotation_active_label), 0)
@@ -133,7 +162,18 @@ class PatchViewerWindow(QMainWindow):
         )
         self.contrast_state = ContrastState(self)
         self.contrast_control_bar = ContrastControlBar(self)
+        self.overlay_opacity_control_bar = OverlayOpacityControlBar(
+            self,
+            opacity=self._active_overlay_opacity(),
+        )
+        self.overlay_opacity_control_bar.opacity_changed.connect(
+            self._on_overlay_opacity_changed
+        )
         self.slice_viewer = TriPlanarViewerWidget(self)
+        self.slice_viewer.set_projection_segmentation_source(
+            self._active_segmentation_kind
+        )
+        self.slice_viewer.set_projection_segmentation_enabled(False)
         self.cursor_panel = CursorInspectionPanel(self, adaptable_width=True)
         self.cursor_panel.set_axis_directions(patch_volume.affine)
         self.cursor_panel.set_patch_controls_visible(False)
@@ -258,6 +298,7 @@ class PatchViewerWindow(QMainWindow):
         self.graph_panel.straighten_edge_requested.connect(
             self._on_graph_straighten_requested
         )
+        self.graph_panel.clear_graph_requested.connect(self.clear_graph)
         self.graph_panel.calculate_angle_requested.connect(
             self._on_graph_calculate_angle_requested
         )
@@ -275,15 +316,16 @@ class PatchViewerWindow(QMainWindow):
             self._on_auto_contrast,
         )
         self.slice_viewer.load_volume(patch_volume)
+        self.update_projection_mask_layers(projection_mask_layers or ())
         self.slice_viewer.set_projection_graph_state(self.graph_state)
         if segmentation_volume is not None:
             self.slice_viewer.set_segmentation_overlay(
                 segmentation_volume,
-                opacity=segmentation_opacity,
+                opacity=self._segmentation_opacity,
             )
         self.slice_viewer.set_annotation_overlay(
             annotation_mask,
-            opacity=annotation_opacity,
+            opacity=self._annotation_opacity,
             visible=annotation_visible,
             active_label=annotation_active_label,
         )
@@ -315,6 +357,7 @@ class PatchViewerWindow(QMainWindow):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
         layout.addWidget(self.contrast_control_bar)
+        layout.addWidget(self.overlay_opacity_control_bar)
         layout.addWidget(self._main_splitter, 1)
         apply_window_content_frame(self, central)
         self.setCentralWidget(central)
@@ -323,6 +366,15 @@ class PatchViewerWindow(QMainWindow):
         self._refresh_patch_history_panel()
 
     def _setup_menu(self) -> None:
+        view_menu = self.menuBar().addMenu("&View")
+        self.cursor_overlay_action = QAction("Show &Cursor Overlay", self)
+        self.cursor_overlay_action.setCheckable(True)
+        self.cursor_overlay_action.setChecked(True)
+        self.cursor_overlay_action.toggled.connect(
+            self.slice_viewer.set_cursor_overlay_visible
+        )
+        view_menu.addAction(self.cursor_overlay_action)
+
         self.segmentation_menu = self.menuBar().addMenu("&Segmentation")
         self.unload_current_segmentation_action = QAction(
             "&Unload Current Segmentation", self
@@ -373,6 +425,18 @@ class PatchViewerWindow(QMainWindow):
         self.projection_mode_combo.addItems(["MIP", "MinIP"])
         self.projection_mode_combo.currentTextChanged.connect(self._on_projection_mode_changed)
 
+        self.projection_mask_combo = QComboBox(panel)
+        self.projection_mask_combo.addItem("---", None)
+        self.projection_mask_combo.currentIndexChanged.connect(
+            self._on_projection_mask_changed
+        )
+
+        self.projection_segmentation_checkbox = QCheckBox(panel)
+        self.projection_segmentation_checkbox.setChecked(False)
+        self.projection_segmentation_checkbox.toggled.connect(
+            self._on_projection_segmentation_toggled
+        )
+
         direction_row = QWidget(panel)
         direction_layout = QHBoxLayout(direction_row)
         direction_layout.setContentsMargins(0, 0, 0, 0)
@@ -400,6 +464,8 @@ class PatchViewerWindow(QMainWindow):
         direction_layout.addWidget(self.sagittal_toggle_button)
 
         form.addRow("Mode:", self.projection_mode_combo)
+        form.addRow("Mask:", self.projection_mask_combo)
+        form.addRow("MIP the segmentation:", self.projection_segmentation_checkbox)
         form.addRow("Direction:", direction_row)
         return panel
 
@@ -420,6 +486,9 @@ class PatchViewerWindow(QMainWindow):
 
     def _sync_projection_controls(self) -> None:
         self.slice_viewer.set_projection_mode(self.projection_mode_combo.currentText())
+        self.slice_viewer.set_projection_segmentation_enabled(
+            self.projection_segmentation_checkbox.isChecked()
+        )
         self.slice_viewer.set_projection_enabled(
             "axial", self.axial_toggle_button.isChecked()
         )
@@ -432,6 +501,34 @@ class PatchViewerWindow(QMainWindow):
 
     def _on_projection_mode_changed(self, mode: str) -> None:
         self.slice_viewer.set_projection_mode(mode)
+
+    def _on_projection_mask_changed(self, _index: int) -> None:
+        segmentation_id = self.projection_mask_combo.currentData()
+        mask_volume = (
+            self._projection_mask_layers.get(segmentation_id)
+            if isinstance(segmentation_id, str)
+            else None
+        )
+        self.slice_viewer.set_projection_mask(mask_volume)
+
+    def _on_projection_segmentation_toggled(self, enabled: bool) -> None:
+        self.slice_viewer.set_projection_segmentation_enabled(enabled)
+
+    def _active_overlay_opacity(self) -> float:
+        if self._active_segmentation_kind == "annotation":
+            return self._annotation_opacity
+        return self._segmentation_opacity
+
+    def _on_overlay_opacity_changed(self, opacity: float) -> None:
+        normalized_opacity = min(max(float(opacity), 0.0), 1.0)
+        if self._active_segmentation_kind == "annotation":
+            self._annotation_opacity = normalized_opacity
+            self.slice_viewer.set_annotation_overlay_opacity(normalized_opacity)
+            self.annotation_panel.set_opacity(normalized_opacity)
+        else:
+            self._segmentation_opacity = normalized_opacity
+            self.slice_viewer.set_segmentation_overlay_opacity(normalized_opacity)
+        self.overlay_opacity_changed.emit(normalized_opacity)
 
     def _on_projection_direction_toggled(self, orientation: str, enabled: bool) -> None:
         self.slice_viewer.set_projection_enabled(orientation, enabled)
@@ -460,41 +557,105 @@ class PatchViewerWindow(QMainWindow):
                     }
                 ),
                 "projection_mode": self.slice_viewer.projection_mode(),
+                "projection_mask_id": self.selected_projection_mask_id(),
+                "projection_mask_name": (
+                    None
+                    if self.selected_projection_mask_id() is None
+                    else self.projection_mask_combo.currentText()
+                ),
                 "enabled_orientations": list(
                     self.slice_viewer.enabled_projection_orientations()
                 ),
             }
         )
-        layers = summary["layers"]
-        assert isinstance(layers, dict)
+        voxel_graph = summary["voxel_graph"]
+        assert isinstance(voxel_graph, dict)
+        voxel_graph["nodes"] = [
+            self.graph_node_payload(node)
+            for node in sorted(
+                self.graph_state.graph.nodes.values(),
+                key=lambda node: node.id,
+            )
+        ]
+        voxel_graph["edges"] = [
+            {
+                "start_node_id": edge.start_node_id,
+                "end_node_id": edge.end_node_id,
+                "control_patch_voxel": (
+                    None
+                    if edge not in self.graph_state.graph.curve_control_points
+                    else [
+                        float(value)
+                        for value in self.graph_state.graph.curve_control_points[edge]
+                    ]
+                ),
+            }
+            for edge in sorted(self.graph_state.graph.edges)
+        ]
+        layers: dict[str, object] = {}
         for orientation in ("axial", "coronal", "sagittal"):
-            layer = self.graph_state.layer(orientation)
-            layer_summary = layers[orientation]
-            assert isinstance(layer_summary, dict)
-            layer_summary["nodes"] = [
-                {
-                    "id": node.id,
-                    "horizontal_index": node.horizontal_index,
-                    "vertical_index": node.vertical_index,
-                }
-                for node in sorted(layer.nodes.values(), key=lambda node: node.id)
-            ]
-            layer_summary["edges"] = [
-                {
-                    "start_node_id": edge.start_node_id,
-                    "end_node_id": edge.end_node_id,
-                    "control_point": (
-                        None
-                        if edge not in layer.curve_control_points
-                        else [
-                            float(layer.curve_control_points[edge][0]),
-                            float(layer.curve_control_points[edge][1]),
-                        ]
-                    ),
-                }
-                for edge in sorted(layer.edges)
-            ]
+            layer = self.slice_viewer.graph_projected_layer(orientation)
+            layers[orientation] = {
+                "plane_shape": list(layer.plane_shape),
+                "num_nodes": len(layer.nodes),
+                "num_edges": len(layer.edges),
+                "num_curved_edges": len(layer.curve_control_points),
+                "nodes": [
+                    {
+                        "id": node.id,
+                        "horizontal_index": _json_number(node.horizontal_index),
+                        "vertical_index": _json_number(node.vertical_index),
+                    }
+                    for node in sorted(layer.nodes.values(), key=lambda node: node.id)
+                ],
+                "edges": [
+                    {
+                        "start_node_id": edge.start_node_id,
+                        "end_node_id": edge.end_node_id,
+                        "control_point": (
+                            None
+                            if edge not in layer.curve_control_points
+                            else [
+                                float(layer.curve_control_points[edge][0]),
+                                float(layer.curve_control_points[edge][1]),
+                            ]
+                        ),
+                    }
+                    for edge in sorted(layer.edges)
+                ],
+            }
+        summary["layers"] = layers
         return summary
+
+    def graph_node_payload(
+        self,
+        node: GraphNode,
+        orientation: Orientation | None = None,
+    ) -> dict[str, object]:
+        projections: dict[str, list[int | float]] = {}
+        for view in ("axial", "coronal", "sagittal"):
+            projected = self.slice_viewer.graph_projected_layer(view).nodes[node.id]
+            projections[view] = [
+                _json_number(projected.horizontal_index),
+                _json_number(projected.vertical_index),
+            ]
+        source_voxel = None
+        if self._source_patch_bounds is not None:
+            source_voxel = [
+                node.x + self._source_patch_bounds.x_start,
+                node.y + self._source_patch_bounds.y_start,
+                node.z + self._source_patch_bounds.z_start,
+            ]
+        payload: dict[str, object] = {
+            "id": node.id,
+            "patch_voxel": list(node.position()),
+            "source_voxel": source_voxel,
+            "projections": projections,
+        }
+        if orientation is not None:
+            payload["horizontal_index"] = projections[orientation][0]
+            payload["vertical_index"] = projections[orientation][1]
+        return payload
 
     def set_graph_editing_enabled(self, enabled: bool) -> bool:
         target_enabled = bool(enabled)
@@ -556,23 +717,26 @@ class PatchViewerWindow(QMainWindow):
         vertical_index: int,
     ) -> GraphNode:
         self._validate_graph_edit_operation(orientation)
-        node = self.graph_state.layer(orientation).add_node(
+        voxel = self.slice_viewer.resolve_graph_projection_voxel(
+            orientation,
             horizontal_index,
             vertical_index,
         )
+        node = self.graph_state.graph.add_node(*voxel)
         self.graph_state.active_orientation = orientation
+        self.slice_viewer.refresh_graph_overlay()
+        return node
+
+    def add_graph_voxel_node(self, x: int, y: int, z: int) -> GraphNode:
+        self._validate_graph_editing()
+        node = self.graph_state.graph.add_node(x, y, z)
         self.slice_viewer.refresh_graph_overlay()
         return node
 
     def delete_graph_node(self, orientation: Orientation, node_id: int) -> GraphNode:
         self._validate_graph_edit_operation(orientation)
-        node = self.graph_state.layer(orientation).delete_node(node_id)
-        self.graph_state.invalidate_node(orientation, node.id)
-        if (
-            self.graph_state.pending_edge_orientation == orientation
-            and self.graph_state.pending_edge_node_id == node.id
-        ):
-            self.graph_state.cancel_pending_edge()
+        node = self.graph_state.graph.delete_node(node_id)
+        self.graph_state.invalidate_node(node.id)
         self.slice_viewer.refresh_graph_overlay()
         self._refresh_graph_panel_tool_state()
         return node
@@ -590,7 +754,7 @@ class PatchViewerWindow(QMainWindow):
         second_node_id: int,
     ) -> GraphEdge:
         self._validate_graph_edit_operation(orientation)
-        edge = self.graph_state.layer(orientation).add_edge(
+        edge = self.graph_state.graph.add_edge(
             first_node_id,
             second_node_id,
         )
@@ -606,13 +770,13 @@ class PatchViewerWindow(QMainWindow):
         second_node_id: int,
     ) -> GraphEdge:
         self._validate_graph_edit_operation(orientation)
-        edge = self.graph_state.layer(orientation).delete_edge(
+        edge = self.graph_state.graph.delete_edge(
             first_node_id,
             second_node_id,
         )
+        self.graph_state.invalidate_construction_lines(edge)
         if (
-            self.graph_state.selected_edge_orientation == orientation
-            and self.graph_state.selected_edge == edge
+            self.graph_state.selected_edge == edge
         ):
             self.graph_state.cancel_active_tool()
         self.slice_viewer.refresh_graph_overlay()
@@ -629,14 +793,20 @@ class PatchViewerWindow(QMainWindow):
     ) -> tuple[GraphNode, GraphEdge, GraphEdge]:
         self._validate_graph_edit_operation(orientation)
         original_edge = GraphEdge.between(first_node_id, second_node_id)
-        result = self.graph_state.layer(orientation).split_edge(
-            first_node_id,
-            second_node_id,
+        projected_layer = self.slice_viewer.graph_projected_layer(orientation)
+        parameter = nearest_projected_edge_parameter(
+            projected_layer,
+            original_edge,
             (horizontal_index, vertical_index),
         )
+        result = self.graph_state.graph.split_edge_at_parameter(
+            first_node_id,
+            second_node_id,
+            parameter,
+        )
+        self.graph_state.invalidate_construction_lines(original_edge)
         if (
-            self.graph_state.selected_edge_orientation == orientation
-            and self.graph_state.selected_edge == original_edge
+            self.graph_state.selected_edge == original_edge
         ):
             self.graph_state.cancel_active_tool()
         self.graph_state.active_orientation = orientation
@@ -653,16 +823,70 @@ class PatchViewerWindow(QMainWindow):
         control_vertical: float,
     ) -> GraphEdge:
         self._validate_graph_edit_operation(orientation)
-        layer = self.graph_state.layer(orientation)
-        edge = layer.set_curve_control_point(
+        edge = GraphEdge.between(first_node_id, second_node_id)
+        current_control = self.graph_state.graph.curve_control_point_or_midpoint(edge)
+        control_point = self.slice_viewer.graph_control_point_from_projection(
+            current_control,
+            orientation,
+            control_horizontal,
+            control_vertical,
+        )
+        edge = self.graph_state.graph.set_curve_control_point(
             first_node_id,
             second_node_id,
-            (control_horizontal, control_vertical),
+            control_point,
         )
+        self.graph_state.invalidate_construction_lines(edge)
         self.graph_state.active_orientation = orientation
+        if self.graph_state.selected_edge == edge:
+            self.graph_state.selected_edge_orientation = orientation
         self.slice_viewer.refresh_graph_overlay()
         self._refresh_graph_panel_tool_state()
         return edge
+
+    def set_graph_normal_line(
+        self,
+        orientation: Orientation,
+        first_node_id: int,
+        second_node_id: int,
+        visible: bool,
+    ) -> bool:
+        self._validate_graph_edit_operation(orientation)
+        edge = GraphEdge.between(first_node_id, second_node_id)
+        if visible:
+            normal_line_plane_endpoints(
+                self.slice_viewer.graph_projected_layer(orientation),
+                edge,
+            )
+        normal_visible = self.graph_state.set_normal_line(
+            orientation,
+            edge,
+            visible,
+        )
+        self.slice_viewer.refresh_graph_overlay()
+        return normal_visible
+
+    def set_graph_extension_line(
+        self,
+        orientation: Orientation,
+        first_node_id: int,
+        second_node_id: int,
+        visible: bool,
+    ) -> bool:
+        self._validate_graph_edit_operation(orientation)
+        edge = GraphEdge.between(first_node_id, second_node_id)
+        if visible:
+            extension_line_plane_endpoints(
+                self.slice_viewer.graph_projected_layer(orientation),
+                edge,
+            )
+        extension_visible = self.graph_state.set_extension_line(
+            orientation,
+            edge,
+            visible,
+        )
+        self.slice_viewer.refresh_graph_overlay()
+        return extension_visible
 
     def straighten_graph_edge(
         self,
@@ -671,14 +895,11 @@ class PatchViewerWindow(QMainWindow):
         second_node_id: int,
     ) -> GraphEdge:
         self._validate_graph_edit_operation(orientation)
-        edge = self.graph_state.layer(orientation).straighten_edge(
+        edge = self.graph_state.graph.straighten_edge(
             first_node_id,
             second_node_id,
         )
-        if (
-            self.graph_state.selected_edge_orientation == orientation
-            and self.graph_state.selected_edge == edge
-        ):
+        if self.graph_state.selected_edge == edge:
             self.graph_state.selected_edge = None
             self.graph_state.selected_edge_orientation = None
             self.graph_state.curve_drag_active = False
@@ -701,6 +922,12 @@ class PatchViewerWindow(QMainWindow):
             vector_1_target,
             vector_2_source,
             vector_2_target,
+            {
+                node.id: node.position()
+                for node in self.slice_viewer.graph_projected_layer(
+                    orientation
+                ).nodes.values()
+            },
             self._graph_in_plane_spacing(orientation),
         )
         self.graph_state.active_orientation = orientation
@@ -714,15 +941,29 @@ class PatchViewerWindow(QMainWindow):
         self._refresh_graph_panel_tool_state()
         self.statusBar().showMessage("Graph angle cleared")
 
+    def clear_graph(self) -> tuple[int, int]:
+        node_count, edge_count = self.graph_state.clear_graph()
+        self.slice_viewer.refresh_graph_overlay()
+        self._refresh_graph_panel_tool_state()
+        self.statusBar().showMessage(
+            f"Cleared {node_count} graph node(s) and {edge_count} edge(s)"
+        )
+        return node_count, edge_count
+
     def _validate_graph_edit_operation(self, orientation: Orientation) -> None:
-        if not self.graph_state.editing_enabled:
-            raise ValueError("Graph mode is not active.")
-        if not self.graph_state.visible:
-            raise ValueError("Graph visibility must be enabled before editing.")
+        self._validate_graph_editing()
         if not self.slice_viewer.projection_enabled(orientation):
             raise ValueError(
                 f"The {orientation} viewer is not showing a MIP/MinIP projection."
             )
+
+    def _validate_graph_editing(self) -> None:
+        if not self.graph_state.editing_enabled:
+            raise ValueError("Graph mode is not active.")
+        if not self.graph_state.visible:
+            raise ValueError("Graph visibility must be enabled before editing.")
+        if not self.slice_viewer.enabled_projection_orientations():
+            raise ValueError("Enable at least one MIP/MinIP projection first.")
 
     def _on_graph_activation_requested(self) -> None:
         try:
@@ -823,6 +1064,7 @@ class PatchViewerWindow(QMainWindow):
         elif hit_kind == "edge":
             start_node_id = int(hit["start_node_id"])
             end_node_id = int(hit["end_node_id"])
+            edge = GraphEdge.between(start_node_id, end_node_id)
             horizontal_index = int(projection_position[0])
             vertical_index = int(projection_position[1])
             create_node_action = menu.addAction("Create a node here")
@@ -844,6 +1086,42 @@ class PatchViewerWindow(QMainWindow):
                 )
             )
             menu.addSeparator()
+            if edge not in self.graph_state.graph.curve_control_points:
+                normal_is_visible = (
+                    self.graph_state.normal_line_orientation == graph_orientation
+                    and self.graph_state.normal_line_edge == edge
+                )
+                normal_action = menu.addAction(
+                    "Hide the normal line"
+                    if normal_is_visible
+                    else "Display the normal line"
+                )
+                normal_action.triggered.connect(
+                    lambda _checked=False: self._set_graph_normal_line_from_ui(
+                        graph_orientation,
+                        start_node_id,
+                        end_node_id,
+                        not normal_is_visible,
+                    )
+                )
+                extension_is_visible = (
+                    self.graph_state.extension_line_orientation
+                    == graph_orientation
+                    and self.graph_state.extension_line_edge == edge
+                )
+                extension_action = menu.addAction(
+                    "Hide the extension line"
+                    if extension_is_visible
+                    else "Display the extension line"
+                )
+                extension_action.triggered.connect(
+                    lambda _checked=False: self._set_graph_extension_line_from_ui(
+                        graph_orientation,
+                        start_node_id,
+                        end_node_id,
+                        not extension_is_visible,
+                    )
+                )
             curve_action = menu.addAction("Curve Edge")
             curve_action.triggered.connect(
                 lambda _checked=False: self._select_graph_curve_from_ui(
@@ -855,7 +1133,7 @@ class PatchViewerWindow(QMainWindow):
             straighten_action = menu.addAction("Straighten Edge")
             straighten_action.setEnabled(
                 GraphEdge.between(start_node_id, end_node_id)
-                in self.graph_state.layer(graph_orientation).curve_control_points
+                in self.graph_state.graph.curve_control_points
             )
             straighten_action.triggered.connect(
                 lambda _checked=False: self._straighten_graph_edge_from_ui(
@@ -877,6 +1155,52 @@ class PatchViewerWindow(QMainWindow):
             )
         if not menu.isEmpty():
             menu.exec(global_position)
+
+    def _set_graph_normal_line_from_ui(
+        self,
+        orientation: Orientation,
+        start_node_id: int,
+        end_node_id: int,
+        visible: bool,
+    ) -> None:
+        try:
+            self.set_graph_normal_line(
+                orientation,
+                start_node_id,
+                end_node_id,
+                visible,
+            )
+        except ValueError as exc:
+            self.statusBar().showMessage(str(exc))
+            return
+        self.statusBar().showMessage(
+            "Displayed graph edge normal line"
+            if visible
+            else "Hid graph edge normal line"
+        )
+
+    def _set_graph_extension_line_from_ui(
+        self,
+        orientation: Orientation,
+        start_node_id: int,
+        end_node_id: int,
+        visible: bool,
+    ) -> None:
+        try:
+            self.set_graph_extension_line(
+                orientation,
+                start_node_id,
+                end_node_id,
+                visible,
+            )
+        except ValueError as exc:
+            self.statusBar().showMessage(str(exc))
+            return
+        self.statusBar().showMessage(
+            "Displayed graph edge extension line"
+            if visible
+            else "Hid graph edge extension line"
+        )
 
     def _add_graph_node_from_ui(
         self,
@@ -930,16 +1254,13 @@ class PatchViewerWindow(QMainWindow):
     ) -> None:
         pending_orientation = self.graph_state.pending_edge_orientation
         pending_node_id = self.graph_state.pending_edge_node_id
-        if pending_orientation is None or pending_node_id is None:
+        if pending_node_id is None:
             return
-        if orientation != pending_orientation:
-            self.statusBar().showMessage(
-                "Graph edges must connect nodes in the same orientation"
-            )
+        if orientation not in ("axial", "coronal", "sagittal"):
             return
         try:
             edge = self.add_graph_edge(
-                pending_orientation,
+                orientation,  # type: ignore[arg-type]
                 pending_node_id,
                 node_id,
             )
@@ -948,7 +1269,8 @@ class PatchViewerWindow(QMainWindow):
             return
         self.statusBar().showMessage(
             "Created graph edge "
-            f"{edge.start_node_id}-{edge.end_node_id} in {pending_orientation}"
+            f"{edge.start_node_id}-{edge.end_node_id} from {pending_orientation} "
+            f"to {orientation}"
         )
 
     def _delete_graph_edge_from_ui(
@@ -1067,10 +1389,12 @@ class PatchViewerWindow(QMainWindow):
         if orientation not in ("axial", "coronal", "sagittal"):
             return
         try:
-            self.graph_state.layer(orientation).set_curve_control_point(
+            self.curve_graph_edge(
+                orientation,  # type: ignore[arg-type]
                 start_node_id,
                 end_node_id,
-                (horizontal, vertical),
+                horizontal,
+                vertical,
             )
         except ValueError as exc:
             self.statusBar().showMessage(str(exc))
@@ -1088,6 +1412,12 @@ class PatchViewerWindow(QMainWindow):
             angle = self.graph_state.select_angle_node(
                 orientation,  # type: ignore[arg-type]
                 node_id,
+                {
+                    node.id: node.position()
+                    for node in self.slice_viewer.graph_projected_layer(
+                        orientation  # type: ignore[arg-type]
+                    ).nodes.values()
+                },
                 self._graph_in_plane_spacing(orientation),  # type: ignore[arg-type]
             )
         except ValueError as exc:
@@ -1153,15 +1483,10 @@ class PatchViewerWindow(QMainWindow):
 
     def _refresh_graph_panel_tool_state(self) -> None:
         selected_curved = False
-        if (
-            self.graph_state.selected_edge_orientation is not None
-            and self.graph_state.selected_edge is not None
-        ):
+        if self.graph_state.selected_edge is not None:
             selected_curved = (
                 self.graph_state.selected_edge
-                in self.graph_state.layer(
-                    self.graph_state.selected_edge_orientation
-                ).curve_control_points
+                in self.graph_state.graph.curve_control_points
             )
         self.graph_panel.set_tool_state(
             active_tool=self.graph_state.active_tool,
@@ -1171,6 +1496,9 @@ class PatchViewerWindow(QMainWindow):
             has_angle_data=(
                 self.graph_state.angle_vector_1 is not None
                 or self.graph_state.angle_vector_2 is not None
+            ),
+            has_graph_elements=bool(
+                self.graph_state.graph.nodes or self.graph_state.graph.edges
             ),
         )
 
@@ -1480,14 +1808,12 @@ class PatchViewerWindow(QMainWindow):
         target_width: int,
         target_height: int,
     ) -> None:
-        mask = np.asarray(plane) > 0
-        if not np.any(mask):
-            return
-        overlay = np.zeros((*mask.shape, 4), dtype=np.uint8)
-        overlay[..., 0] = 255
-        overlay[..., 3] = mask.astype(np.uint8) * int(
-            round(self.slice_viewer.segmentation_overlay_opacity() * 255.0)
+        overlay = build_segmentation_overlay_rgba(
+            plane,
+            opacity=self.slice_viewer.segmentation_overlay_opacity(),
         )
+        if not np.any(overlay[..., 3]):
+            return
         self._draw_rgba_export_overlay(
             painter, overlay, x_offset, y_offset, target_width, target_height
         )
@@ -1551,22 +1877,43 @@ class PatchViewerWindow(QMainWindow):
             self._patch_volume.data,
             self._patch_volume.affine,
         ).display_data
+        selected_mask = self.selected_projection_mask_volume()
+        mask_data = (
+            None
+            if selected_mask is None
+            else build_oriented_volume(
+                selected_mask.data,
+                selected_mask.affine,
+            ).display_data
+        )
         planes: dict[str, np.ndarray | dict[str, np.ndarray]] = {
-            "axial": project_oriented_volume(volume, "axial", mode),
-            "coronal": project_oriented_volume(volume, "coronal", mode),
-            "sagittal": project_oriented_volume(volume, "sagittal", mode),
+            "axial": project_oriented_volume(volume, "axial", mode, mask=mask_data),
+            "coronal": project_oriented_volume(
+                volume, "coronal", mode, mask=mask_data
+            ),
+            "sagittal": project_oriented_volume(
+                volume, "sagittal", mode, mask=mask_data
+            ),
         }
-        if self._segmentation_patch_volume is not None:
+        if (
+            self.projection_segmentation_checkbox.isChecked()
+            and self._active_segmentation_kind == "file"
+            and self._segmentation_patch_volume is not None
+        ):
             segmentation_volume = build_oriented_volume(
                 self._segmentation_patch_volume.data,
                 self._segmentation_patch_volume.affine,
             ).display_data
             planes["segmentation"] = {
-                "axial": project_oriented_volume(segmentation_volume, "axial", mode),
-                "coronal": project_oriented_volume(segmentation_volume, "coronal", mode),
-                "sagittal": project_oriented_volume(segmentation_volume, "sagittal", mode),
+                "axial": project_oriented_volume(segmentation_volume, "axial", "MIP"),
+                "coronal": project_oriented_volume(segmentation_volume, "coronal", "MIP"),
+                "sagittal": project_oriented_volume(segmentation_volume, "sagittal", "MIP"),
             }
-        if self._annotation_patch_mask is not None:
+        if (
+            self.projection_segmentation_checkbox.isChecked()
+            and self._active_segmentation_kind == "annotation"
+            and self._annotation_patch_mask is not None
+        ):
             annotation_volume = build_oriented_volume(
                 self._annotation_patch_mask.data,
                 self._annotation_patch_mask.affine,
@@ -1598,13 +1945,72 @@ class PatchViewerWindow(QMainWindow):
         self,
         segmentation_volume: NiftiLoadResult | None,
         opacity: float,
+        *,
+        active_segmentation_kind: str | None = None,
     ) -> None:
+        if active_segmentation_kind not in {None, "file", "annotation"}:
+            raise ValueError(
+                "Active segmentation kind must be file, annotation, or None."
+            )
+        if active_segmentation_kind is None and segmentation_volume is not None:
+            active_segmentation_kind = "file"
+        self._segmentation_opacity = min(max(float(opacity), 0.0), 1.0)
         self._segmentation_patch_volume = segmentation_volume
-        self.slice_viewer.set_segmentation_overlay(segmentation_volume, opacity=opacity)
+        self._active_segmentation_kind = active_segmentation_kind
+        self.slice_viewer.set_projection_segmentation_source(
+            self._active_segmentation_kind
+        )
+        self.overlay_opacity_control_bar.set_opacity(
+            self._active_overlay_opacity()
+        )
+        self.slice_viewer.set_segmentation_overlay(
+            segmentation_volume,
+            opacity=self._segmentation_opacity,
+        )
         self._refresh_seg_patch_save_enabled()
 
+    def update_projection_mask_layers(
+        self,
+        layers: Sequence[tuple[str, str, NiftiLoadResult]],
+    ) -> None:
+        """Refresh file-backed masks while preserving a still-loaded selection."""
+        selected_id = self.selected_projection_mask_id()
+        self._projection_mask_layers = {
+            segmentation_id: volume
+            for segmentation_id, _display_name, volume in layers
+        }
+
+        was_blocked = self.projection_mask_combo.blockSignals(True)
+        self.projection_mask_combo.clear()
+        self.projection_mask_combo.addItem("---", None)
+        selected_index = 0
+        for segmentation_id, display_name, _volume in layers:
+            self.projection_mask_combo.addItem(display_name, segmentation_id)
+            if segmentation_id == selected_id:
+                selected_index = self.projection_mask_combo.count() - 1
+        self.projection_mask_combo.setCurrentIndex(selected_index)
+        self.projection_mask_combo.blockSignals(was_blocked)
+        self._on_projection_mask_changed(selected_index)
+
+    def selected_projection_mask_id(self) -> str | None:
+        segmentation_id = self.projection_mask_combo.currentData()
+        return segmentation_id if isinstance(segmentation_id, str) else None
+
+    def selected_projection_mask_volume(self) -> NiftiLoadResult | None:
+        segmentation_id = self.selected_projection_mask_id()
+        if segmentation_id is None:
+            return None
+        return self._projection_mask_layers.get(segmentation_id)
+
     def update_segmentation_opacity(self, opacity: float) -> None:
-        self.slice_viewer.set_segmentation_overlay_opacity(opacity)
+        self._segmentation_opacity = min(max(float(opacity), 0.0), 1.0)
+        self.slice_viewer.set_segmentation_overlay_opacity(
+            self._segmentation_opacity
+        )
+        if self._active_segmentation_kind != "annotation":
+            self.overlay_opacity_control_bar.set_opacity(
+                self._segmentation_opacity
+            )
 
     def update_annotation_overlay(
         self,
@@ -1623,7 +2029,7 @@ class PatchViewerWindow(QMainWindow):
         self._annotation_active_label = max(int(active_label), 0)
         self.slice_viewer.set_annotation_overlay(
             annotation_mask,
-            opacity=opacity,
+            opacity=self._annotation_opacity,
             visible=visible,
             active_label=active_label,
         )
@@ -1636,6 +2042,10 @@ class PatchViewerWindow(QMainWindow):
             brush_radius=brush_radius,
             brush_mode=brush_mode,
         )
+        if self._active_segmentation_kind == "annotation":
+            self.overlay_opacity_control_bar.set_opacity(
+                self._annotation_opacity
+            )
         self._refresh_seg_patch_save_enabled()
 
     def update_annotation_display_options(
@@ -1650,12 +2060,16 @@ class PatchViewerWindow(QMainWindow):
         self._annotation_opacity = min(max(float(opacity), 0.0), 1.0)
         self._annotation_visible = bool(visible)
         self._annotation_active_label = max(int(active_label), 0)
-        self.slice_viewer.set_annotation_overlay_opacity(opacity)
+        self.slice_viewer.set_annotation_overlay_opacity(self._annotation_opacity)
         self.slice_viewer.set_annotation_overlay_visible(visible)
         self.slice_viewer.set_annotation_active_label(active_label)
         self.annotation_panel.set_visible_checked(visible)
         self.annotation_panel.set_opacity(opacity)
         self.annotation_panel.set_active_label(active_label)
+        if self._active_segmentation_kind == "annotation":
+            self.overlay_opacity_control_bar.set_opacity(
+                self._annotation_opacity
+            )
         if brush_radius is not None:
             self.slice_viewer.set_annotation_brush_radius(brush_radius)
             self.annotation_panel.set_brush_radius(brush_radius)
@@ -1847,3 +2261,10 @@ class PatchViewerWindow(QMainWindow):
     def resizeEvent(self, event: QResizeEvent) -> None:
         super().resizeEvent(event)
         self._font_scaler.apply()
+
+
+def _json_number(value: float) -> int | float:
+    rounded = round(float(value))
+    if abs(float(value) - rounded) < 1e-9:
+        return int(rounded)
+    return float(value)

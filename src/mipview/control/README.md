@@ -434,21 +434,28 @@ mipview-ctl projection save axial ./patch_axial_minip.png --annotation-preview
 ### Graph commands
 
 Graph commands target an open patch window by the session ID reported in
-`viewer.export_state` under `graph_sessions`. Coordinates are oriented 2D
-projection indices. The target orientation must be showing MIP/MinIP and Graph
-mode must be active for mutation commands.
+`viewer.export_state` under `graph_sessions`. The graph is shared across all
+three projections and stored in patch-local source voxel space. `add-node` uses
+oriented 2D projection indices and resolves depth from the current finite
+MIP/MinIP extremum; `add-voxel-node` accepts explicit patch-local `(x, y, z)`
+coordinates. Node/edge editing commands require Graph mode; clearing the complete
+graph remains available whenever the session contains graph elements.
 
 ```bash
 mipview-ctl graph status SESSION_ID
 mipview-ctl graph activate SESSION_ID
 mipview-ctl graph display SESSION_ID --opacity 0.75 --node-size 3
 mipview-ctl graph add-node SESSION_ID axial 12 18
+mipview-ctl graph add-voxel-node SESSION_ID 12 18 7
 mipview-ctl graph add-edge SESSION_ID axial 1 2
 mipview-ctl graph curve-edge SESSION_ID axial 1 2 18.5 24.0
 mipview-ctl graph straighten-edge SESSION_ID axial 1 2
+mipview-ctl graph normal-line SESSION_ID axial 1 2 show
+mipview-ctl graph extension-line SESSION_ID axial 1 2 show
 mipview-ctl graph split-edge SESSION_ID axial 1 2 18 24
 mipview-ctl graph calculate-angle SESSION_ID axial 1 2 3 4
 mipview-ctl graph clear-angle SESSION_ID
+mipview-ctl graph clear SESSION_ID
 mipview-ctl graph delete-edge SESSION_ID axial 1 2
 mipview-ctl graph delete-node SESSION_ID axial 1
 mipview-ctl graph exit SESSION_ID
@@ -456,17 +463,21 @@ mipview-ctl graph exit SESSION_ID
 
 The matching direct commands are `graph.status`, `graph.activate`,
 `graph.set_display`, `graph.add_node`, `graph.delete_node`, `graph.add_edge`,
-`graph.delete_edge`, `graph.curve_edge`, `graph.straighten_edge`, `graph.split_edge`,
-`graph.calculate_angle`, and `graph.clear_angle`.
+`graph.add_voxel_node`, `graph.delete_edge`, `graph.curve_edge`,
+`graph.straighten_edge`, `graph.set_normal_line`, `graph.set_extension_line`,
+`graph.split_edge`, `graph.calculate_angle`, `graph.clear_angle`, and
+`graph.clear`.
 
 Curve controls use floating-point oriented projection coordinates and must be
-finite and inside the projection plane. Angle node IDs are ordered as vector 1
-source/target followed by vector 2 source/target. Both vectors use the command's
+finite and inside the projection plane. They update a shared 3D control point by
+preserving the coordinate hidden by the selected view. Angle node IDs are ordered
+as vector 1 source/target followed by vector 2 source/target. Both vectors use the command's
 single orientation, and calculation scales their horizontal and vertical
 components by physical in-plane voxel spacing before evaluating the unsigned
-angle. Graph status includes curve controls, active tool/selection state, both
-directed vectors, and `angle_degrees`. Graph sessions are in-memory only and
-disappear when their patch window closes.
+angle. Graph status includes authoritative patch voxels, full-image voxels when
+patch bounds are known, projections in all orientations, 3D curve controls,
+active tool/selection state, both directed vectors, and `angle_degrees`. Graph
+sessions are in-memory only and disappear when their patch window closes.
 
 `graph.split_edge` takes the clicked oriented projection index, inserts a node at
 the nearest point on the target edge, and replaces it with two connected edges.
