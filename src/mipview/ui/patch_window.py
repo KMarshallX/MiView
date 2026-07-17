@@ -38,11 +38,16 @@ from PySide6.QtWidgets import (
 from mipview.annotation import AnnotationMask
 from mipview.annotation.annotation_overlay import build_annotation_overlay_rgba
 from mipview.graph import GraphEdge, GraphNode, ProjectionGraphState
-from mipview.graph.spatial import nearest_projected_edge_parameter
+from mipview.graph.spatial import (
+    extension_line_plane_endpoints,
+    nearest_projected_edge_parameter,
+    normal_line_plane_endpoints,
+)
 from mipview.io.nifti_io import NiftiLoadResult
 from mipview.patch.history import PatchHistoryManager
 from mipview.patch.saver import build_patch_default_filename, save_patch_nifti
 from mipview.patch.selector import PatchBounds
+from mipview.segmentation.overlay import build_segmentation_overlay_rgba
 from mipview.state.contrast_state import ContrastState
 from mipview.tools import derive_volume, get_tool
 from mipview.tools.patch_utility import patch_utility_from_tool
@@ -293,6 +298,7 @@ class PatchViewerWindow(QMainWindow):
         self.graph_panel.straighten_edge_requested.connect(
             self._on_graph_straighten_requested
         )
+        self.graph_panel.clear_graph_requested.connect(self.clear_graph)
         self.graph_panel.calculate_angle_requested.connect(
             self._on_graph_calculate_angle_requested
         )
@@ -768,6 +774,7 @@ class PatchViewerWindow(QMainWindow):
             first_node_id,
             second_node_id,
         )
+        self.graph_state.invalidate_construction_lines(edge)
         if (
             self.graph_state.selected_edge == edge
         ):
@@ -797,6 +804,7 @@ class PatchViewerWindow(QMainWindow):
             second_node_id,
             parameter,
         )
+        self.graph_state.invalidate_construction_lines(original_edge)
         if (
             self.graph_state.selected_edge == original_edge
         ):
@@ -828,12 +836,57 @@ class PatchViewerWindow(QMainWindow):
             second_node_id,
             control_point,
         )
+        self.graph_state.invalidate_construction_lines(edge)
         self.graph_state.active_orientation = orientation
         if self.graph_state.selected_edge == edge:
             self.graph_state.selected_edge_orientation = orientation
         self.slice_viewer.refresh_graph_overlay()
         self._refresh_graph_panel_tool_state()
         return edge
+
+    def set_graph_normal_line(
+        self,
+        orientation: Orientation,
+        first_node_id: int,
+        second_node_id: int,
+        visible: bool,
+    ) -> bool:
+        self._validate_graph_edit_operation(orientation)
+        edge = GraphEdge.between(first_node_id, second_node_id)
+        if visible:
+            normal_line_plane_endpoints(
+                self.slice_viewer.graph_projected_layer(orientation),
+                edge,
+            )
+        normal_visible = self.graph_state.set_normal_line(
+            orientation,
+            edge,
+            visible,
+        )
+        self.slice_viewer.refresh_graph_overlay()
+        return normal_visible
+
+    def set_graph_extension_line(
+        self,
+        orientation: Orientation,
+        first_node_id: int,
+        second_node_id: int,
+        visible: bool,
+    ) -> bool:
+        self._validate_graph_edit_operation(orientation)
+        edge = GraphEdge.between(first_node_id, second_node_id)
+        if visible:
+            extension_line_plane_endpoints(
+                self.slice_viewer.graph_projected_layer(orientation),
+                edge,
+            )
+        extension_visible = self.graph_state.set_extension_line(
+            orientation,
+            edge,
+            visible,
+        )
+        self.slice_viewer.refresh_graph_overlay()
+        return extension_visible
 
     def straighten_graph_edge(
         self,
@@ -887,6 +940,15 @@ class PatchViewerWindow(QMainWindow):
         self.slice_viewer.refresh_graph_overlay()
         self._refresh_graph_panel_tool_state()
         self.statusBar().showMessage("Graph angle cleared")
+
+    def clear_graph(self) -> tuple[int, int]:
+        node_count, edge_count = self.graph_state.clear_graph()
+        self.slice_viewer.refresh_graph_overlay()
+        self._refresh_graph_panel_tool_state()
+        self.statusBar().showMessage(
+            f"Cleared {node_count} graph node(s) and {edge_count} edge(s)"
+        )
+        return node_count, edge_count
 
     def _validate_graph_edit_operation(self, orientation: Orientation) -> None:
         self._validate_graph_editing()
@@ -1002,6 +1064,7 @@ class PatchViewerWindow(QMainWindow):
         elif hit_kind == "edge":
             start_node_id = int(hit["start_node_id"])
             end_node_id = int(hit["end_node_id"])
+            edge = GraphEdge.between(start_node_id, end_node_id)
             horizontal_index = int(projection_position[0])
             vertical_index = int(projection_position[1])
             create_node_action = menu.addAction("Create a node here")
@@ -1023,6 +1086,42 @@ class PatchViewerWindow(QMainWindow):
                 )
             )
             menu.addSeparator()
+            if edge not in self.graph_state.graph.curve_control_points:
+                normal_is_visible = (
+                    self.graph_state.normal_line_orientation == graph_orientation
+                    and self.graph_state.normal_line_edge == edge
+                )
+                normal_action = menu.addAction(
+                    "Hide the normal line"
+                    if normal_is_visible
+                    else "Display the normal line"
+                )
+                normal_action.triggered.connect(
+                    lambda _checked=False: self._set_graph_normal_line_from_ui(
+                        graph_orientation,
+                        start_node_id,
+                        end_node_id,
+                        not normal_is_visible,
+                    )
+                )
+                extension_is_visible = (
+                    self.graph_state.extension_line_orientation
+                    == graph_orientation
+                    and self.graph_state.extension_line_edge == edge
+                )
+                extension_action = menu.addAction(
+                    "Hide the extension line"
+                    if extension_is_visible
+                    else "Display the extension line"
+                )
+                extension_action.triggered.connect(
+                    lambda _checked=False: self._set_graph_extension_line_from_ui(
+                        graph_orientation,
+                        start_node_id,
+                        end_node_id,
+                        not extension_is_visible,
+                    )
+                )
             curve_action = menu.addAction("Curve Edge")
             curve_action.triggered.connect(
                 lambda _checked=False: self._select_graph_curve_from_ui(
@@ -1056,6 +1155,52 @@ class PatchViewerWindow(QMainWindow):
             )
         if not menu.isEmpty():
             menu.exec(global_position)
+
+    def _set_graph_normal_line_from_ui(
+        self,
+        orientation: Orientation,
+        start_node_id: int,
+        end_node_id: int,
+        visible: bool,
+    ) -> None:
+        try:
+            self.set_graph_normal_line(
+                orientation,
+                start_node_id,
+                end_node_id,
+                visible,
+            )
+        except ValueError as exc:
+            self.statusBar().showMessage(str(exc))
+            return
+        self.statusBar().showMessage(
+            "Displayed graph edge normal line"
+            if visible
+            else "Hid graph edge normal line"
+        )
+
+    def _set_graph_extension_line_from_ui(
+        self,
+        orientation: Orientation,
+        start_node_id: int,
+        end_node_id: int,
+        visible: bool,
+    ) -> None:
+        try:
+            self.set_graph_extension_line(
+                orientation,
+                start_node_id,
+                end_node_id,
+                visible,
+            )
+        except ValueError as exc:
+            self.statusBar().showMessage(str(exc))
+            return
+        self.statusBar().showMessage(
+            "Displayed graph edge extension line"
+            if visible
+            else "Hid graph edge extension line"
+        )
 
     def _add_graph_node_from_ui(
         self,
@@ -1351,6 +1496,9 @@ class PatchViewerWindow(QMainWindow):
             has_angle_data=(
                 self.graph_state.angle_vector_1 is not None
                 or self.graph_state.angle_vector_2 is not None
+            ),
+            has_graph_elements=bool(
+                self.graph_state.graph.nodes or self.graph_state.graph.edges
             ),
         )
 
@@ -1660,14 +1808,12 @@ class PatchViewerWindow(QMainWindow):
         target_width: int,
         target_height: int,
     ) -> None:
-        mask = np.asarray(plane) > 0
-        if not np.any(mask):
-            return
-        overlay = np.zeros((*mask.shape, 4), dtype=np.uint8)
-        overlay[..., 0] = 255
-        overlay[..., 3] = mask.astype(np.uint8) * int(
-            round(self.slice_viewer.segmentation_overlay_opacity() * 255.0)
+        overlay = build_segmentation_overlay_rgba(
+            plane,
+            opacity=self.slice_viewer.segmentation_overlay_opacity(),
         )
+        if not np.any(overlay[..., 3]):
+            return
         self._draw_rgba_export_overlay(
             painter, overlay, x_offset, y_offset, target_width, target_height
         )

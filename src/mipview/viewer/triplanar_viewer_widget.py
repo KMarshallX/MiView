@@ -431,6 +431,10 @@ class TriPlanarViewerWidget(QWidget):
                     selected_edge=None,
                     curve_handle_visible=False,
                     angle_vectors=(),
+                    normal_line_edge=None,
+                    normal_line_thickness=1,
+                    extension_line_edge=None,
+                    extension_line_thickness=1,
                 )
                 continue
             layer = graph_state.projected_layer(
@@ -464,6 +468,18 @@ class TriPlanarViewerWidget(QWidget):
                     )
                     if vector is not None and vector.orientation == view.orientation
                 ),
+                normal_line_edge=(
+                    graph_state.normal_line_edge
+                    if graph_state.normal_line_orientation == view.orientation
+                    else None
+                ),
+                normal_line_thickness=graph_state.normal_line_thickness,
+                extension_line_edge=(
+                    graph_state.extension_line_edge
+                    if graph_state.extension_line_orientation == view.orientation
+                    else None
+                ),
+                extension_line_thickness=graph_state.extension_line_thickness,
             )
 
     def graph_projected_layer(

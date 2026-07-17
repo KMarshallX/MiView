@@ -23,6 +23,7 @@ class GraphPanel(QWidget):
     edge_thickness_changed = Signal(int)
     curve_tool_requested = Signal(bool)
     straighten_edge_requested = Signal()
+    clear_graph_requested = Signal()
     calculate_angle_requested = Signal()
     cancel_requested = Signal()
     clear_angle_requested = Signal()
@@ -88,6 +89,9 @@ class GraphPanel(QWidget):
         )
         tool_layout.addWidget(self.straighten_edge_button)
 
+        self.clear_graph_button = QPushButton("Clear All Nodes & Edges", group)
+        self.clear_graph_button.clicked.connect(self.clear_graph_requested.emit)
+
         self.calculate_angle_button = QPushButton("Calculate Angle", group)
         self.calculate_angle_button.clicked.connect(
             self.calculate_angle_requested.emit
@@ -112,6 +116,7 @@ class GraphPanel(QWidget):
         form.addRow("Node Size:", self.node_size_slider)
         form.addRow("Edge Thickness:", self.edge_thickness_slider)
         form.addRow("Curve:", tool_row)
+        form.addRow(self.clear_graph_button)
         form.addRow(self.calculate_angle_button)
         form.addRow(angle_action_row)
         form.addRow(self.angle_step_label)
@@ -129,6 +134,7 @@ class GraphPanel(QWidget):
             angle_selection_step=0,
             angle_degrees=None,
             has_angle_data=False,
+            has_graph_elements=False,
         )
 
     def set_projection_available(self, available: bool) -> None:
@@ -173,6 +179,7 @@ class GraphPanel(QWidget):
         angle_selection_step: int,
         angle_degrees: float | None,
         has_angle_data: bool,
+        has_graph_elements: bool,
     ) -> None:
         was_blocked = self.curve_edge_button.blockSignals(True)
         self.curve_edge_button.setChecked(active_tool == "curve_edge")
@@ -184,6 +191,7 @@ class GraphPanel(QWidget):
         self.clear_angle_button.setEnabled(
             bool(has_angle_data) or angle_selection_step > 0
         )
+        self.clear_graph_button.setEnabled(bool(has_graph_elements))
         prompts = (
             "Vector 1: select source node",
             "Vector 1: select target node",

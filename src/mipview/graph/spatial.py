@@ -204,6 +204,86 @@ def nearest_projected_edge_parameter(
     return _nearest_segment_parameter(point, start, end)
 
 
+def normal_line_plane_endpoints(
+    layer: ProjectionGraphLayer,
+    edge: GraphEdge,
+) -> tuple[tuple[float, float], tuple[float, float]]:
+    """Clip the infinite projected normal through an edge midpoint to its plane."""
+    if edge not in layer.edges:
+        raise ValueError(
+            f"Graph edge {edge.start_node_id}-{edge.end_node_id} does not exist."
+        )
+    if edge in layer.curve_control_points:
+        raise ValueError("A normal line is available only for a straight edge.")
+    start = layer.nodes[edge.start_node_id].position()
+    end = layer.nodes[edge.end_node_id].position()
+    delta_x = end[0] - start[0]
+    delta_y = end[1] - start[1]
+    if float(np.hypot(delta_x, delta_y)) <= 0.0:
+        raise ValueError(
+            "A normal line cannot be displayed for a zero-length projected edge."
+        )
+
+    midpoint = ((start[0] + end[0]) / 2.0, (start[1] + end[1]) / 2.0)
+    return _clip_infinite_line_to_plane(
+        midpoint,
+        (-delta_y, delta_x),
+        layer.plane_shape,
+    )
+
+
+def extension_line_plane_endpoints(
+    layer: ProjectionGraphLayer,
+    edge: GraphEdge,
+) -> tuple[tuple[float, float], tuple[float, float]]:
+    """Clip the infinite supporting line of a projected edge to its plane."""
+    if edge not in layer.edges:
+        raise ValueError(
+            f"Graph edge {edge.start_node_id}-{edge.end_node_id} does not exist."
+        )
+    if edge in layer.curve_control_points:
+        raise ValueError("An extension line is available only for a straight edge.")
+    start = layer.nodes[edge.start_node_id].position()
+    end = layer.nodes[edge.end_node_id].position()
+    direction = (end[0] - start[0], end[1] - start[1])
+    if float(np.hypot(*direction)) <= 0.0:
+        raise ValueError(
+            "An extension line cannot be displayed for a zero-length projected edge."
+        )
+    return _clip_infinite_line_to_plane(start, direction, layer.plane_shape)
+
+
+def _clip_infinite_line_to_plane(
+    point: tuple[float, float],
+    direction: tuple[float, float],
+    plane_shape: tuple[int, int],
+) -> tuple[tuple[float, float], tuple[float, float]]:
+    width, height = plane_shape
+    max_x = float(width - 1)
+    max_y = float(height - 1)
+    intersections: list[tuple[float, tuple[float, float]]] = []
+
+    if direction[0] != 0.0:
+        for x in (0.0, max_x):
+            parameter = (x - point[0]) / direction[0]
+            y = point[1] + (parameter * direction[1])
+            if -1e-9 <= y <= max_y + 1e-9:
+                intersections.append((parameter, (x, min(max(y, 0.0), max_y))))
+    if direction[1] != 0.0:
+        for y in (0.0, max_y):
+            parameter = (y - point[1]) / direction[1]
+            x = point[0] + (parameter * direction[0])
+            if -1e-9 <= x <= max_x + 1e-9:
+                intersections.append((parameter, (min(max(x, 0.0), max_x), y)))
+
+    if len(intersections) < 2:
+        raise ValueError(
+            "The projected construction line does not cross the graph plane."
+        )
+    intersections.sort(key=lambda item: item[0])
+    return intersections[0][1], intersections[-1][1]
+
+
 def _nearest_segment_parameter(
     point: tuple[float, float],
     start: tuple[float, float],

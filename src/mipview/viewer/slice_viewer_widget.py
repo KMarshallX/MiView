@@ -23,7 +23,12 @@ from mipview.graph.curve import point_to_quadratic_bezier_distance
 from mipview.graph.geometry import point_to_segment_distance
 from mipview.graph.measurement import DirectedGraphVector
 from mipview.graph.model import GraphEdge, ProjectionGraphLayer
+from mipview.graph.spatial import (
+    extension_line_plane_endpoints,
+    normal_line_plane_endpoints,
+)
 from mipview.viewer.intensity import normalize_slice_to_uint8, window_slice_to_uint8
+from mipview.segmentation.overlay import build_segmentation_overlay_rgba
 from mipview.viewer.oriented_volume import OrientedVolume
 from mipview.viewer.ruler import display_voxel_spacing_mm, select_ruler_geometry
 from mipview.patch.selector import (
@@ -119,6 +124,10 @@ class SliceViewerWidget(QWidget):
         self._graph_selected_edge: GraphEdge | None = None
         self._graph_curve_handle_visible = False
         self._graph_angle_vectors: tuple[DirectedGraphVector, ...] = ()
+        self._graph_normal_line_edge: GraphEdge | None = None
+        self._graph_normal_line_thickness = 1
+        self._graph_extension_line_edge: GraphEdge | None = None
+        self._graph_extension_line_thickness = 1
         self._active_patch_resize_handle: str | None = None
         self._interaction_mode: str | None = None
         self._last_drag_position: QPointF | None = None
@@ -240,6 +249,10 @@ class SliceViewerWidget(QWidget):
         selected_edge: GraphEdge | None,
         curve_handle_visible: bool,
         angle_vectors: tuple[DirectedGraphVector, ...],
+        normal_line_edge: GraphEdge | None = None,
+        normal_line_thickness: int = 1,
+        extension_line_edge: GraphEdge | None = None,
+        extension_line_thickness: int = 1,
     ) -> None:
         self._graph_layer = layer
         self._graph_editing_enabled = bool(editing_enabled)
@@ -254,6 +267,13 @@ class SliceViewerWidget(QWidget):
         self._graph_selected_edge = selected_edge
         self._graph_curve_handle_visible = bool(curve_handle_visible)
         self._graph_angle_vectors = tuple(angle_vectors)
+        self._graph_normal_line_edge = normal_line_edge
+        self._graph_normal_line_thickness = max(int(normal_line_thickness), 1)
+        self._graph_extension_line_edge = extension_line_edge
+        self._graph_extension_line_thickness = max(
+            int(extension_line_thickness),
+            1,
+        )
         if self._graph_pending_node_id is None:
             self._graph_preview_label_position = None
         self._update_scaled_pixmap()
@@ -581,6 +601,7 @@ class SliceViewerWidget(QWidget):
 
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        self._draw_graph_extension_line(painter, display_rect, alpha)
         edge_pen = QPen(edge_color, self._graph_edge_thickness)
         edge_pen.setCosmetic(True)
         painter.setPen(edge_pen)
@@ -601,6 +622,7 @@ class SliceViewerWidget(QWidget):
                     path.quadTo(control_position, end)
                     painter.drawPath(path)
 
+        self._draw_graph_normal_line(painter, display_rect, alpha)
         self._draw_graph_angle_vectors(painter, node_positions, alpha)
 
         painter.setPen(Qt.PenStyle.NoPen)
@@ -641,6 +663,62 @@ class SliceViewerWidget(QWidget):
                 painter.setBrush(Qt.BrushStyle.NoBrush)
                 painter.drawLine(start, self._graph_preview_label_position)
         painter.restore()
+
+    def _draw_graph_extension_line(
+        self,
+        painter: QPainter,
+        display_rect: DisplayRect,
+        alpha: int,
+    ) -> None:
+        if self._graph_layer is None or self._graph_extension_line_edge is None:
+            return
+        try:
+            first, second = extension_line_plane_endpoints(
+                self._graph_layer,
+                self._graph_extension_line_edge,
+            )
+        except ValueError:
+            return
+        extension_pen = QPen(
+            QColor(0, 191, 255, alpha),
+            self._graph_extension_line_thickness,
+        )
+        extension_pen.setCosmetic(True)
+        extension_pen.setStyle(Qt.PenStyle.DashLine)
+        painter.setPen(extension_pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawLine(
+            self._graph_projection_point_to_screen(first, display_rect),
+            self._graph_projection_point_to_screen(second, display_rect),
+        )
+
+    def _draw_graph_normal_line(
+        self,
+        painter: QPainter,
+        display_rect: DisplayRect,
+        alpha: int,
+    ) -> None:
+        if self._graph_layer is None or self._graph_normal_line_edge is None:
+            return
+        try:
+            first, second = normal_line_plane_endpoints(
+                self._graph_layer,
+                self._graph_normal_line_edge,
+            )
+        except ValueError:
+            return
+        normal_pen = QPen(
+            QColor(255, 255, 0, alpha),
+            self._graph_normal_line_thickness,
+        )
+        normal_pen.setCosmetic(True)
+        normal_pen.setStyle(Qt.PenStyle.DashLine)
+        painter.setPen(normal_pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawLine(
+            self._graph_projection_point_to_screen(first, display_rect),
+            self._graph_projection_point_to_screen(second, display_rect),
+        )
 
     def _draw_graph_angle_vectors(
         self,
@@ -939,17 +1017,14 @@ class SliceViewerWidget(QWidget):
                 self.orientation,
                 display_cursor,
             )
-        segmentation_mask = np.asarray(segmentation_slice) > 0
-        if not np.any(segmentation_mask):
+        overlay = build_segmentation_overlay_rgba(
+            segmentation_slice,
+            opacity=self._segmentation_overlay_opacity,
+        )
+        if not np.any(overlay[..., 3]):
             return
 
-        height, width = segmentation_mask.shape
-        overlay = np.zeros((height, width, 4), dtype=np.uint8)
-        overlay[..., 0] = 255
-        overlay[..., 3] = (
-            segmentation_mask.astype(np.uint8)
-            * int(round(self._segmentation_overlay_opacity * 255.0))
-        )
+        height, width = overlay.shape[:2]
         overlay_contiguous = np.ascontiguousarray(overlay)
         overlay_image = QImage(
             overlay_contiguous.data,

@@ -39,6 +39,12 @@ class ProjectionGraphState:
     angle_vector_1: DirectedGraphVector | None = None
     angle_vector_2: DirectedGraphVector | None = None
     calculated_angle_degrees: float | None = None
+    normal_line_orientation: Orientation | None = None
+    normal_line_edge: GraphEdge | None = None
+    normal_line_thickness: int = 1
+    extension_line_orientation: Orientation | None = None
+    extension_line_edge: GraphEdge | None = None
+    extension_line_thickness: int = 1
     _orientation_signature: tuple[float, ...] | None = field(
         default=None,
         repr=False,
@@ -114,6 +120,7 @@ class ProjectionGraphState:
     ) -> GraphEdge:
         edge = GraphEdge.between(first_node_id, second_node_id)
         self.graph.ensure_curve_control_point(edge)
+        self.invalidate_construction_lines(edge)
         self.active_tool = "curve_edge"
         self.selected_edge_orientation = orientation
         self.selected_edge = edge
@@ -243,6 +250,93 @@ class ProjectionGraphState:
         if self.active_tool == "calculate_angle":
             self.active_tool = None
 
+    def clear_graph(self) -> tuple[int, int]:
+        """Clear completed geometry and all interactions derived from it."""
+        node_count = len(self.graph.nodes)
+        edge_count = len(self.graph.edges)
+        self.graph.clear()
+        self.cancel_pending_edge()
+        self.cancel_active_tool()
+        self.clear_angle()
+        self.clear_normal_line()
+        self.clear_extension_line()
+        return node_count, edge_count
+
+    def set_normal_line(
+        self,
+        orientation: Orientation,
+        edge: GraphEdge,
+        visible: bool,
+    ) -> bool:
+        if visible:
+            if edge not in self.graph.edges:
+                raise ValueError(
+                    f"Graph edge {edge.start_node_id}-{edge.end_node_id} does not exist."
+                )
+            if edge in self.graph.curve_control_points:
+                raise ValueError("A normal line is available only for a straight edge.")
+            self.normal_line_orientation = orientation
+            self.normal_line_edge = edge
+            return True
+        if (
+            self.normal_line_orientation == orientation
+            and self.normal_line_edge == edge
+        ):
+            self.clear_normal_line()
+        return False
+
+    def clear_normal_line(self) -> None:
+        self.normal_line_orientation = None
+        self.normal_line_edge = None
+
+    def set_extension_line(
+        self,
+        orientation: Orientation,
+        edge: GraphEdge,
+        visible: bool,
+    ) -> bool:
+        if visible:
+            if edge not in self.graph.edges:
+                raise ValueError(
+                    f"Graph edge {edge.start_node_id}-{edge.end_node_id} does not exist."
+                )
+            if edge in self.graph.curve_control_points:
+                raise ValueError(
+                    "An extension line is available only for a straight edge."
+                )
+            self.extension_line_orientation = orientation
+            self.extension_line_edge = edge
+            return True
+        if (
+            self.extension_line_orientation == orientation
+            and self.extension_line_edge == edge
+        ):
+            self.clear_extension_line()
+        return False
+
+    def clear_extension_line(self) -> None:
+        self.extension_line_orientation = None
+        self.extension_line_edge = None
+
+    def invalidate_edge(self, edge: GraphEdge) -> None:
+        if self.selected_edge == edge:
+            self.selected_edge_orientation = None
+            self.selected_edge = None
+            self.curve_drag_active = False
+        self.invalidate_construction_lines(edge)
+
+    def invalidate_construction_lines(self, edge: GraphEdge) -> None:
+        self.invalidate_normal_line(edge)
+        self.invalidate_extension_line(edge)
+
+    def invalidate_normal_line(self, edge: GraphEdge) -> None:
+        if self.normal_line_edge == edge:
+            self.clear_normal_line()
+
+    def invalidate_extension_line(self, edge: GraphEdge) -> None:
+        if self.extension_line_edge == edge:
+            self.clear_extension_line()
+
     def invalidate_node(self, node_id: int) -> None:
         normalized_id = int(node_id)
         if self.selected_edge is not None and normalized_id in (
@@ -254,6 +348,16 @@ class ProjectionGraphState:
             self.curve_drag_active = False
         if self.pending_edge_node_id == normalized_id:
             self.cancel_pending_edge()
+        if self.normal_line_edge is not None and normalized_id in (
+            self.normal_line_edge.start_node_id,
+            self.normal_line_edge.end_node_id,
+        ):
+            self.clear_normal_line()
+        if self.extension_line_edge is not None and normalized_id in (
+            self.extension_line_edge.start_node_id,
+            self.extension_line_edge.end_node_id,
+        ):
+            self.clear_extension_line()
         measurement_invalidated = False
         for vector_name in ("angle_vector_1", "angle_vector_2"):
             vector = getattr(self, vector_name)
@@ -302,6 +406,26 @@ class ProjectionGraphState:
             "angle_vector_1": _vector_summary(self.angle_vector_1),
             "angle_vector_2": _vector_summary(self.angle_vector_2),
             "angle_degrees": self.calculated_angle_degrees,
+            "normal_line": (
+                None
+                if self.normal_line_edge is None
+                else {
+                    "orientation": self.normal_line_orientation,
+                    "start_node_id": self.normal_line_edge.start_node_id,
+                    "end_node_id": self.normal_line_edge.end_node_id,
+                    "thickness": self.normal_line_thickness,
+                }
+            ),
+            "extension_line": (
+                None
+                if self.extension_line_edge is None
+                else {
+                    "orientation": self.extension_line_orientation,
+                    "start_node_id": self.extension_line_edge.start_node_id,
+                    "end_node_id": self.extension_line_edge.end_node_id,
+                    "thickness": self.extension_line_thickness,
+                }
+            ),
             "voxel_graph": {
                 "volume_shape": (
                     None
@@ -322,6 +446,8 @@ class ProjectionGraphState:
         self.cancel_pending_edge()
         self.cancel_active_tool()
         self.clear_angle()
+        self.clear_normal_line()
+        self.clear_extension_line()
 
     def _selected_edge_summary(self) -> dict[str, object] | None:
         if self.selected_edge is None:

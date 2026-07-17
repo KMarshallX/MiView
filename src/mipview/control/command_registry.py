@@ -63,9 +63,15 @@ class CommandRegistry:
         self.register("graph.delete_edge", self.controller.delete_graph_edge)
         self.register("graph.curve_edge", self.controller.curve_graph_edge)
         self.register("graph.straighten_edge", self.controller.straighten_graph_edge)
+        self.register("graph.set_normal_line", self.controller.set_graph_normal_line)
+        self.register(
+            "graph.set_extension_line",
+            self.controller.set_graph_extension_line,
+        )
         self.register("graph.split_edge", self.controller.split_graph_edge)
         self.register("graph.calculate_angle", self.controller.calculate_graph_angle)
         self.register("graph.clear_angle", self.controller.clear_graph_angle)
+        self.register("graph.clear", self.controller.clear_graph)
         self.register("annotation.create", self.controller.create_annotation)
         self.register("annotation.paint_stroke", self.controller.paint_annotation_stroke)
         self.register("annotation.erase_stroke", self.controller.erase_annotation_stroke)
