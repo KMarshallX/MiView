@@ -6,11 +6,12 @@ from typing import Literal, Mapping
 import numpy as np
 
 from mipview.graph.measurement import (
-    DirectedGraphVector,
+    AngleMeasurement,
     calculate_unsigned_angle_degrees,
 )
 from mipview.graph.model import GraphEdge, ProjectionGraphLayer, VoxelGraph
 from mipview.graph.spatial import build_projected_graph_layer
+from mipview.graph.vector import GraphVector, GraphVectorKind, VECTOR_COLOR_PRESET
 from mipview.viewer.oriented_volume import OrientedVolume
 from mipview.viewer.slice_geometry import Orientation
 
@@ -30,21 +31,18 @@ class ProjectionGraphState:
     active_orientation: Orientation | None = None
     pending_edge_orientation: Orientation | None = None
     pending_edge_node_id: int | None = None
+    pending_vector_orientation: Orientation | None = None
+    pending_vector_source_node_id: int | None = None
     active_tool: GraphTool | None = None
     selected_edge_orientation: Orientation | None = None
     selected_edge: GraphEdge | None = None
+    selected_vector_id: int | None = None
     curve_drag_active: bool = False
-    angle_selection_step: int = 0
-    angle_draft_nodes: list[tuple[Orientation, int]] = field(default_factory=list)
-    angle_vector_1: DirectedGraphVector | None = None
-    angle_vector_2: DirectedGraphVector | None = None
-    calculated_angle_degrees: float | None = None
-    normal_line_orientation: Orientation | None = None
-    normal_line_edge: GraphEdge | None = None
-    normal_line_thickness: int = 1
-    extension_line_orientation: Orientation | None = None
-    extension_line_edge: GraphEdge | None = None
-    extension_line_thickness: int = 1
+    angle_source_vector_id: int | None = None
+    vectors: dict[int, GraphVector] = field(default_factory=dict)
+    angle_measurements: dict[int, AngleMeasurement] = field(default_factory=dict)
+    _next_vector_id: int = 1
+    _next_measurement_id: int = 1
     _orientation_signature: tuple[float, ...] | None = field(
         default=None,
         repr=False,
@@ -95,9 +93,9 @@ class ProjectionGraphState:
         self.edge_thickness = min(max(int(edge_thickness), 1), 10)
 
     def begin_edge(self, orientation: Orientation, node_id: int) -> None:
-        if int(node_id) not in self.graph.nodes:
-            raise ValueError(f"Graph node {node_id} does not exist.")
+        self._ensure_node(node_id)
         self.cancel_active_tool()
+        self.cancel_pending_vector()
         self.pending_edge_orientation = orientation
         self.pending_edge_node_id = int(node_id)
         self.active_orientation = orientation
@@ -106,9 +104,112 @@ class ProjectionGraphState:
         self.pending_edge_orientation = None
         self.pending_edge_node_id = None
 
+    def begin_vector(self, orientation: Orientation, source_node_id: int) -> None:
+        self._ensure_node(source_node_id)
+        self.cancel_active_tool()
+        self.cancel_pending_edge()
+        self.pending_vector_orientation = orientation
+        self.pending_vector_source_node_id = int(source_node_id)
+        self.active_orientation = orientation
+
+    def cancel_pending_vector(self) -> None:
+        self.pending_vector_orientation = None
+        self.pending_vector_source_node_id = None
+
+    def add_node_vector(
+        self,
+        orientation: Orientation,
+        source_node_id: int,
+        target_node_id: int,
+    ) -> GraphVector:
+        self._ensure_node(source_node_id)
+        self._ensure_node(target_node_id)
+        vector = self._new_vector(
+            orientation=orientation,
+            kind="node_pair",
+            source_node_id=int(source_node_id),
+            target_node_id=int(target_node_id),
+        )
+        self.cancel_pending_vector()
+        self.selected_vector_id = vector.id
+        self.active_orientation = orientation
+        return vector
+
+    def add_edge_vector(
+        self,
+        orientation: Orientation,
+        edge: GraphEdge,
+        kind: Literal["edge_tangent", "edge_normal"],
+    ) -> GraphVector:
+        if edge not in self.graph.edges:
+            raise ValueError(
+                f"Graph edge {edge.start_node_id}-{edge.end_node_id} does not exist."
+            )
+        if edge in self.graph.curve_control_points:
+            raise ValueError("Tangent and normal vectors require a straight edge.")
+        for existing in self.vectors.values():
+            if (
+                existing.orientation == orientation
+                and existing.kind == kind
+                and existing.edge == edge
+            ):
+                raise ValueError(
+                    f"The {kind.removeprefix('edge_')} vector is already displayed "
+                    f"for edge {edge.start_node_id}-{edge.end_node_id} in {orientation}."
+                )
+        vector = self._new_vector(orientation=orientation, kind=kind, edge=edge)
+        self.selected_vector_id = vector.id
+        self.active_orientation = orientation
+        return vector
+
+    def vector_for_edge(
+        self,
+        orientation: Orientation,
+        edge: GraphEdge,
+        kind: Literal["edge_tangent", "edge_normal"],
+    ) -> GraphVector | None:
+        return next(
+            (
+                vector
+                for vector in self.vectors.values()
+                if vector.orientation == orientation
+                and vector.edge == edge
+                and vector.kind == kind
+            ),
+            None,
+        )
+
+    def flip_vector(
+        self,
+        vector_id: int,
+        node_positions: Mapping[int, tuple[float, float]],
+        in_plane_spacing: tuple[float, float],
+    ) -> GraphVector:
+        vector = self._ensure_vector(vector_id)
+        flipped = vector.flipped()
+        self.vectors[flipped.id] = flipped
+        self.selected_vector_id = flipped.id
+        self._recalculate_measurements_for_vector(
+            flipped.id,
+            node_positions,
+            in_plane_spacing,
+        )
+        return flipped
+
+    def delete_vector(self, vector_id: int) -> GraphVector:
+        vector = self._ensure_vector(vector_id)
+        del self.vectors[vector.id]
+        self._delete_measurements_for_vector(vector.id)
+        if self.selected_vector_id == vector.id:
+            self.selected_vector_id = None
+        if self.angle_source_vector_id == vector.id:
+            self.angle_source_vector_id = None
+        return vector
+
     def activate_curve_tool(self) -> None:
         self.cancel_pending_edge()
-        self._clear_angle_draft()
+        self.cancel_pending_vector()
+        self.angle_source_vector_id = None
         self.active_tool = "curve_edge"
         self.curve_drag_active = False
 
@@ -120,7 +221,7 @@ class ProjectionGraphState:
     ) -> GraphEdge:
         edge = GraphEdge.between(first_node_id, second_node_id)
         self.graph.ensure_curve_control_point(edge)
-        self.invalidate_construction_lines(edge)
+        self.invalidate_edge_vectors(edge)
         self.active_tool = "curve_edge"
         self.selected_edge_orientation = orientation
         self.selected_edge = edge
@@ -130,251 +231,134 @@ class ProjectionGraphState:
 
     def activate_angle_tool(self) -> None:
         self.cancel_pending_edge()
+        self.cancel_pending_vector()
         self.selected_edge_orientation = None
         self.selected_edge = None
         self.curve_drag_active = False
         self.active_tool = "calculate_angle"
-        self._clear_angle_draft()
+        self.angle_source_vector_id = None
 
-    def select_angle_node(
+    def select_angle_vector(
         self,
-        orientation: Orientation,
-        node_id: int,
+        vector_id: int,
         node_positions: Mapping[int, tuple[float, float]],
         in_plane_spacing: tuple[float, float],
-    ) -> float | None:
+    ) -> AngleMeasurement | None:
         if self.active_tool != "calculate_angle":
             raise ValueError("Calculate Angle tool is not active.")
-        normalized_id = int(node_id)
-        if normalized_id not in self.graph.nodes:
-            raise ValueError(f"Graph node {normalized_id} does not exist.")
-        if self.angle_draft_nodes and orientation != self.angle_draft_nodes[0][0]:
-            raise ValueError("Both vectors must use the same projection orientation.")
-        if self.angle_selection_step in (1, 3):
-            source_id = self.angle_draft_nodes[-1][1]
-            if normalized_id == source_id:
-                raise ValueError("Vector source and target nodes must be different.")
-
-        self.angle_draft_nodes.append((orientation, normalized_id))
-        self.angle_selection_step = len(self.angle_draft_nodes)
-        self.active_orientation = orientation
-        if self.angle_selection_step < 4:
+        vector = self._ensure_vector(vector_id)
+        self.selected_vector_id = vector.id
+        self.active_orientation = vector.orientation
+        if self.angle_source_vector_id is None:
+            self.angle_source_vector_id = vector.id
             return None
-
-        first = DirectedGraphVector(
-            orientation,
-            self.angle_draft_nodes[0][1],
-            self.angle_draft_nodes[1][1],
-        )
-        second = DirectedGraphVector(
-            orientation,
-            self.angle_draft_nodes[2][1],
-            self.angle_draft_nodes[3][1],
-        )
-        angle = calculate_unsigned_angle_degrees(
-            first,
-            second,
+        measurement = self.calculate_angle(
+            self.angle_source_vector_id,
+            vector.id,
             node_positions,
             in_plane_spacing,
         )
-        self.angle_vector_1 = first
-        self.angle_vector_2 = second
-        self.calculated_angle_degrees = angle
-        self._clear_angle_draft()
-        self.active_tool = None
-        return angle
+        self.angle_source_vector_id = None
+        return measurement
 
     def calculate_angle(
         self,
-        orientation: Orientation,
-        vector_1_source: int,
-        vector_1_target: int,
-        vector_2_source: int,
-        vector_2_target: int,
+        source_vector_id: int,
+        target_vector_id: int,
         node_positions: Mapping[int, tuple[float, float]],
         in_plane_spacing: tuple[float, float],
-    ) -> float:
-        first = DirectedGraphVector(
-            orientation,
-            int(vector_1_source),
-            int(vector_1_target),
-        )
-        second = DirectedGraphVector(
-            orientation,
-            int(vector_2_source),
-            int(vector_2_target),
-        )
+    ) -> AngleMeasurement:
+        source = self._ensure_vector(source_vector_id)
+        target = self._ensure_vector(target_vector_id)
+        if source.id == target.id:
+            raise ValueError("Angle source and target vectors must be different.")
+        if source.orientation != target.orientation:
+            raise ValueError("Angle source and target vectors must share one projection.")
         angle = calculate_unsigned_angle_degrees(
-            first,
-            second,
+            source,
+            target,
             node_positions,
             in_plane_spacing,
         )
-        self.angle_vector_1 = first
-        self.angle_vector_2 = second
-        self.calculated_angle_degrees = angle
-        self._clear_angle_draft()
-        if self.active_tool == "calculate_angle":
-            self.active_tool = None
-        return angle
+        measurement = AngleMeasurement(
+            id=self._next_measurement_id,
+            source_vector_id=source.id,
+            target_vector_id=target.id,
+            angle_degrees=angle,
+        )
+        self.angle_measurements[measurement.id] = measurement
+        self._next_measurement_id += 1
+        self.active_orientation = source.orientation
+        return measurement
 
-    def draft_angle_vectors(self) -> tuple[DirectedGraphVector, ...]:
-        if len(self.angle_draft_nodes) < 2:
-            return ()
-        first = DirectedGraphVector(
-            self.angle_draft_nodes[0][0],
-            self.angle_draft_nodes[0][1],
-            self.angle_draft_nodes[1][1],
-        )
-        if len(self.angle_draft_nodes) < 4:
-            return (first,)
-        second = DirectedGraphVector(
-            self.angle_draft_nodes[2][0],
-            self.angle_draft_nodes[2][1],
-            self.angle_draft_nodes[3][1],
-        )
-        return (first, second)
+    def delete_angle(self, measurement_id: int) -> AngleMeasurement:
+        normalized = int(measurement_id)
+        measurement = self.angle_measurements.get(normalized)
+        if measurement is None:
+            raise ValueError(f"Graph angle measurement A{normalized} does not exist.")
+        del self.angle_measurements[normalized]
+        return measurement
+
+    def clear_angles(self) -> int:
+        count = len(self.angle_measurements)
+        self.angle_measurements.clear()
+        self.angle_source_vector_id = None
+        return count
 
     def cancel_active_tool(self) -> None:
         self.active_tool = None
         self.selected_edge_orientation = None
         self.selected_edge = None
         self.curve_drag_active = False
-        self._clear_angle_draft()
-
-    def clear_angle(self) -> None:
-        self._clear_angle_draft()
-        self.angle_vector_1 = None
-        self.angle_vector_2 = None
-        self.calculated_angle_degrees = None
-        if self.active_tool == "calculate_angle":
-            self.active_tool = None
+        self.angle_source_vector_id = None
 
     def clear_graph(self) -> tuple[int, int]:
-        """Clear completed geometry and all interactions derived from it."""
         node_count = len(self.graph.nodes)
         edge_count = len(self.graph.edges)
         self.graph.clear()
         self.cancel_pending_edge()
+        self.cancel_pending_vector()
         self.cancel_active_tool()
-        self.clear_angle()
-        self.clear_normal_line()
-        self.clear_extension_line()
+        self._clear_vectors_and_angles()
         return node_count, edge_count
-
-    def set_normal_line(
-        self,
-        orientation: Orientation,
-        edge: GraphEdge,
-        visible: bool,
-    ) -> bool:
-        if visible:
-            if edge not in self.graph.edges:
-                raise ValueError(
-                    f"Graph edge {edge.start_node_id}-{edge.end_node_id} does not exist."
-                )
-            if edge in self.graph.curve_control_points:
-                raise ValueError("A normal line is available only for a straight edge.")
-            self.normal_line_orientation = orientation
-            self.normal_line_edge = edge
-            return True
-        if (
-            self.normal_line_orientation == orientation
-            and self.normal_line_edge == edge
-        ):
-            self.clear_normal_line()
-        return False
-
-    def clear_normal_line(self) -> None:
-        self.normal_line_orientation = None
-        self.normal_line_edge = None
-
-    def set_extension_line(
-        self,
-        orientation: Orientation,
-        edge: GraphEdge,
-        visible: bool,
-    ) -> bool:
-        if visible:
-            if edge not in self.graph.edges:
-                raise ValueError(
-                    f"Graph edge {edge.start_node_id}-{edge.end_node_id} does not exist."
-                )
-            if edge in self.graph.curve_control_points:
-                raise ValueError(
-                    "An extension line is available only for a straight edge."
-                )
-            self.extension_line_orientation = orientation
-            self.extension_line_edge = edge
-            return True
-        if (
-            self.extension_line_orientation == orientation
-            and self.extension_line_edge == edge
-        ):
-            self.clear_extension_line()
-        return False
-
-    def clear_extension_line(self) -> None:
-        self.extension_line_orientation = None
-        self.extension_line_edge = None
 
     def invalidate_edge(self, edge: GraphEdge) -> None:
         if self.selected_edge == edge:
             self.selected_edge_orientation = None
             self.selected_edge = None
             self.curve_drag_active = False
-        self.invalidate_construction_lines(edge)
+        self.invalidate_edge_vectors(edge)
 
-    def invalidate_construction_lines(self, edge: GraphEdge) -> None:
-        self.invalidate_normal_line(edge)
-        self.invalidate_extension_line(edge)
-
-    def invalidate_normal_line(self, edge: GraphEdge) -> None:
-        if self.normal_line_edge == edge:
-            self.clear_normal_line()
-
-    def invalidate_extension_line(self, edge: GraphEdge) -> None:
-        if self.extension_line_edge == edge:
-            self.clear_extension_line()
+    def invalidate_edge_vectors(self, edge: GraphEdge) -> None:
+        for vector_id in [
+            vector.id for vector in self.vectors.values() if vector.references_edge(edge)
+        ]:
+            self.delete_vector(vector_id)
 
     def invalidate_node(self, node_id: int) -> None:
-        normalized_id = int(node_id)
-        if self.selected_edge is not None and normalized_id in (
+        normalized = int(node_id)
+        if self.selected_edge is not None and normalized in (
             self.selected_edge.start_node_id,
             self.selected_edge.end_node_id,
         ):
             self.selected_edge_orientation = None
             self.selected_edge = None
             self.curve_drag_active = False
-        if self.pending_edge_node_id == normalized_id:
+        if self.pending_edge_node_id == normalized:
             self.cancel_pending_edge()
-        if self.normal_line_edge is not None and normalized_id in (
-            self.normal_line_edge.start_node_id,
-            self.normal_line_edge.end_node_id,
-        ):
-            self.clear_normal_line()
-        if self.extension_line_edge is not None and normalized_id in (
-            self.extension_line_edge.start_node_id,
-            self.extension_line_edge.end_node_id,
-        ):
-            self.clear_extension_line()
-        measurement_invalidated = False
-        for vector_name in ("angle_vector_1", "angle_vector_2"):
-            vector = getattr(self, vector_name)
-            if vector is not None and normalized_id in (
-                vector.source_node_id,
-                vector.target_node_id,
-            ):
-                setattr(self, vector_name, None)
-                measurement_invalidated = True
-        if measurement_invalidated:
-            self.calculated_angle_degrees = None
-        if any(draft_id == normalized_id for _, draft_id in self.angle_draft_nodes):
-            self._clear_angle_draft()
+        if self.pending_vector_source_node_id == normalized:
+            self.cancel_pending_vector()
+        for vector_id in [
+            vector.id
+            for vector in self.vectors.values()
+            if vector.references_node(normalized)
+        ]:
+            self.delete_vector(vector_id)
 
     def exit_editing(self) -> None:
         self.editing_enabled = False
         self.cancel_pending_edge()
+        self.cancel_pending_vector()
         self.cancel_active_tool()
 
     def summary(self) -> dict[str, object]:
@@ -387,6 +371,7 @@ class ProjectionGraphState:
             "active_orientation": self.active_orientation,
             "active_tool": self.active_tool,
             "selected_edge": self._selected_edge_summary(),
+            "selected_vector_id": self.selected_vector_id,
             "curve_drag_active": self.curve_drag_active,
             "pending_edge": (
                 None
@@ -396,36 +381,37 @@ class ProjectionGraphState:
                     "start_node_id": self.pending_edge_node_id,
                 }
             ),
+            "pending_vector": (
+                None
+                if self.pending_vector_source_node_id is None
+                else {
+                    "orientation": self.pending_vector_orientation,
+                    "source_node_id": self.pending_vector_source_node_id,
+                }
+            ),
             "angle_selection": {
-                "step": self.angle_selection_step,
-                "node_ids": [node_id for _, node_id in self.angle_draft_nodes],
+                "source_vector_id": self.angle_source_vector_id,
                 "orientation": (
-                    None if not self.angle_draft_nodes else self.angle_draft_nodes[0][0]
+                    None
+                    if self.angle_source_vector_id is None
+                    else self.vectors[self.angle_source_vector_id].orientation
                 ),
             },
-            "angle_vector_1": _vector_summary(self.angle_vector_1),
-            "angle_vector_2": _vector_summary(self.angle_vector_2),
-            "angle_degrees": self.calculated_angle_degrees,
-            "normal_line": (
-                None
-                if self.normal_line_edge is None
-                else {
-                    "orientation": self.normal_line_orientation,
-                    "start_node_id": self.normal_line_edge.start_node_id,
-                    "end_node_id": self.normal_line_edge.end_node_id,
-                    "thickness": self.normal_line_thickness,
+            "vectors": [
+                self._vector_summary(vector)
+                for vector in sorted(self.vectors.values(), key=lambda item: item.id)
+            ],
+            "angle_measurements": [
+                {
+                    "id": measurement.id,
+                    "source_vector_id": measurement.source_vector_id,
+                    "target_vector_id": measurement.target_vector_id,
+                    "angle_degrees": measurement.angle_degrees,
                 }
-            ),
-            "extension_line": (
-                None
-                if self.extension_line_edge is None
-                else {
-                    "orientation": self.extension_line_orientation,
-                    "start_node_id": self.extension_line_edge.start_node_id,
-                    "end_node_id": self.extension_line_edge.end_node_id,
-                    "thickness": self.extension_line_thickness,
-                }
-            ),
+                for measurement in sorted(
+                    self.angle_measurements.values(), key=lambda item: item.id
+                )
+            ],
             "voxel_graph": {
                 "volume_shape": (
                     None
@@ -438,16 +424,88 @@ class ProjectionGraphState:
             },
         }
 
-    def _clear_angle_draft(self) -> None:
-        self.angle_draft_nodes.clear()
-        self.angle_selection_step = 0
+    def _new_vector(
+        self,
+        *,
+        orientation: Orientation,
+        kind: GraphVectorKind,
+        source_node_id: int | None = None,
+        target_node_id: int | None = None,
+        edge: GraphEdge | None = None,
+    ) -> GraphVector:
+        vector = GraphVector(
+            id=self._next_vector_id,
+            orientation=orientation,
+            kind=kind,
+            color_index=(self._next_vector_id - 1) % len(VECTOR_COLOR_PRESET),
+            source_node_id=source_node_id,
+            target_node_id=target_node_id,
+            edge=edge,
+        )
+        self.vectors[vector.id] = vector
+        self._next_vector_id += 1
+        return vector
+
+    def _recalculate_measurements_for_vector(
+        self,
+        vector_id: int,
+        node_positions: Mapping[int, tuple[float, float]],
+        in_plane_spacing: tuple[float, float],
+    ) -> None:
+        for measurement_id, measurement in tuple(self.angle_measurements.items()):
+            if vector_id not in (
+                measurement.source_vector_id,
+                measurement.target_vector_id,
+            ):
+                continue
+            source = self.vectors[measurement.source_vector_id]
+            target = self.vectors[measurement.target_vector_id]
+            self.angle_measurements[measurement_id] = AngleMeasurement(
+                id=measurement.id,
+                source_vector_id=source.id,
+                target_vector_id=target.id,
+                angle_degrees=calculate_unsigned_angle_degrees(
+                    source,
+                    target,
+                    node_positions,
+                    in_plane_spacing,
+                ),
+            )
+
+    def _delete_measurements_for_vector(self, vector_id: int) -> None:
+        for measurement_id in [
+            measurement.id
+            for measurement in self.angle_measurements.values()
+            if vector_id
+            in (measurement.source_vector_id, measurement.target_vector_id)
+        ]:
+            del self.angle_measurements[measurement_id]
+
+    def _clear_vectors_and_angles(self) -> None:
+        self.vectors.clear()
+        self.angle_measurements.clear()
+        self.selected_vector_id = None
+        self.angle_source_vector_id = None
+        self._next_vector_id = 1
+        self._next_measurement_id = 1
 
     def _clear_after_geometry_change(self) -> None:
         self.cancel_pending_edge()
+        self.cancel_pending_vector()
         self.cancel_active_tool()
-        self.clear_angle()
-        self.clear_normal_line()
-        self.clear_extension_line()
+        self._clear_vectors_and_angles()
+
+    def _ensure_node(self, node_id: int) -> None:
+        normalized = int(node_id)
+        if normalized not in self.graph.nodes:
+            raise ValueError(f"Graph node {normalized} does not exist.")
+
+    def _ensure_vector(self, vector_id: int) -> GraphVector:
+        normalized = int(vector_id)
+        vector = self.vectors.get(normalized)
+        if vector is None:
+            raise ValueError(f"Graph vector V{normalized} does not exist.")
+        return vector
 
     def _selected_edge_summary(self) -> dict[str, object] | None:
         if self.selected_edge is None:
@@ -458,12 +516,23 @@ class ProjectionGraphState:
             "end_node_id": self.selected_edge.end_node_id,
         }
 
-
-def _vector_summary(vector: DirectedGraphVector | None) -> dict[str, object] | None:
-    if vector is None:
-        return None
-    return {
-        "orientation": vector.orientation,
-        "source_node_id": vector.source_node_id,
-        "target_node_id": vector.target_node_id,
-    }
+    @staticmethod
+    def _vector_summary(vector: GraphVector) -> dict[str, object]:
+        return {
+            "id": vector.id,
+            "orientation": vector.orientation,
+            "kind": vector.kind,
+            "source_node_id": vector.source_node_id,
+            "target_node_id": vector.target_node_id,
+            "edge": (
+                None
+                if vector.edge is None
+                else {
+                    "start_node_id": vector.edge.start_node_id,
+                    "end_node_id": vector.edge.end_node_id,
+                }
+            ),
+            "reversed": vector.reversed,
+            "color_index": vector.color_index,
+            "color": vector.color,
+        }

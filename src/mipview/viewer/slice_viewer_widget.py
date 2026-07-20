@@ -21,12 +21,9 @@ from PySide6.QtWidgets import QApplication, QLabel, QSlider, QVBoxLayout, QWidge
 from mipview.annotation.annotation_overlay import build_annotation_overlay_rgba
 from mipview.graph.curve import point_to_quadratic_bezier_distance
 from mipview.graph.geometry import point_to_segment_distance
-from mipview.graph.measurement import DirectedGraphVector
+from mipview.graph.measurement import AngleMeasurement
 from mipview.graph.model import GraphEdge, ProjectionGraphLayer
-from mipview.graph.spatial import (
-    extension_line_plane_endpoints,
-    normal_line_plane_endpoints,
-)
+from mipview.graph.vector import GraphVector, resolve_graph_vector
 from mipview.viewer.intensity import normalize_slice_to_uint8, window_slice_to_uint8
 from mipview.segmentation.overlay import build_segmentation_overlay_rgba
 from mipview.viewer.oriented_volume import OrientedVolume
@@ -63,12 +60,13 @@ class SliceViewerWidget(QWidget):
     graph_context_requested = Signal(str, object, object, object)
     graph_edge_completion_requested = Signal(str, int)
     graph_edge_cancel_requested = Signal()
+    graph_vector_completion_requested = Signal(str, object, object)
     graph_orientation_interacted = Signal(str)
     graph_curve_edge_selected = Signal(str, int, int)
     graph_curve_control_changed = Signal(str, int, int, float, float)
     graph_curve_drag_state_changed = Signal(bool)
     graph_curve_exit_requested = Signal()
-    graph_angle_node_selected = Signal(str, int)
+    graph_angle_vector_selected = Signal(str, int)
 
     ZOOM_DRAG_SENSITIVITY = 0.01
     PATCH_HANDLE_RADIUS = 3.0
@@ -123,11 +121,12 @@ class SliceViewerWidget(QWidget):
         self._graph_active_tool: str | None = None
         self._graph_selected_edge: GraphEdge | None = None
         self._graph_curve_handle_visible = False
-        self._graph_angle_vectors: tuple[DirectedGraphVector, ...] = ()
-        self._graph_normal_line_edge: GraphEdge | None = None
-        self._graph_normal_line_thickness = 1
-        self._graph_extension_line_edge: GraphEdge | None = None
-        self._graph_extension_line_thickness = 1
+        self._graph_vectors: tuple[GraphVector, ...] = ()
+        self._graph_measurements: tuple[AngleMeasurement, ...] = ()
+        self._graph_selected_vector_id: int | None = None
+        self._graph_angle_source_vector_id: int | None = None
+        self._graph_pending_vector_orientation: Orientation | None = None
+        self._graph_pending_vector_source_node_id: int | None = None
         self._active_patch_resize_handle: str | None = None
         self._interaction_mode: str | None = None
         self._last_drag_position: QPointF | None = None
@@ -248,11 +247,12 @@ class SliceViewerWidget(QWidget):
         active_tool: str | None,
         selected_edge: GraphEdge | None,
         curve_handle_visible: bool,
-        angle_vectors: tuple[DirectedGraphVector, ...],
-        normal_line_edge: GraphEdge | None = None,
-        normal_line_thickness: int = 1,
-        extension_line_edge: GraphEdge | None = None,
-        extension_line_thickness: int = 1,
+        vectors: tuple[GraphVector, ...],
+        measurements: tuple[AngleMeasurement, ...],
+        selected_vector_id: int | None,
+        angle_source_vector_id: int | None,
+        pending_vector_orientation: Orientation | None,
+        pending_vector_source_node_id: int | None,
     ) -> None:
         self._graph_layer = layer
         self._graph_editing_enabled = bool(editing_enabled)
@@ -266,15 +266,16 @@ class SliceViewerWidget(QWidget):
         self._graph_active_tool = active_tool
         self._graph_selected_edge = selected_edge
         self._graph_curve_handle_visible = bool(curve_handle_visible)
-        self._graph_angle_vectors = tuple(angle_vectors)
-        self._graph_normal_line_edge = normal_line_edge
-        self._graph_normal_line_thickness = max(int(normal_line_thickness), 1)
-        self._graph_extension_line_edge = extension_line_edge
-        self._graph_extension_line_thickness = max(
-            int(extension_line_thickness),
-            1,
-        )
-        if self._graph_pending_node_id is None:
+        self._graph_vectors = tuple(vectors)
+        self._graph_measurements = tuple(measurements)
+        self._graph_selected_vector_id = selected_vector_id
+        self._graph_angle_source_vector_id = angle_source_vector_id
+        self._graph_pending_vector_orientation = pending_vector_orientation
+        self._graph_pending_vector_source_node_id = pending_vector_source_node_id
+        if (
+            self._graph_pending_node_id is None
+            and self._graph_pending_vector_source_node_id is None
+        ):
             self._graph_preview_label_position = None
         self._update_scaled_pixmap()
 
@@ -601,7 +602,6 @@ class SliceViewerWidget(QWidget):
 
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        self._draw_graph_extension_line(painter, display_rect, alpha)
         edge_pen = QPen(edge_color, self._graph_edge_thickness)
         edge_pen.setCosmetic(True)
         painter.setPen(edge_pen)
@@ -622,8 +622,14 @@ class SliceViewerWidget(QWidget):
                     path.quadTo(control_position, end)
                     painter.drawPath(path)
 
-        self._draw_graph_normal_line(painter, display_rect, alpha)
-        self._draw_graph_angle_vectors(painter, node_positions, alpha)
+        vector_segments = self._graph_vector_screen_segments(display_rect)
+        self._draw_graph_measurements(
+            painter,
+            display_rect,
+            vector_segments,
+            alpha,
+        )
+        self._draw_graph_vectors(painter, vector_segments, alpha)
 
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(node_color)
@@ -649,13 +655,20 @@ class SliceViewerWidget(QWidget):
                 painter.setBrush(QColor(0, 220, 255, 255))
                 painter.drawEllipse(control_position, 6.0, 6.0)
 
+        pending_preview_node_id = self._graph_pending_node_id
+        preview_color = QColor(57, 255, 20, 255)
         if (
-            self._graph_pending_node_id is not None
+            self._graph_pending_vector_orientation == self.orientation
+            and self._graph_pending_vector_source_node_id is not None
+        ):
+            pending_preview_node_id = self._graph_pending_vector_source_node_id
+            preview_color = QColor(255, 255, 255, 255)
+        if (
+            pending_preview_node_id is not None
             and self._graph_preview_label_position is not None
         ):
-            start = node_positions.get(self._graph_pending_node_id)
+            start = node_positions.get(pending_preview_node_id)
             if start is not None:
-                preview_color = QColor(57, 255, 20, 255)
                 preview_pen = QPen(preview_color, self._graph_edge_thickness)
                 preview_pen.setCosmetic(True)
                 preview_pen.setStyle(Qt.PenStyle.DashLine)
@@ -664,83 +677,94 @@ class SliceViewerWidget(QWidget):
                 painter.drawLine(start, self._graph_preview_label_position)
         painter.restore()
 
-    def _draw_graph_extension_line(
+    def _graph_vector_screen_segments(
         self,
-        painter: QPainter,
         display_rect: DisplayRect,
-        alpha: int,
-    ) -> None:
-        if self._graph_layer is None or self._graph_extension_line_edge is None:
-            return
-        try:
-            first, second = extension_line_plane_endpoints(
-                self._graph_layer,
-                self._graph_extension_line_edge,
-            )
-        except ValueError:
-            return
-        extension_pen = QPen(
-            QColor(0, 191, 255, alpha),
-            self._graph_extension_line_thickness,
-        )
-        extension_pen.setCosmetic(True)
-        extension_pen.setStyle(Qt.PenStyle.DashLine)
-        painter.setPen(extension_pen)
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.drawLine(
-            self._graph_projection_point_to_screen(first, display_rect),
-            self._graph_projection_point_to_screen(second, display_rect),
-        )
-
-    def _draw_graph_normal_line(
-        self,
-        painter: QPainter,
-        display_rect: DisplayRect,
-        alpha: int,
-    ) -> None:
-        if self._graph_layer is None or self._graph_normal_line_edge is None:
-            return
-        try:
-            first, second = normal_line_plane_endpoints(
-                self._graph_layer,
-                self._graph_normal_line_edge,
-            )
-        except ValueError:
-            return
-        normal_pen = QPen(
-            QColor(255, 255, 0, alpha),
-            self._graph_normal_line_thickness,
-        )
-        normal_pen.setCosmetic(True)
-        normal_pen.setStyle(Qt.PenStyle.DashLine)
-        painter.setPen(normal_pen)
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.drawLine(
-            self._graph_projection_point_to_screen(first, display_rect),
-            self._graph_projection_point_to_screen(second, display_rect),
-        )
-
-    def _draw_graph_angle_vectors(
-        self,
-        painter: QPainter,
-        node_positions: dict[int, QPointF],
-        alpha: int,
-    ) -> None:
-        arrow_color = QColor(255, 255, 0, alpha)
-        arrow_pen = QPen(arrow_color, max(self._graph_edge_thickness, 2))
-        arrow_pen.setCosmetic(True)
-        painter.setPen(arrow_pen)
-        painter.setBrush(arrow_color)
-        for vector in self._graph_angle_vectors:
-            start = node_positions.get(vector.source_node_id)
-            end = node_positions.get(vector.target_node_id)
-            if start is None or end is None:
+    ) -> dict[int, tuple[QPointF, QPointF]]:
+        if self._graph_layer is None:
+            return {}
+        node_positions = {
+            node.id: node.position() for node in self._graph_layer.nodes.values()
+        }
+        spacing = self._graph_in_plane_spacing()
+        segments: dict[int, tuple[QPointF, QPointF]] = {}
+        for vector in self._graph_vectors:
+            try:
+                resolved = resolve_graph_vector(vector, node_positions, spacing)
+            except ValueError:
                 continue
+            start = self._graph_projection_point_to_screen(
+                resolved.anchor,
+                display_rect,
+            )
+            if resolved.endpoint is not None:
+                end = self._graph_projection_point_to_screen(
+                    resolved.endpoint,
+                    display_rect,
+                )
+            else:
+                direction_end = self._graph_projection_point_to_screen(
+                    (
+                        resolved.anchor[0] + resolved.plane_direction[0],
+                        resolved.anchor[1] + resolved.plane_direction[1],
+                    ),
+                    display_rect,
+                )
+                delta_x = direction_end.x() - start.x()
+                delta_y = direction_end.y() - start.y()
+                length = float(np.hypot(delta_x, delta_y))
+                if length <= 0.0:
+                    continue
+                end = QPointF(
+                    start.x() + ((delta_x / length) * 48.0),
+                    start.y() + ((delta_y / length) * 48.0),
+                )
+            segments[vector.id] = (start, end)
+        return segments
+
+    def _draw_graph_vectors(
+        self,
+        painter: QPainter,
+        vector_segments: dict[int, tuple[QPointF, QPointF]],
+        alpha: int,
+    ) -> None:
+        for vector in self._graph_vectors:
+            segment = vector_segments.get(vector.id)
+            if segment is None:
+                continue
+            start, end = segment
             delta_x = end.x() - start.x()
             delta_y = end.y() - start.y()
             length = float(np.hypot(delta_x, delta_y))
             if length <= 0.0:
                 continue
+
+            selected = vector.id in (
+                self._graph_selected_vector_id,
+                self._graph_angle_source_vector_id,
+            )
+            if selected:
+                selection_pen = QPen(
+                    QColor(255, 255, 255, alpha),
+                    max(self._graph_edge_thickness, 2) + 5,
+                )
+                selection_pen.setCosmetic(True)
+                painter.setPen(selection_pen)
+                painter.drawLine(start, end)
+            halo_pen = QPen(
+                QColor(10, 10, 10, alpha),
+                max(self._graph_edge_thickness, 2) + 3,
+            )
+            halo_pen.setCosmetic(True)
+            painter.setPen(halo_pen)
+            painter.drawLine(start, end)
+
+            arrow_color = QColor(vector.color)
+            arrow_color.setAlpha(alpha)
+            arrow_pen = QPen(arrow_color, max(self._graph_edge_thickness, 2))
+            arrow_pen.setCosmetic(True)
+            painter.setPen(arrow_pen)
+            painter.setBrush(arrow_color)
             painter.drawLine(start, end)
             unit_x = delta_x / length
             unit_y = delta_y / length
@@ -765,6 +789,153 @@ class SliceViewerWidget(QWidget):
                     ]
                 )
             )
+
+    def _draw_graph_measurements(
+        self,
+        painter: QPainter,
+        display_rect: DisplayRect,
+        vector_segments: dict[int, tuple[QPointF, QPointF]],
+        alpha: int,
+    ) -> None:
+        if not self._graph_measurements:
+            return
+        vectors_by_id = {vector.id: vector for vector in self._graph_vectors}
+        extension_ids = {
+            vector_id
+            for measurement in self._graph_measurements
+            for vector_id in (
+                measurement.source_vector_id,
+                measurement.target_vector_id,
+            )
+        }
+        painter.save()
+        painter.setClipRect(
+            QRectF(
+                display_rect.left,
+                display_rect.top,
+                display_rect.width,
+                display_rect.height,
+            )
+        )
+        for vector_id in sorted(extension_ids):
+            vector = vectors_by_id.get(vector_id)
+            segment = vector_segments.get(vector_id)
+            if vector is None or segment is None:
+                continue
+            start, end = segment
+            delta_x = end.x() - start.x()
+            delta_y = end.y() - start.y()
+            length = float(np.hypot(delta_x, delta_y))
+            if length <= 0.0:
+                continue
+            unit_x = delta_x / length
+            unit_y = delta_y / length
+            color = QColor(vector.color)
+            color.setAlpha(max(1, int(alpha * 0.58)))
+            pen = QPen(color, 1)
+            pen.setCosmetic(True)
+            pen.setStyle(Qt.PenStyle.DashLine)
+            painter.setPen(pen)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawLine(
+                QPointF(start.x() - unit_x * 10000.0, start.y() - unit_y * 10000.0),
+                QPointF(start.x() + unit_x * 10000.0, start.y() + unit_y * 10000.0),
+            )
+        painter.restore()
+
+        for measurement in self._graph_measurements:
+            source = vector_segments.get(measurement.source_vector_id)
+            target = vector_segments.get(measurement.target_vector_id)
+            if source is None or target is None:
+                continue
+            intersection = _infinite_line_intersection(source, target)
+            label_position: QPointF
+            if intersection is not None and _point_in_display_rect(
+                intersection,
+                display_rect,
+            ):
+                self._draw_angle_arc(painter, intersection, source, target, alpha)
+                label_position = QPointF(intersection.x() + 22.0, intersection.y() - 8.0)
+            else:
+                label_position = QPointF(
+                    (source[1].x() + target[1].x()) / 2.0,
+                    (source[1].y() + target[1].y()) / 2.0,
+                )
+            label_position = _clamp_angle_label_position(
+                label_position,
+                display_rect,
+            )
+            self._draw_angle_label(
+                painter,
+                label_position,
+                f"A{measurement.id}: {measurement.angle_degrees:.1f}°",
+                alpha,
+            )
+
+    @staticmethod
+    def _draw_angle_arc(
+        painter: QPainter,
+        center: QPointF,
+        source: tuple[QPointF, QPointF],
+        target: tuple[QPointF, QPointF],
+        alpha: int,
+    ) -> None:
+        source_angle = float(
+            np.degrees(
+                np.arctan2(
+                    -(source[1].y() - source[0].y()),
+                    source[1].x() - source[0].x(),
+                )
+            )
+        )
+        target_angle = float(
+            np.degrees(
+                np.arctan2(
+                    -(target[1].y() - target[0].y()),
+                    target[1].x() - target[0].x(),
+                )
+            )
+        )
+        span = ((target_angle - source_angle + 180.0) % 360.0) - 180.0
+        pen = QPen(QColor(255, 255, 255, alpha), 2)
+        pen.setCosmetic(True)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        radius = 18.0
+        painter.drawArc(
+            QRectF(
+                center.x() - radius,
+                center.y() - radius,
+                radius * 2.0,
+                radius * 2.0,
+            ),
+            int(round(source_angle * 16.0)),
+            int(round(span * 16.0)),
+        )
+
+    @staticmethod
+    def _draw_angle_label(
+        painter: QPainter,
+        position: QPointF,
+        text: str,
+        alpha: int,
+    ) -> None:
+        for offset_x, offset_y in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+            painter.setPen(QColor(0, 0, 0, alpha))
+            painter.drawText(position + QPointF(offset_x, offset_y), text)
+        painter.setPen(QColor(255, 255, 255, alpha))
+        painter.drawText(position, text)
+
+    def _graph_in_plane_spacing(self) -> tuple[float, float]:
+        if self._display_volume is None:
+            return (1.0, 1.0)
+        spacings = display_voxel_spacing_mm(
+            self._display_volume.affine,
+            self._display_volume.display_to_source_affine,
+            self._spatial_unit_to_mm,
+        )
+        horizontal_axis, vertical_axis, _ = plane_axes_for_orientation(self.orientation)
+        return (spacings[horizontal_axis], spacings[vertical_axis])
 
     def _graph_overlay_available(self) -> bool:
         if (
@@ -872,6 +1043,19 @@ class SliceViewerWidget(QWidget):
             _, _, node_id = min(node_hits)
             return {"kind": "node", "node_id": node_id}
 
+        vector_tolerance = max((self._graph_edge_thickness / 2.0) + 6.0, 8.0)
+        vector_hits: list[tuple[float, int]] = []
+        for vector_id, (start, end) in self._graph_vector_screen_segments(
+            display_rect
+        ).items():
+            distance = point_to_segment_distance(
+                (label_position.x(), label_position.y()),
+                (start.x(), start.y()),
+                (end.x(), end.y()),
+            )
+            if distance <= vector_tolerance:
+                vector_hits.append((distance, vector_id))
+
         edge_tolerance = max((self._graph_edge_thickness / 2.0) + 4.0, 6.0)
         edge_hits: list[tuple[float, GraphEdge]] = []
         for edge in self._graph_layer.edges:
@@ -899,8 +1083,9 @@ class SliceViewerWidget(QWidget):
                 )
             if distance <= edge_tolerance:
                 edge_hits.append((distance, edge))
+        edge_hit: GraphEdge | None = None
         if edge_hits:
-            _, edge = min(
+            _, edge_hit = min(
                 edge_hits,
                 key=lambda hit: (
                     hit[0],
@@ -908,10 +1093,22 @@ class SliceViewerWidget(QWidget):
                     hit[1].end_node_id,
                 ),
             )
+        if vector_hits:
+            result: dict[str, object] = {
+                "kind": "vector",
+                "vector_ids": [
+                    vector_id for _, vector_id in sorted(vector_hits)
+                ],
+            }
+            if edge_hit is not None:
+                result["edge_start_node_id"] = edge_hit.start_node_id
+                result["edge_end_node_id"] = edge_hit.end_node_id
+            return result
+        if edge_hit is not None:
             return {
                 "kind": "edge",
-                "start_node_id": edge.start_node_id,
-                "end_node_id": edge.end_node_id,
+                "start_node_id": edge_hit.start_node_id,
+                "end_node_id": edge_hit.end_node_id,
             }
         return {"kind": "empty"}
 
@@ -1127,10 +1324,27 @@ class SliceViewerWidget(QWidget):
                 self._interaction_mode = "left_graph_angle"
                 self.graph_orientation_interacted.emit(self.orientation)
                 hit = self._graph_hit_at_label_position(mouse_event.position())
-                if hit.get("kind") == "node":
-                    self.graph_angle_node_selected.emit(
+                vector_ids = hit.get("vector_ids")
+                if isinstance(vector_ids, list) and vector_ids:
+                    self.graph_angle_vector_selected.emit(
                         self.orientation,
-                        int(hit["node_id"]),
+                        int(vector_ids[0]),
+                    )
+                return
+            if (
+                self._graph_interaction_available()
+                and self._graph_pending_vector_source_node_id is not None
+            ):
+                self._interaction_mode = "left_graph_vector"
+                hit = self._graph_hit_at_label_position(mouse_event.position())
+                projection_position = self._projection_position_from_label_position(
+                    mouse_event.position()
+                )
+                if projection_position is not None:
+                    self.graph_vector_completion_requested.emit(
+                        self.orientation,
+                        hit.get("node_id") if hit.get("kind") == "node" else None,
+                        projection_position,
                     )
                 return
             if (
@@ -1168,7 +1382,13 @@ class SliceViewerWidget(QWidget):
     def _handle_mouse_move(self, mouse_event: QMouseEvent) -> None:
         if (
             self._graph_interaction_available()
-            and self._graph_pending_node_id is not None
+            and (
+                self._graph_pending_node_id is not None
+                or (
+                    self._graph_pending_vector_source_node_id is not None
+                    and self._graph_pending_vector_orientation == self.orientation
+                )
+            )
             and not mouse_event.buttons()
         ):
             preview_position = (
@@ -1197,7 +1417,7 @@ class SliceViewerWidget(QWidget):
                 self._emit_patch_center_from_label_position(mouse_event.position())
             return
 
-        if self._interaction_mode == "left_graph_edge":
+        if self._interaction_mode in ("left_graph_edge", "left_graph_vector"):
             return
 
         if self._interaction_mode == "left_graph_curve_drag":
@@ -1246,6 +1466,7 @@ class SliceViewerWidget(QWidget):
             "left_patch_resize",
             "left_patch_drag",
             "left_graph_edge",
+            "left_graph_vector",
             "left_graph_curve_drag",
             "left_graph_curve_select",
             "left_graph_angle",
@@ -1826,3 +2047,46 @@ def _edge_index_to_display_coordinate(
         return rect_origin
     clamped = min(max(edge_index, 0), axis_size)
     return rect_origin + (clamped / axis_size) * rect_size
+
+
+def _infinite_line_intersection(
+    first: tuple[QPointF, QPointF],
+    second: tuple[QPointF, QPointF],
+) -> QPointF | None:
+    first_dx = first[1].x() - first[0].x()
+    first_dy = first[1].y() - first[0].y()
+    second_dx = second[1].x() - second[0].x()
+    second_dy = second[1].y() - second[0].y()
+    determinant = (first_dx * second_dy) - (first_dy * second_dx)
+    if abs(determinant) <= 1e-9:
+        return None
+    offset_x = second[0].x() - first[0].x()
+    offset_y = second[0].y() - first[0].y()
+    parameter = ((offset_x * second_dy) - (offset_y * second_dx)) / determinant
+    return QPointF(
+        first[0].x() + parameter * first_dx,
+        first[0].y() + parameter * first_dy,
+    )
+
+
+def _point_in_display_rect(point: QPointF, display_rect: DisplayRect) -> bool:
+    return (
+        display_rect.left <= point.x() <= display_rect.left + display_rect.width
+        and display_rect.top <= point.y() <= display_rect.top + display_rect.height
+    )
+
+
+def _clamp_angle_label_position(
+    point: QPointF,
+    display_rect: DisplayRect,
+) -> QPointF:
+    return QPointF(
+        min(
+            max(point.x(), display_rect.left + 4.0),
+            display_rect.left + display_rect.width - 105.0,
+        ),
+        min(
+            max(point.y(), display_rect.top + 14.0),
+            display_rect.top + display_rect.height - 4.0,
+        ),
+    )

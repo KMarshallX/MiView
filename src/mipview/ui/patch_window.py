@@ -1,17 +1,20 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+import os
 from pathlib import Path
+from typing import Literal
 from uuid import uuid4
 
 import numpy as np
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QPoint, Qt, Signal
 from PySide6.QtGui import (
     QAction,
     QColor,
     QFont,
     QGuiApplication,
     QImage,
+    QImageWriter,
     QKeySequence,
     QPainter,
     QResizeEvent,
@@ -24,12 +27,15 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
+    QLabel,
     QLayout,
     QMainWindow,
     QMenu,
     QMessageBox,
     QPushButton,
     QScrollArea,
+    QSlider,
+    QSpinBox,
     QSplitter,
     QVBoxLayout,
     QWidget,
@@ -37,11 +43,15 @@ from PySide6.QtWidgets import (
 
 from mipview.annotation import AnnotationMask
 from mipview.annotation.annotation_overlay import build_annotation_overlay_rgba
-from mipview.graph import GraphEdge, GraphNode, ProjectionGraphState
+from mipview.graph import (
+    AngleMeasurement,
+    GraphEdge,
+    GraphNode,
+    GraphVector,
+    ProjectionGraphState,
+)
 from mipview.graph.spatial import (
-    extension_line_plane_endpoints,
     nearest_projected_edge_parameter,
-    normal_line_plane_endpoints,
 )
 from mipview.io.nifti_io import NiftiLoadResult
 from mipview.patch.history import PatchHistoryManager
@@ -242,6 +252,9 @@ class PatchViewerWindow(QMainWindow):
         self.slice_viewer.graph_edge_cancel_requested.connect(
             self._cancel_pending_graph_edge
         )
+        self.slice_viewer.graph_vector_completion_requested.connect(
+            self._on_graph_vector_completion_requested
+        )
         self.slice_viewer.graph_orientation_interacted.connect(
             self._on_graph_orientation_interacted
         )
@@ -263,8 +276,8 @@ class PatchViewerWindow(QMainWindow):
         self.slice_viewer.graph_curve_exit_requested.connect(
             self._cancel_graph_interaction
         )
-        self.slice_viewer.graph_angle_node_selected.connect(
-            self._on_graph_angle_node_selected
+        self.slice_viewer.graph_angle_vector_selected.connect(
+            self._on_graph_angle_vector_selected
         )
         self.annotation_panel.create_requested.connect(
             lambda: self.annotation_create_requested.emit(self)
@@ -303,7 +316,8 @@ class PatchViewerWindow(QMainWindow):
             self._on_graph_calculate_angle_requested
         )
         self.graph_panel.cancel_requested.connect(self._cancel_graph_interaction)
-        self.graph_panel.clear_angle_requested.connect(self.clear_graph_angle)
+        self.graph_panel.delete_angle_requested.connect(self.delete_graph_angle)
+        self.graph_panel.clear_angles_requested.connect(self.clear_graph_angles)
         self._graph_cancel_shortcut = QShortcut(
             QKeySequence(QKeySequence.StandardKey.Cancel),
             self,
@@ -475,6 +489,41 @@ class PatchViewerWindow(QMainWindow):
         self.save_views_button = QPushButton("Save MIP/MinIP Image...", panel)
         self.save_views_button.clicked.connect(self._on_save_views_clicked)
         layout.addWidget(self.save_views_button)
+        self.export_screenshot_button = QPushButton(
+            "Export Viewer Screenshot...",
+            panel,
+        )
+        self.export_screenshot_button.clicked.connect(
+            self._on_export_viewer_screenshot_clicked
+        )
+        layout.addWidget(self.export_screenshot_button)
+        resolution_row = QWidget(panel)
+        resolution_layout = QHBoxLayout(resolution_row)
+        resolution_layout.setContentsMargins(0, 0, 0, 0)
+        self.screenshot_resolution_slider = QSlider(
+            Qt.Orientation.Horizontal,
+            resolution_row,
+        )
+        self.screenshot_resolution_slider.setRange(1, 200)
+        self.screenshot_resolution_slider.setValue(100)
+        self.screenshot_resolution_spinbox = QSpinBox(resolution_row)
+        self.screenshot_resolution_spinbox.setRange(1, 200)
+        self.screenshot_resolution_spinbox.setSuffix("%")
+        self.screenshot_resolution_spinbox.setValue(100)
+        self.screenshot_resolution_slider.valueChanged.connect(
+            self.screenshot_resolution_spinbox.setValue
+        )
+        self.screenshot_resolution_spinbox.valueChanged.connect(
+            self.screenshot_resolution_slider.setValue
+        )
+        self.screenshot_resolution_spinbox.valueChanged.connect(
+            self._update_screenshot_output_dimensions
+        )
+        resolution_layout.addWidget(self.screenshot_resolution_slider, 1)
+        resolution_layout.addWidget(self.screenshot_resolution_spinbox)
+        layout.addWidget(resolution_row)
+        self.screenshot_dimensions_label = QLabel("Output: —", panel)
+        layout.addWidget(self.screenshot_dimensions_label)
         self.save_patch_button = QPushButton("Save Img Patch", panel)
         self.save_patch_button.clicked.connect(self._on_save_patch_clicked)
         layout.addWidget(self.save_patch_button)
@@ -482,6 +531,7 @@ class PatchViewerWindow(QMainWindow):
         self.save_seg_patch_button.clicked.connect(self._on_save_seg_patch_clicked)
         layout.addWidget(self.save_seg_patch_button)
         self._refresh_seg_patch_save_enabled()
+        self._update_screenshot_output_dimensions(100)
         return panel
 
     def _sync_projection_controls(self) -> None:
@@ -697,6 +747,7 @@ class PatchViewerWindow(QMainWindow):
             self.graph_panel.set_visible_checked(self.graph_state.visible)
             if not self.graph_state.visible:
                 self.graph_state.cancel_pending_edge()
+                self.graph_state.cancel_pending_vector()
                 self.graph_state.cancel_active_tool()
         if opacity is not None:
             self.graph_state.set_opacity(opacity)
@@ -747,6 +798,76 @@ class PatchViewerWindow(QMainWindow):
         self.slice_viewer.refresh_graph_overlay()
         self._refresh_graph_panel_tool_state()
 
+    def begin_graph_vector(self, orientation: Orientation, node_id: int) -> None:
+        self._validate_graph_edit_operation(orientation)
+        self.graph_state.begin_vector(orientation, node_id)
+        self.slice_viewer.refresh_graph_overlay()
+        self._refresh_graph_panel_tool_state()
+
+    def add_graph_node_vector(
+        self,
+        orientation: Orientation,
+        source_node_id: int,
+        target_node_id: int,
+    ) -> GraphVector:
+        self._validate_graph_edit_operation(orientation)
+        self._validate_projected_vector_length(
+            orientation,
+            source_node_id,
+            target_node_id,
+        )
+        vector = self.graph_state.add_node_vector(
+            orientation,
+            source_node_id,
+            target_node_id,
+        )
+        self.slice_viewer.refresh_graph_overlay()
+        self._refresh_graph_panel_tool_state()
+        return vector
+
+    def add_graph_edge_vector(
+        self,
+        orientation: Orientation,
+        first_node_id: int,
+        second_node_id: int,
+        kind: Literal["edge_tangent", "edge_normal"],
+    ) -> GraphVector:
+        self._validate_graph_edit_operation(orientation)
+        self._validate_projected_vector_length(
+            orientation,
+            first_node_id,
+            second_node_id,
+        )
+        vector = self.graph_state.add_edge_vector(
+            orientation,
+            GraphEdge.between(first_node_id, second_node_id),
+            kind,
+        )
+        self.slice_viewer.refresh_graph_overlay()
+        self._refresh_graph_panel_tool_state()
+        return vector
+
+    def flip_graph_vector(self, vector_id: int) -> GraphVector:
+        vector = self.graph_state.vectors.get(int(vector_id))
+        if vector is None:
+            raise ValueError(f"Graph vector V{vector_id} does not exist.")
+        self._validate_graph_edit_operation(vector.orientation)
+        positions, spacing = self._graph_vector_geometry(vector.orientation)
+        flipped = self.graph_state.flip_vector(vector.id, positions, spacing)
+        self.slice_viewer.refresh_graph_overlay()
+        self._refresh_graph_panel_tool_state()
+        return flipped
+
+    def delete_graph_vector(self, vector_id: int) -> GraphVector:
+        vector = self.graph_state.vectors.get(int(vector_id))
+        if vector is None:
+            raise ValueError(f"Graph vector V{vector_id} does not exist.")
+        self._validate_graph_edit_operation(vector.orientation)
+        deleted = self.graph_state.delete_vector(vector.id)
+        self.slice_viewer.refresh_graph_overlay()
+        self._refresh_graph_panel_tool_state()
+        return deleted
+
     def add_graph_edge(
         self,
         orientation: Orientation,
@@ -774,7 +895,7 @@ class PatchViewerWindow(QMainWindow):
             first_node_id,
             second_node_id,
         )
-        self.graph_state.invalidate_construction_lines(edge)
+        self.graph_state.invalidate_edge(edge)
         if (
             self.graph_state.selected_edge == edge
         ):
@@ -804,7 +925,7 @@ class PatchViewerWindow(QMainWindow):
             second_node_id,
             parameter,
         )
-        self.graph_state.invalidate_construction_lines(original_edge)
+        self.graph_state.invalidate_edge(original_edge)
         if (
             self.graph_state.selected_edge == original_edge
         ):
@@ -836,57 +957,13 @@ class PatchViewerWindow(QMainWindow):
             second_node_id,
             control_point,
         )
-        self.graph_state.invalidate_construction_lines(edge)
+        self.graph_state.invalidate_edge_vectors(edge)
         self.graph_state.active_orientation = orientation
         if self.graph_state.selected_edge == edge:
             self.graph_state.selected_edge_orientation = orientation
         self.slice_viewer.refresh_graph_overlay()
         self._refresh_graph_panel_tool_state()
         return edge
-
-    def set_graph_normal_line(
-        self,
-        orientation: Orientation,
-        first_node_id: int,
-        second_node_id: int,
-        visible: bool,
-    ) -> bool:
-        self._validate_graph_edit_operation(orientation)
-        edge = GraphEdge.between(first_node_id, second_node_id)
-        if visible:
-            normal_line_plane_endpoints(
-                self.slice_viewer.graph_projected_layer(orientation),
-                edge,
-            )
-        normal_visible = self.graph_state.set_normal_line(
-            orientation,
-            edge,
-            visible,
-        )
-        self.slice_viewer.refresh_graph_overlay()
-        return normal_visible
-
-    def set_graph_extension_line(
-        self,
-        orientation: Orientation,
-        first_node_id: int,
-        second_node_id: int,
-        visible: bool,
-    ) -> bool:
-        self._validate_graph_edit_operation(orientation)
-        edge = GraphEdge.between(first_node_id, second_node_id)
-        if visible:
-            extension_line_plane_endpoints(
-                self.slice_viewer.graph_projected_layer(orientation),
-                edge,
-            )
-        extension_visible = self.graph_state.set_extension_line(
-            orientation,
-            edge,
-            visible,
-        )
-        self.slice_viewer.refresh_graph_overlay()
-        return extension_visible
 
     def straighten_graph_edge(
         self,
@@ -909,37 +986,37 @@ class PatchViewerWindow(QMainWindow):
 
     def calculate_graph_angle(
         self,
-        orientation: Orientation,
-        vector_1_source: int,
-        vector_1_target: int,
-        vector_2_source: int,
-        vector_2_target: int,
-    ) -> float:
-        self._validate_graph_edit_operation(orientation)
-        angle = self.graph_state.calculate_angle(
-            orientation,
-            vector_1_source,
-            vector_1_target,
-            vector_2_source,
-            vector_2_target,
-            {
-                node.id: node.position()
-                for node in self.slice_viewer.graph_projected_layer(
-                    orientation
-                ).nodes.values()
-            },
-            self._graph_in_plane_spacing(orientation),
+        source_vector_id: int,
+        target_vector_id: int,
+    ) -> AngleMeasurement:
+        source = self.graph_state.vectors.get(int(source_vector_id))
+        if source is None:
+            raise ValueError(f"Graph vector V{source_vector_id} does not exist.")
+        self._validate_graph_edit_operation(source.orientation)
+        positions, spacing = self._graph_vector_geometry(source.orientation)
+        measurement = self.graph_state.calculate_angle(
+            source_vector_id,
+            target_vector_id,
+            positions,
+            spacing,
         )
-        self.graph_state.active_orientation = orientation
         self.slice_viewer.refresh_graph_overlay()
         self._refresh_graph_panel_tool_state()
-        return angle
+        return measurement
 
-    def clear_graph_angle(self) -> None:
-        self.graph_state.clear_angle()
+    def delete_graph_angle(self, measurement_id: int) -> AngleMeasurement:
+        measurement = self.graph_state.delete_angle(measurement_id)
         self.slice_viewer.refresh_graph_overlay()
         self._refresh_graph_panel_tool_state()
-        self.statusBar().showMessage("Graph angle cleared")
+        self.statusBar().showMessage(f"Deleted graph angle A{measurement.id}")
+        return measurement
+
+    def clear_graph_angles(self) -> int:
+        count = self.graph_state.clear_angles()
+        self.slice_viewer.refresh_graph_overlay()
+        self._refresh_graph_panel_tool_state()
+        self.statusBar().showMessage(f"Cleared {count} graph angle(s)")
+        return count
 
     def clear_graph(self) -> tuple[int, int]:
         node_count, edge_count = self.graph_state.clear_graph()
@@ -1003,6 +1080,7 @@ class PatchViewerWindow(QMainWindow):
         self._graph_projection_mode = mode
         if mode_changed:
             self.graph_state.cancel_pending_edge()
+            self.graph_state.cancel_pending_vector()
             self.graph_state.cancel_active_tool()
         self.graph_panel.set_projection_available(bool(enabled))
         if self.graph_state.editing_enabled and not enabled:
@@ -1014,9 +1092,13 @@ class PatchViewerWindow(QMainWindow):
         if self.graph_state.active_orientation not in enabled:
             self.graph_state.cancel_pending_edge()
             self.graph_state.active_orientation = enabled[0] if enabled else None
+        if self.graph_state.pending_vector_orientation not in enabled:
+            self.graph_state.cancel_pending_vector()
         transient_orientation = self.graph_state.selected_edge_orientation
-        if self.graph_state.angle_draft_nodes:
-            transient_orientation = self.graph_state.angle_draft_nodes[0][0]
+        if self.graph_state.angle_source_vector_id is not None:
+            transient_orientation = self.graph_state.vectors[
+                self.graph_state.angle_source_vector_id
+            ].orientation
         if transient_orientation is not None and transient_orientation not in enabled:
             self.graph_state.cancel_active_tool()
         self.slice_viewer.refresh_graph_overlay()
@@ -1061,86 +1143,65 @@ class PatchViewerWindow(QMainWindow):
                     node_id,
                 )
             )
+            vector_action = menu.addAction("Create a vector from this node")
+            vector_action.triggered.connect(
+                lambda _checked=False: self._begin_graph_vector_from_ui(
+                    graph_orientation,
+                    node_id,
+                )
+            )
+        elif hit_kind == "vector":
+            vector_ids = hit.get("vector_ids")
+            edge_start = hit.get("edge_start_node_id")
+            edge_end = hit.get("edge_end_node_id")
+            valid_vector_ids = (
+                [
+                    int(vector_id)
+                    for vector_id in vector_ids
+                    if int(vector_id) in self.graph_state.vectors
+                ]
+                if isinstance(vector_ids, list)
+                else []
+            )
+            if (
+                len(valid_vector_ids) == 1
+                and edge_start is None
+                and edge_end is None
+            ):
+                self._populate_graph_vector_context_menu(
+                    menu,
+                    valid_vector_ids[0],
+                )
+            else:
+                for vector_id in valid_vector_ids:
+                    vector_menu = menu.addMenu(f"Vector V{vector_id}")
+                    self._populate_graph_vector_context_menu(
+                        vector_menu,
+                        vector_id,
+                    )
+            if edge_start is not None and edge_end is not None:
+                menu.addSeparator()
+                edge_menu = menu.addMenu(
+                    f"Edge {int(edge_start)}-{int(edge_end)}"
+                )
+                self._populate_graph_edge_context_menu(
+                    edge_menu,
+                    graph_orientation,
+                    int(edge_start),
+                    int(edge_end),
+                    int(projection_position[0]),
+                    int(projection_position[1]),
+                )
         elif hit_kind == "edge":
             start_node_id = int(hit["start_node_id"])
             end_node_id = int(hit["end_node_id"])
-            edge = GraphEdge.between(start_node_id, end_node_id)
-            horizontal_index = int(projection_position[0])
-            vertical_index = int(projection_position[1])
-            create_node_action = menu.addAction("Create a node here")
-            create_node_action.triggered.connect(
-                lambda _checked=False: self._split_graph_edge_from_ui(
-                    graph_orientation,
-                    start_node_id,
-                    end_node_id,
-                    horizontal_index,
-                    vertical_index,
-                )
-            )
-            delete_action = menu.addAction("Delete this edge")
-            delete_action.triggered.connect(
-                lambda _checked=False: self._delete_graph_edge_from_ui(
-                    graph_orientation,
-                    start_node_id,
-                    end_node_id,
-                )
-            )
-            menu.addSeparator()
-            if edge not in self.graph_state.graph.curve_control_points:
-                normal_is_visible = (
-                    self.graph_state.normal_line_orientation == graph_orientation
-                    and self.graph_state.normal_line_edge == edge
-                )
-                normal_action = menu.addAction(
-                    "Hide the normal line"
-                    if normal_is_visible
-                    else "Display the normal line"
-                )
-                normal_action.triggered.connect(
-                    lambda _checked=False: self._set_graph_normal_line_from_ui(
-                        graph_orientation,
-                        start_node_id,
-                        end_node_id,
-                        not normal_is_visible,
-                    )
-                )
-                extension_is_visible = (
-                    self.graph_state.extension_line_orientation
-                    == graph_orientation
-                    and self.graph_state.extension_line_edge == edge
-                )
-                extension_action = menu.addAction(
-                    "Hide the extension line"
-                    if extension_is_visible
-                    else "Display the extension line"
-                )
-                extension_action.triggered.connect(
-                    lambda _checked=False: self._set_graph_extension_line_from_ui(
-                        graph_orientation,
-                        start_node_id,
-                        end_node_id,
-                        not extension_is_visible,
-                    )
-                )
-            curve_action = menu.addAction("Curve Edge")
-            curve_action.triggered.connect(
-                lambda _checked=False: self._select_graph_curve_from_ui(
-                    graph_orientation,
-                    start_node_id,
-                    end_node_id,
-                )
-            )
-            straighten_action = menu.addAction("Straighten Edge")
-            straighten_action.setEnabled(
-                GraphEdge.between(start_node_id, end_node_id)
-                in self.graph_state.graph.curve_control_points
-            )
-            straighten_action.triggered.connect(
-                lambda _checked=False: self._straighten_graph_edge_from_ui(
-                    graph_orientation,
-                    start_node_id,
-                    end_node_id,
-                )
+            self._populate_graph_edge_context_menu(
+                menu,
+                graph_orientation,
+                start_node_id,
+                end_node_id,
+                int(projection_position[0]),
+                int(projection_position[1]),
             )
         else:
             horizontal_index = int(projection_position[0])
@@ -1156,50 +1217,102 @@ class PatchViewerWindow(QMainWindow):
         if not menu.isEmpty():
             menu.exec(global_position)
 
-    def _set_graph_normal_line_from_ui(
+    def _populate_graph_vector_context_menu(
         self,
-        orientation: Orientation,
-        start_node_id: int,
-        end_node_id: int,
-        visible: bool,
+        menu: QMenu,
+        vector_id: int,
     ) -> None:
-        try:
-            self.set_graph_normal_line(
-                orientation,
-                start_node_id,
-                end_node_id,
-                visible,
+        angle_label = (
+            "Select as angle source"
+            if self.graph_state.angle_source_vector_id is None
+            else "Select as angle target"
+        )
+        angle_action = menu.addAction(angle_label)
+        angle_action.triggered.connect(
+            lambda _checked=False: self._select_graph_vector_for_angle_from_ui(
+                vector_id
             )
-        except ValueError as exc:
-            self.statusBar().showMessage(str(exc))
-            return
-        self.statusBar().showMessage(
-            "Displayed graph edge normal line"
-            if visible
-            else "Hid graph edge normal line"
+        )
+        flip_action = menu.addAction("Flip vector")
+        flip_action.triggered.connect(
+            lambda _checked=False: self._flip_graph_vector_from_ui(vector_id)
+        )
+        delete_action = menu.addAction("Delete vector")
+        delete_action.triggered.connect(
+            lambda _checked=False: self._delete_graph_vector_from_ui(vector_id)
         )
 
-    def _set_graph_extension_line_from_ui(
+    def _populate_graph_edge_context_menu(
         self,
+        menu: QMenu,
         orientation: Orientation,
         start_node_id: int,
         end_node_id: int,
-        visible: bool,
+        horizontal_index: int,
+        vertical_index: int,
     ) -> None:
-        try:
-            self.set_graph_extension_line(
+        edge = GraphEdge.between(start_node_id, end_node_id)
+        create_node_action = menu.addAction("Create a node here")
+        create_node_action.triggered.connect(
+            lambda _checked=False: self._split_graph_edge_from_ui(
                 orientation,
                 start_node_id,
                 end_node_id,
-                visible,
+                horizontal_index,
+                vertical_index,
             )
-        except ValueError as exc:
-            self.statusBar().showMessage(str(exc))
-            return
-        self.statusBar().showMessage(
-            "Displayed graph edge extension line"
-            if visible
-            else "Hid graph edge extension line"
+        )
+        delete_action = menu.addAction("Delete this edge")
+        delete_action.triggered.connect(
+            lambda _checked=False: self._delete_graph_edge_from_ui(
+                orientation,
+                start_node_id,
+                end_node_id,
+            )
+        )
+        menu.addSeparator()
+        if edge not in self.graph_state.graph.curve_control_points:
+            for kind, label in (
+                ("edge_normal", "Display the normal vector"),
+                ("edge_tangent", "Display the tangent vector"),
+            ):
+                existing = self.graph_state.vector_for_edge(
+                    orientation,
+                    edge,
+                    kind,  # type: ignore[arg-type]
+                )
+                action = menu.addAction(
+                    f"{label.removeprefix('Display the ')} displayed"
+                    if existing is not None
+                    else label
+                )
+                action.setEnabled(existing is None)
+                action.triggered.connect(
+                    lambda _checked=False, vector_kind=kind: (
+                        self._add_graph_edge_vector_from_ui(
+                            orientation,
+                            start_node_id,
+                            end_node_id,
+                            vector_kind,  # type: ignore[arg-type]
+                        )
+                    )
+                )
+        curve_action = menu.addAction("Curve Edge")
+        curve_action.triggered.connect(
+            lambda _checked=False: self._select_graph_curve_from_ui(
+                orientation,
+                start_node_id,
+                end_node_id,
+            )
+        )
+        straighten_action = menu.addAction("Straighten Edge")
+        straighten_action.setEnabled(edge in self.graph_state.graph.curve_control_points)
+        straighten_action.triggered.connect(
+            lambda _checked=False: self._straighten_graph_edge_from_ui(
+                orientation,
+                start_node_id,
+                end_node_id,
+            )
         )
 
     def _add_graph_node_from_ui(
@@ -1245,6 +1358,137 @@ class PatchViewerWindow(QMainWindow):
             return
         self.statusBar().showMessage(
             f"Select another {orientation} graph node to complete the edge"
+        )
+
+    def _begin_graph_vector_from_ui(
+        self,
+        orientation: Orientation,
+        node_id: int,
+    ) -> None:
+        try:
+            self.begin_graph_vector(orientation, node_id)
+        except ValueError as exc:
+            self.statusBar().showMessage(str(exc))
+            return
+        self.statusBar().showMessage(
+            f"Select a target in the {orientation} projection"
+        )
+
+    def _on_graph_vector_completion_requested(
+        self,
+        orientation: str,
+        target_node_id: object,
+        projection_position: object,
+    ) -> None:
+        pending_orientation = self.graph_state.pending_vector_orientation
+        source_node_id = self.graph_state.pending_vector_source_node_id
+        if pending_orientation is None or source_node_id is None:
+            return
+        if orientation != pending_orientation:
+            self.statusBar().showMessage(
+                f"Complete the vector in the {pending_orientation} projection."
+            )
+            return
+        if (
+            orientation not in ("axial", "coronal", "sagittal")
+            or not isinstance(projection_position, tuple)
+            or len(projection_position) != 2
+        ):
+            return
+        graph_orientation: Orientation = orientation  # type: ignore[assignment]
+        created_node: GraphNode | None = None
+        try:
+            if target_node_id is None:
+                positions, _ = self._graph_vector_geometry(graph_orientation)
+                source_projection = positions[source_node_id]
+                if float(
+                    np.hypot(
+                        float(projection_position[0]) - source_projection[0],
+                        float(projection_position[1]) - source_projection[1],
+                    )
+                ) <= 0.0:
+                    raise ValueError(
+                        "Vector target resolves to the source projection; "
+                        "choose another target."
+                    )
+                voxel = self.slice_viewer.resolve_graph_projection_voxel(
+                    graph_orientation,
+                    int(projection_position[0]),
+                    int(projection_position[1]),
+                )
+                if self.graph_state.graph.nodes[source_node_id].position() == voxel:
+                    raise ValueError(
+                        "Vector target resolves to the source voxel; choose another target."
+                    )
+                created_node = self.graph_state.graph.add_node(*voxel)
+                normalized_target_id = created_node.id
+            else:
+                normalized_target_id = int(target_node_id)
+            self._validate_projected_vector_length(
+                graph_orientation,
+                source_node_id,
+                normalized_target_id,
+            )
+            vector = self.graph_state.add_node_vector(
+                graph_orientation,
+                source_node_id,
+                normalized_target_id,
+            )
+        except ValueError as exc:
+            if created_node is not None:
+                self.graph_state.graph.delete_node(created_node.id)
+            self.statusBar().showMessage(str(exc))
+            return
+        self.slice_viewer.refresh_graph_overlay()
+        self._refresh_graph_panel_tool_state()
+        suffix = (
+            f" and target node {created_node.id}"
+            if created_node is not None
+            else ""
+        )
+        self.statusBar().showMessage(f"Created vector V{vector.id}{suffix}")
+
+    def _add_graph_edge_vector_from_ui(
+        self,
+        orientation: Orientation,
+        start_node_id: int,
+        end_node_id: int,
+        kind: Literal["edge_tangent", "edge_normal"],
+    ) -> None:
+        try:
+            vector = self.add_graph_edge_vector(
+                orientation,
+                start_node_id,
+                end_node_id,
+                kind,
+            )
+        except ValueError as exc:
+            self.statusBar().showMessage(str(exc))
+            return
+        self.statusBar().showMessage(f"Displayed graph vector V{vector.id}")
+
+    def _flip_graph_vector_from_ui(self, vector_id: int) -> None:
+        try:
+            vector = self.flip_graph_vector(vector_id)
+        except ValueError as exc:
+            self.statusBar().showMessage(str(exc))
+            return
+        self.statusBar().showMessage(f"Flipped graph vector V{vector.id}")
+
+    def _delete_graph_vector_from_ui(self, vector_id: int) -> None:
+        try:
+            vector = self.delete_graph_vector(vector_id)
+        except ValueError as exc:
+            self.statusBar().showMessage(str(exc))
+            return
+        self.statusBar().showMessage(f"Deleted graph vector V{vector.id}")
+
+    def _select_graph_vector_for_angle_from_ui(self, vector_id: int) -> None:
+        if self.graph_state.active_tool != "calculate_angle":
+            self.graph_state.activate_angle_tool()
+        self._on_graph_angle_vector_selected(
+            self.graph_state.vectors[vector_id].orientation,
+            vector_id,
         )
 
     def _on_graph_edge_completion_requested(
@@ -1322,9 +1566,20 @@ class PatchViewerWindow(QMainWindow):
         self._refresh_graph_panel_tool_state()
         self.statusBar().showMessage("Graph edge creation canceled")
 
+    def _cancel_pending_graph_vector(self) -> None:
+        if self.graph_state.pending_vector_source_node_id is None:
+            return
+        self.graph_state.cancel_pending_vector()
+        self.slice_viewer.refresh_graph_overlay()
+        self._refresh_graph_panel_tool_state()
+        self.statusBar().showMessage("Graph vector creation canceled")
+
     def _cancel_graph_interaction(self) -> None:
         if self.graph_state.pending_edge_node_id is not None:
             self._cancel_pending_graph_edge()
+            return
+        if self.graph_state.pending_vector_source_node_id is not None:
+            self._cancel_pending_graph_vector()
             return
         if self.graph_state.active_tool is None:
             return
@@ -1349,13 +1604,22 @@ class PatchViewerWindow(QMainWindow):
         self.slice_viewer.refresh_graph_overlay()
         self._refresh_graph_panel_tool_state()
 
-    def _on_graph_calculate_angle_requested(self) -> None:
+    def _on_graph_calculate_angle_requested(self, enabled: bool) -> None:
         if not self.graph_state.editing_enabled:
+            self._refresh_graph_panel_tool_state()
             return
-        self.graph_state.activate_angle_tool()
+        if enabled:
+            self.graph_state.activate_angle_tool()
+            message = "Select source vector"
+        elif self.graph_state.active_tool == "calculate_angle":
+            self.graph_state.cancel_active_tool()
+            message = "Angle tool exited"
+        else:
+            message = ""
         self.slice_viewer.refresh_graph_overlay()
         self._refresh_graph_panel_tool_state()
-        self.statusBar().showMessage("Vector 1: select source node")
+        if message:
+            self.statusBar().showMessage(message)
 
     def _on_graph_curve_edge_selected(
         self,
@@ -1405,38 +1669,38 @@ class PatchViewerWindow(QMainWindow):
         self.graph_state.curve_drag_active = bool(dragging)
         self._refresh_graph_panel_tool_state()
 
-    def _on_graph_angle_node_selected(self, orientation: str, node_id: int) -> None:
+    def _on_graph_angle_vector_selected(
+        self,
+        orientation: str,
+        vector_id: int,
+    ) -> None:
         if orientation not in ("axial", "coronal", "sagittal"):
             return
+        vector = self.graph_state.vectors.get(int(vector_id))
+        if vector is None:
+            self.statusBar().showMessage(f"Graph vector V{vector_id} does not exist.")
+            return
         try:
-            angle = self.graph_state.select_angle_node(
-                orientation,  # type: ignore[arg-type]
-                node_id,
-                {
-                    node.id: node.position()
-                    for node in self.slice_viewer.graph_projected_layer(
-                        orientation  # type: ignore[arg-type]
-                    ).nodes.values()
-                },
-                self._graph_in_plane_spacing(orientation),  # type: ignore[arg-type]
+            positions, spacing = self._graph_vector_geometry(vector.orientation)
+            measurement = self.graph_state.select_angle_vector(
+                vector.id,
+                positions,
+                spacing,
             )
         except ValueError as exc:
             self.statusBar().showMessage(str(exc))
             return
         self.slice_viewer.refresh_graph_overlay()
         self._refresh_graph_panel_tool_state()
-        if angle is None:
-            prompts = (
-                "Vector 1: select source node",
-                "Vector 1: select target node",
-                "Vector 2: select source node",
-                "Vector 2: select target node",
-            )
+        if measurement is None:
             self.statusBar().showMessage(
-                prompts[min(self.graph_state.angle_selection_step, 3)]
+                f"Selected V{vector.id} as source; select target vector"
             )
         else:
-            self.statusBar().showMessage(f"Calculated graph angle: {angle:.1f}°")
+            self.statusBar().showMessage(
+                f"Calculated A{measurement.id}: "
+                f"{measurement.angle_degrees:.1f}°; select next source vector"
+            )
 
     def _select_graph_curve_from_ui(
         self,
@@ -1491,16 +1755,54 @@ class PatchViewerWindow(QMainWindow):
         self.graph_panel.set_tool_state(
             active_tool=self.graph_state.active_tool,
             selected_edge_curved=selected_curved,
-            angle_selection_step=self.graph_state.angle_selection_step,
-            angle_degrees=self.graph_state.calculated_angle_degrees,
-            has_angle_data=(
-                self.graph_state.angle_vector_1 is not None
-                or self.graph_state.angle_vector_2 is not None
+            angle_source_vector_id=self.graph_state.angle_source_vector_id,
+            angle_source_color=(
+                None
+                if self.graph_state.angle_source_vector_id is None
+                else self.graph_state.vectors[
+                    self.graph_state.angle_source_vector_id
+                ].color
+            ),
+            measurements=tuple(
+                (
+                    measurement.id,
+                    measurement.source_vector_id,
+                    measurement.target_vector_id,
+                    measurement.angle_degrees,
+                )
+                for measurement in self.graph_state.angle_measurements.values()
             ),
             has_graph_elements=bool(
                 self.graph_state.graph.nodes or self.graph_state.graph.edges
             ),
         )
+
+    def _graph_vector_geometry(
+        self,
+        orientation: Orientation,
+    ) -> tuple[dict[int, tuple[float, float]], tuple[float, float]]:
+        layer = self.slice_viewer.graph_projected_layer(orientation)
+        return (
+            {node.id: node.position() for node in layer.nodes.values()},
+            self._graph_in_plane_spacing(orientation),
+        )
+
+    def _validate_projected_vector_length(
+        self,
+        orientation: Orientation,
+        source_node_id: int,
+        target_node_id: int,
+    ) -> None:
+        positions, _ = self._graph_vector_geometry(orientation)
+        try:
+            source = positions[int(source_node_id)]
+            target = positions[int(target_node_id)]
+        except KeyError as exc:
+            raise ValueError(f"Graph node {exc.args[0]} does not exist.") from exc
+        if float(np.hypot(target[0] - source[0], target[1] - source[1])) <= 0.0:
+            raise ValueError(
+                f"The selected nodes form a zero-length vector in {orientation}."
+            )
 
     def _graph_in_plane_spacing(
         self,
@@ -1644,6 +1946,96 @@ class PatchViewerWindow(QMainWindow):
 
         self.statusBar().showMessage(f"Saved current views: {export_path}")
 
+    def _on_export_viewer_screenshot_clicked(self) -> None:
+        selected_path, selected_filter = QFileDialog.getSaveFileName(
+            self,
+            "Export Patch Triplanar Viewer",
+            self._default_screenshot_filename(),
+            "PNG Image (*.png);;JPEG Image (*.jpg *.jpeg);;All Files (*)",
+        )
+        if not selected_path:
+            self.statusBar().showMessage("Viewer screenshot export canceled")
+            return
+        try:
+            export_path, _ = self._resolve_views_export_target(
+                selected_path,
+                selected_filter,
+            )
+            saved_path, output_size = self.export_viewer_screenshot(
+                export_path,
+                self.screenshot_resolution_spinbox.value(),
+            )
+        except (OSError, ValueError) as exc:
+            QMessageBox.critical(self, "Screenshot Export Failed", str(exc))
+            self.statusBar().showMessage("Viewer screenshot export failed")
+            return
+        self.statusBar().showMessage(
+            f"Saved viewer screenshot {output_size[0]}×{output_size[1]}: {saved_path}"
+        )
+
+    def export_viewer_screenshot(
+        self,
+        path: str | Path,
+        resolution_percent: int = 100,
+    ) -> tuple[Path, tuple[int, int]]:
+        percentage = int(resolution_percent)
+        if not 1 <= percentage <= 200:
+            raise ValueError("Screenshot resolution must be between 1 and 200 percent.")
+        output_path = Path(path)
+        suffix = output_path.suffix.lower()
+        if suffix not in {".png", ".jpg", ".jpeg"}:
+            raise ValueError("Screenshot path must end with .png, .jpg, or .jpeg.")
+        parent = output_path.parent
+        if not parent.exists():
+            raise ValueError(f"Screenshot directory does not exist: {parent}")
+        if not parent.is_dir():
+            raise ValueError(f"Screenshot parent path is not a directory: {parent}")
+        if not os.access(parent, os.W_OK):
+            raise ValueError(f"Screenshot directory is not writable: {parent}")
+
+        native_width = max(self.slice_viewer.width(), 1)
+        native_height = max(self.slice_viewer.height(), 1)
+        output_width = max(1, round(native_width * percentage / 100.0))
+        output_height = max(1, round(native_height * percentage / 100.0))
+        image = QImage(
+            output_width,
+            output_height,
+            QImage.Format.Format_ARGB32,
+        )
+        if image.isNull():
+            raise ValueError(
+                f"Unable to allocate screenshot image {output_width}×{output_height}."
+            )
+        image.fill(QColor(18, 18, 18))
+        painter = QPainter(image)
+        if not painter.isActive():
+            raise ValueError("Unable to initialize screenshot rendering.")
+        try:
+            scale = percentage / 100.0
+            painter.scale(scale, scale)
+            self.slice_viewer.render(painter, QPoint())
+        finally:
+            painter.end()
+
+        format_name = b"PNG" if suffix == ".png" else b"JPG"
+        writer = QImageWriter(str(output_path), format_name)
+        if format_name == b"JPG":
+            writer.setQuality(95)
+        if not writer.write(image):
+            error = writer.errorString() or "unknown image writer error"
+            raise ValueError(f"Screenshot save failed: {error}")
+        return output_path, (output_width, output_height)
+
+    def _update_screenshot_output_dimensions(self, percentage: int) -> None:
+        if not hasattr(self, "screenshot_dimensions_label"):
+            return
+        width = max(1, round(max(self.slice_viewer.width(), 1) * percentage / 100.0))
+        height = max(
+            1,
+            round(max(self.slice_viewer.height(), 1) * percentage / 100.0),
+        )
+        self.screenshot_dimensions_label.setText(f"Output: {width} × {height} px")
+
     def _default_patch_filename(self) -> str:
         center = self._patch_center if self._patch_center is not None else (0, 0, 0)
         size = (
@@ -1664,6 +2056,12 @@ class PatchViewerWindow(QMainWindow):
         if stem.endswith(".nii"):
             stem = stem[:-4]
         return str(Path.home() / f"{stem}_views.png")
+
+    def _default_screenshot_filename(self) -> str:
+        stem = Path(self._default_patch_filename()).stem
+        if stem.endswith(".nii"):
+            stem = stem[:-4]
+        return str(Path.home() / f"{stem}_triplanar.png")
 
     def _default_seg_patch_filename(self) -> str:
         stem = Path(self._default_patch_filename()).stem
@@ -2261,6 +2659,10 @@ class PatchViewerWindow(QMainWindow):
     def resizeEvent(self, event: QResizeEvent) -> None:
         super().resizeEvent(event)
         self._font_scaler.apply()
+        if hasattr(self, "screenshot_resolution_spinbox"):
+            self._update_screenshot_output_dimensions(
+                self.screenshot_resolution_spinbox.value()
+            )
 
 
 def _json_number(value: float) -> int | float:

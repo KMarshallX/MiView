@@ -13,7 +13,8 @@ It is designed as a focused research tool for:
 - orthogonal **MIP / MinIP** inspection of selected, modified patches, optionally
   restricted to a loaded file-backed segmentation mask, with opt-in MIP of the
   active file or annotation segmentation overlay,
-- projection-graph editing with nodes, straight or curved edges, and physical-spacing-aware angle measurement,
+- projection-graph editing with persistent directed vectors, straight or curved edges, and multiple physical-spacing-aware angle measurements,
+- patch-window triplanar screenshot export at 1–200% output resolution,
 - controlled local IPC and `mipview-ctl` commands for viewer, patch, annotation, projection, and graph workflows.
 
 MipView is intentionally minimal. The goal is to build a small, reliable viewer before adding more advanced features.
@@ -127,7 +128,8 @@ The current codebase is organized around a small top-level `mipview` package:
     │   ├── measurement.py
     │   ├── model.py
     │   ├── spatial.py
-    │   └── state.py
+    │   ├── state.py
+    │   └── vector.py
     ├── io/
     │   └── nifti_io.py
     ├── patch/
@@ -150,6 +152,6 @@ In practice, the main runtime flow is:
 2. `main.py` creates the Qt application and main window.
 3. `ui/main_window.py` coordinates loading, viewer updates, patch actions, segmentation and annotation state, and tool execution; patch-window Graph mode is coordinated by `ui/patch_window.py`.
 4. `viewer/` modules render slices and projections and manage tri-planar, zoom, pan, annotation, and graph interactions.
-5. `graph/` keeps graph identity, curve geometry, measurement calculations, and interaction state outside the Qt panel code.
+5. `graph/` keeps graph identity, curve geometry, persistent vectors, measurement calculations, and interaction state outside the Qt panel code.
 6. `control/` exposes structured local IPC commands through the command registry, controller, and `mipview-ctl` CLI.
 7. `state/`, `io/`, `patch/`, `segmentation/`, `annotation/`, and `tools/` provide the remaining supporting logic.

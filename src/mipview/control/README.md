@@ -22,6 +22,7 @@ Most state-changing commands require a NIfTI image to already be loaded in the r
 - [`patch.select`](#patchselect)
 - [`patch.export_raw`](#patchexport_raw)
 - [`patch.save`](#patchsave)
+- [`patch.screenshot`](#patchscreenshot)
 - [`projection.mode`](#projectionmode)
 - [`projection.save`](#projectionsave)
 - [`graph.*`](#graph-commands)
@@ -358,6 +359,19 @@ Example:
 mipview-ctl patch save ./patch.nii.gz
 ```
 
+### `patch.screenshot`
+
+Save only an open patch window's triplanar viewer, including its current zoom,
+pan, projections, overlays, vectors, and angle legends. Controls are excluded.
+
+```bash
+mipview-ctl patch screenshot SESSION_ID ./triplanar.png --resolution-percent 150
+```
+
+The matching direct command is `patch.screenshot` with `session_id`, `path`, and
+`resolution_percent`. Resolution must be from 1 through 200 and defaults to 100.
+PNG and JPEG are supported; JPEG uses fixed encoding quality 95.
+
 ### `projection.mode`
 
 Function: Set the projection mode to MIP or MinIP.
@@ -450,11 +464,15 @@ mipview-ctl graph add-voxel-node SESSION_ID 12 18 7
 mipview-ctl graph add-edge SESSION_ID axial 1 2
 mipview-ctl graph curve-edge SESSION_ID axial 1 2 18.5 24.0
 mipview-ctl graph straighten-edge SESSION_ID axial 1 2
-mipview-ctl graph normal-line SESSION_ID axial 1 2 show
-mipview-ctl graph extension-line SESSION_ID axial 1 2 show
+mipview-ctl graph add-node-vector SESSION_ID axial 1 2
+mipview-ctl graph add-tangent-vector SESSION_ID axial 1 2
+mipview-ctl graph add-normal-vector SESSION_ID axial 1 2
+mipview-ctl graph flip-vector SESSION_ID 1
 mipview-ctl graph split-edge SESSION_ID axial 1 2 18 24
-mipview-ctl graph calculate-angle SESSION_ID axial 1 2 3 4
-mipview-ctl graph clear-angle SESSION_ID
+mipview-ctl graph calculate-angle SESSION_ID 1 2
+mipview-ctl graph delete-angle SESSION_ID 1
+mipview-ctl graph clear-angles SESSION_ID
+mipview-ctl graph delete-vector SESSION_ID 1
 mipview-ctl graph clear SESSION_ID
 mipview-ctl graph delete-edge SESSION_ID axial 1 2
 mipview-ctl graph delete-node SESSION_ID axial 1
@@ -464,20 +482,19 @@ mipview-ctl graph exit SESSION_ID
 The matching direct commands are `graph.status`, `graph.activate`,
 `graph.set_display`, `graph.add_node`, `graph.delete_node`, `graph.add_edge`,
 `graph.add_voxel_node`, `graph.delete_edge`, `graph.curve_edge`,
-`graph.straighten_edge`, `graph.set_normal_line`, `graph.set_extension_line`,
-`graph.split_edge`, `graph.calculate_angle`, `graph.clear_angle`, and
-`graph.clear`.
+`graph.straighten_edge`, `graph.add_node_vector`, `graph.add_tangent_vector`,
+`graph.add_normal_vector`, `graph.flip_vector`, `graph.delete_vector`,
+`graph.split_edge`, `graph.calculate_angle`, `graph.delete_angle`,
+`graph.clear_angles`, and `graph.clear`.
 
 Curve controls use floating-point oriented projection coordinates and must be
 finite and inside the projection plane. They update a shared 3D control point by
-preserving the coordinate hidden by the selected view. Angle node IDs are ordered
-as vector 1 source/target followed by vector 2 source/target. Both vectors use the command's
-single orientation, and calculation scales their horizontal and vertical
-components by physical in-plane voxel spacing before evaluating the unsigned
-angle. Graph status includes authoritative patch voxels, full-image voxels when
-patch bounds are known, projections in all orientations, 3D curve controls,
-active tool/selection state, both directed vectors, and `angle_degrees`. Graph
-sessions are in-memory only and disappear when their patch window closes.
+preserving the coordinate hidden by the selected view. Angles reference two
+persistent vector IDs in one projection and scale their components by physical
+in-plane voxel spacing. Graph status includes authoritative patch voxels,
+projections, 3D curve controls, vector colour/direction records, pending vector
+creation, angle selection, and all retained measurements. Graph sessions are
+in-memory only and disappear when their patch window closes.
 
 `graph.split_edge` takes the clicked oriented projection index, inserts a node at
 the nearest point on the target edge, and replaces it with two connected edges.

@@ -38,27 +38,25 @@ node is placed at the nearest projection index on the edge, the original edge is
 replaced by two connected edges, and quadratic subdivision preserves curved-edge
 geometry.
 
-Right-clicking a straight edge also offers **Display the normal line**. It draws
-a one-pixel fluorescent-yellow dashed line through the projected edge midpoint,
-normal to the edge and extended to the projection boundaries. The menu changes
-to **Hide the normal line** while that view-specific construction line is shown.
-Only one normal line is retained at a time, and curving, splitting, deleting, or
-clearing its edge removes it.
+Right-clicking a straight edge offers **Display the tangent vector** and
+**Display the normal vector**. A tangent follows the normalized endpoint order.
+A normal starts at the edge midpoint, points 90 degrees counter-clockwise in
+physical in-plane space, and is drawn at a fixed 48 logical pixels. Each edge can
+own one vector of each kind per projection. Right-click a vector to flip or
+delete it. Curving, splitting, or deleting its edge removes derived vectors and
+their dependent measurements.
 
-The same straight-edge menu offers **Display the extension line**. It draws a
-one-pixel fluorescent-blue dashed supporting line through both projected edge
-endpoints and extends it to the projection boundaries. The original solid edge
-is drawn above the construction line, leaving the dashed extensions visible
-beyond its endpoints. The menu changes to **Hide the extension line** while it
-is shown. One view-specific extension line is retained at a time, independently
-of the normal line, and it follows the same automatic removal rules.
+Right-clicking a node offers **Create a vector from this node**. The next click
+must use the same projection. Clicking another node completes the vector;
+clicking empty projection space first creates a target node using the current
+MIP/MinIP ray-resolution rules. Invalid rays create neither node nor vector.
 
-**Calculate Angle** selects four shared nodes in source/target order for two
-directed vectors. All four selections must use one orientation because the result
-is the projected view angle, not a 3D angle. It uses physical in-plane voxel
-spacing and is therefore not distorted by anisotropic voxels. Yellow arrows and
-the result remain until **Clear Angle**; **Cancel** discards only an incomplete
-replacement measurement.
+**Calculate Angle** continuously selects an existing source vector and target
+vector in the same projection. Each completed directed `0–180°` measurement is
+retained as `A1`, `A2`, and so on. Calculations use physical in-plane spacing.
+The viewer draws stable preset vector colours, dashed supporting lines, an angle
+arc, and a label. Flipping one vector recalculates every dependent measurement.
+Cancel exits the tool without deleting completed angles.
 
 **Clear All Nodes & Edges** clears the shared graph in every orientation,
 including curve controls, pending interactions, and stored angle measurements.
@@ -67,9 +65,9 @@ Rendering uses direct `QPainter` primitives and `QPainterPath`, so graph memory
 grows with node and edge count rather than patch-volume size.
 
 Graph mode preserves right-drag zoom. A stationary right-click opens the graph
-context menu. Edge creation may start in one orientation and finish on a shared
-node in another. Pressing Escape, exiting Graph mode, changing MIP/MinIP mode, or
-disabling the pending edge's projection cancels edge creation.
+context menu. Edge creation may cross orientations, but vector creation is locked
+to the projection where it began. Pressing Escape, exiting Graph mode, changing
+MIP/MinIP mode, or disabling the locked projection cancels pending creation.
 
 Changing MIP/MinIP mode also cancels active curve/angle interaction while keeping
 completed curves and measurements. An incompatible patch-volume geometry change

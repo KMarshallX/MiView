@@ -57,13 +57,14 @@ class TriPlanarViewerWidget(QWidget):
     graph_context_requested = Signal(str, object, object, object)
     graph_edge_completion_requested = Signal(str, int)
     graph_edge_cancel_requested = Signal()
+    graph_vector_completion_requested = Signal(str, object, object)
     graph_orientation_interacted = Signal(str)
     graph_layers_cleared = Signal(object)
     graph_curve_edge_selected = Signal(str, int, int)
     graph_curve_control_changed = Signal(str, int, int, float, float)
     graph_curve_drag_state_changed = Signal(bool)
     graph_curve_exit_requested = Signal()
-    graph_angle_node_selected = Signal(str, int)
+    graph_angle_vector_selected = Signal(str, int)
 
     def __init__(
         self,
@@ -143,6 +144,9 @@ class TriPlanarViewerWidget(QWidget):
             view.graph_edge_cancel_requested.connect(
                 self.graph_edge_cancel_requested.emit
             )
+            view.graph_vector_completion_requested.connect(
+                self.graph_vector_completion_requested.emit
+            )
             view.graph_orientation_interacted.connect(
                 self._on_graph_orientation_interacted
             )
@@ -158,8 +162,8 @@ class TriPlanarViewerWidget(QWidget):
             view.graph_curve_exit_requested.connect(
                 self.graph_curve_exit_requested.emit
             )
-            view.graph_angle_node_selected.connect(
-                self.graph_angle_node_selected.emit
+            view.graph_angle_vector_selected.connect(
+                self.graph_angle_vector_selected.emit
             )
         for widget in self._drop_event_sources:
             widget.installEventFilter(self)
@@ -430,11 +434,12 @@ class TriPlanarViewerWidget(QWidget):
                     active_tool=None,
                     selected_edge=None,
                     curve_handle_visible=False,
-                    angle_vectors=(),
-                    normal_line_edge=None,
-                    normal_line_thickness=1,
-                    extension_line_edge=None,
-                    extension_line_thickness=1,
+                    vectors=(),
+                    measurements=(),
+                    selected_vector_id=None,
+                    angle_source_vector_id=None,
+                    pending_vector_orientation=None,
+                    pending_vector_source_node_id=None,
                 )
                 continue
             layer = graph_state.projected_layer(
@@ -459,27 +464,23 @@ class TriPlanarViewerWidget(QWidget):
                 active_tool=graph_state.active_tool,
                 selected_edge=graph_state.selected_edge,
                 curve_handle_visible=graph_state.selected_edge is not None,
-                angle_vectors=tuple(
+                vectors=tuple(
                     vector
-                    for vector in (
-                        graph_state.angle_vector_1,
-                        graph_state.angle_vector_2,
-                        *graph_state.draft_angle_vectors(),
-                    )
-                    if vector is not None and vector.orientation == view.orientation
+                    for vector in graph_state.vectors.values()
+                    if vector.orientation == view.orientation
                 ),
-                normal_line_edge=(
-                    graph_state.normal_line_edge
-                    if graph_state.normal_line_orientation == view.orientation
-                    else None
+                measurements=tuple(
+                    measurement
+                    for measurement in graph_state.angle_measurements.values()
+                    if graph_state.vectors[measurement.source_vector_id].orientation
+                    == view.orientation
                 ),
-                normal_line_thickness=graph_state.normal_line_thickness,
-                extension_line_edge=(
-                    graph_state.extension_line_edge
-                    if graph_state.extension_line_orientation == view.orientation
-                    else None
+                selected_vector_id=graph_state.selected_vector_id,
+                angle_source_vector_id=graph_state.angle_source_vector_id,
+                pending_vector_orientation=graph_state.pending_vector_orientation,
+                pending_vector_source_node_id=(
+                    graph_state.pending_vector_source_node_id
                 ),
-                extension_line_thickness=graph_state.extension_line_thickness,
             )
 
     def graph_projected_layer(

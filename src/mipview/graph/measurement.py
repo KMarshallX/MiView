@@ -6,29 +6,20 @@ from typing import Mapping
 
 import numpy as np
 
-from mipview.viewer.slice_geometry import Orientation
+from mipview.graph.vector import GraphVector, resolve_graph_vector
 
 
 @dataclass(frozen=True)
-class DirectedGraphVector:
-    orientation: Orientation
-    source_node_id: int
-    target_node_id: int
-
-    def __post_init__(self) -> None:
-        if int(self.source_node_id) == int(self.target_node_id):
-            raise ValueError("Vector source and target nodes must be different.")
-
-    def references_node(self, orientation: Orientation, node_id: int) -> bool:
-        return self.orientation == orientation and int(node_id) in (
-            int(self.source_node_id),
-            int(self.target_node_id),
-        )
+class AngleMeasurement:
+    id: int
+    source_vector_id: int
+    target_vector_id: int
+    angle_degrees: float
 
 
 def calculate_unsigned_angle_degrees(
-    vector_1: DirectedGraphVector,
-    vector_2: DirectedGraphVector,
+    vector_1: GraphVector,
+    vector_2: GraphVector,
     node_positions: Mapping[int, tuple[int, int] | tuple[float, float]],
     in_plane_spacing: tuple[float, float],
 ) -> float:
@@ -46,8 +37,18 @@ def calculate_unsigned_angle_degrees(
     ):
         raise ValueError("In-plane voxel spacing must contain two positive finite values.")
 
-    first = _physical_components(vector_1, node_positions, in_plane_spacing)
-    second = _physical_components(vector_2, node_positions, in_plane_spacing)
+    first = np.asarray(
+        resolve_graph_vector(
+            vector_1, node_positions, in_plane_spacing
+        ).physical_direction,
+        dtype=np.float64,
+    )
+    second = np.asarray(
+        resolve_graph_vector(
+            vector_2, node_positions, in_plane_spacing
+        ).physical_direction,
+        dtype=np.float64,
+    )
     first_norm = float(np.linalg.norm(first))
     second_norm = float(np.linalg.norm(second))
     if first_norm <= 0.0 or second_norm <= 0.0:
@@ -56,22 +57,3 @@ def calculate_unsigned_angle_degrees(
     cosine = float(np.dot(first, second) / (first_norm * second_norm))
     clamped_cosine = min(max(cosine, -1.0), 1.0)
     return float(np.degrees(np.arccos(clamped_cosine)))
-
-
-def _physical_components(
-    vector: DirectedGraphVector,
-    node_positions: Mapping[int, tuple[int, int] | tuple[float, float]],
-    in_plane_spacing: tuple[float, float],
-) -> np.ndarray:
-    try:
-        source = node_positions[int(vector.source_node_id)]
-        target = node_positions[int(vector.target_node_id)]
-    except KeyError as exc:
-        raise ValueError(f"Vector references missing graph node {exc.args[0]}.") from exc
-    return np.asarray(
-        (
-            (float(target[0]) - float(source[0])) * float(in_plane_spacing[0]),
-            (float(target[1]) - float(source[1])) * float(in_plane_spacing[1]),
-        ),
-        dtype=np.float64,
-    )
