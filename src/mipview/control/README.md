@@ -467,6 +467,8 @@ mipview-ctl graph straighten-edge SESSION_ID axial 1 2
 mipview-ctl graph add-node-vector SESSION_ID axial 1 2
 mipview-ctl graph add-tangent-vector SESSION_ID axial 1 2
 mipview-ctl graph add-normal-vector SESSION_ID axial 1 2
+mipview-ctl graph extension-line SESSION_ID axial 1 2 show
+mipview-ctl graph normal-line SESSION_ID axial 1 2 show
 mipview-ctl graph flip-vector SESSION_ID 1
 mipview-ctl graph split-edge SESSION_ID axial 1 2 18 24
 mipview-ctl graph calculate-angle SESSION_ID 1 2
@@ -482,8 +484,9 @@ mipview-ctl graph exit SESSION_ID
 The matching direct commands are `graph.status`, `graph.activate`,
 `graph.set_display`, `graph.add_node`, `graph.delete_node`, `graph.add_edge`,
 `graph.add_voxel_node`, `graph.delete_edge`, `graph.curve_edge`,
-`graph.straighten_edge`, `graph.add_node_vector`, `graph.add_tangent_vector`,
-`graph.add_normal_vector`, `graph.flip_vector`, `graph.delete_vector`,
+`graph.straighten_edge`, `graph.set_extension_line`, `graph.set_normal_line`,
+`graph.add_node_vector`, `graph.add_tangent_vector`, `graph.add_normal_vector`,
+`graph.flip_vector`, `graph.delete_vector`,
 `graph.split_edge`, `graph.calculate_angle`, `graph.delete_angle`,
 `graph.clear_angles`, and `graph.clear`.
 

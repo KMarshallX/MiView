@@ -5,7 +5,8 @@
 It is designed as a focused research tool for:
 
 - ITK-SNAP inspired image viewing,
-- multi-label segmentation overlay inspection with deterministic per-label colors,
+- multi-label segmentation overlay inspection with deterministic per-label colors
+  and synchronized main/patch overlay selectors (`---` disables the overlay),
 - voxel-space annotation with editable label masks,
 - interactive patch selection,
 - patch saving,

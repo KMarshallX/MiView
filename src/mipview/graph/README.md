@@ -12,11 +12,13 @@ the axial, coronal, and sagittal overlays are projections of that shared graph.
 
 Creating a node from a 2D projection resolves the missing coordinate from the
 current image ray: MIP uses the finite maximum and MinIP uses the finite minimum.
-The selected projection mask restricts contributing voxels. Equal extrema choose
-the depth nearest the current cursor and then the lower index. Empty or non-finite
-rays fail explicitly. Once resolved, a node does not move when projection mode or
-mask changes. This intensity-derived depth is a reviewable aid and is not proof
-that the selected voxel represents the intended anatomy.
+The selected projection mask restricts contributing voxels when the clicked ray
+crosses the mask. Outside the projected mask region, node creation falls back to
+the unmasked image ray using the same MIP/MinIP rule. Equal extrema choose the
+depth nearest the current cursor and then the lower index. Fully non-finite rays
+fail explicitly. Once resolved, a node does not move when projection mode or mask
+changes. This intensity-derived depth is a reviewable aid and is not proof that
+the selected voxel represents the intended anatomy.
 
 The command interface retains `graph.add_node` for oriented projection indices.
 `graph.add_voxel_node` (CLI: `graph add-voxel-node`) creates an unambiguous node
@@ -45,6 +47,16 @@ physical in-plane space, and is drawn at a fixed 48 logical pixels. Each edge ca
 own one vector of each kind per projection. Right-click a vector to flip or
 delete it. Curving, splitting, or deleting its edge removes derived vectors and
 their dependent measurements.
+
+Straight-edge context menus also provide independent **extension line** and
+**normal line** toggles. These dashed plane-spanning construction lines do not
+create graph vectors, consume vector colour presets, or participate in angle
+measurements. Curving, splitting, or deleting the source edge removes its
+construction lines and any derived vectors.
+
+Left-clicking a node, edge, or vector selects it and renders that element white.
+Left-clicking empty projection space clears the selection while retaining normal
+cursor interaction.
 
 Right-clicking a node offers **Create a vector from this node**. The next click
 must use the same projection. Clicking another node completes the vector;
