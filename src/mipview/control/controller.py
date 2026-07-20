@@ -359,6 +359,30 @@ class MipViewController:
                 "path": str(Path(path)),
                 "counts": dict(result.counts),
                 "warnings": list(result.warnings),
+                "schema_version": result.version,
+                "projection_mode": result.projection_mode,
+                "enabled_orientations": list(result.enabled_orientations),
+            },
+        )
+
+    def open_graph_state(self, path: str) -> CommandResult:
+        if not str(path).strip():
+            return CommandResult(False, "Graph state path is required.")
+        try:
+            patch_window, result = self.main_window.restore_graph_patch(path)
+        except (OSError, ValueError) as exc:
+            return CommandResult(False, str(exc), {"path": str(path)})
+        return CommandResult(
+            True,
+            "Graph patch restored.",
+            {
+                "session_id": patch_window.graph_session_id,
+                "path": str(Path(path)),
+                "counts": dict(result.counts),
+                "warnings": list(result.warnings),
+                "schema_version": result.version,
+                "projection_mode": result.projection_mode,
+                "enabled_orientations": list(result.enabled_orientations),
             },
         )
 

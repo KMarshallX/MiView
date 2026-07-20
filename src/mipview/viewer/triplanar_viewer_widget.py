@@ -18,7 +18,10 @@ from mipview.graph.spatial import (
     resolve_projection_voxel,
     update_control_point_from_projection,
 )
-from mipview.ui.drop_loading import first_supported_local_nifti_path
+from mipview.ui.drop_loading import (
+    first_supported_local_drop_path,
+    is_supported_graph_state_path,
+)
 from mipview.state.cursor_state import CursorState
 from mipview.state.zoom_state import ZoomState
 from mipview.io.nifti_io import NiftiLoadResult
@@ -53,6 +56,7 @@ class TriPlanarViewerWidget(QWidget):
     annotation_changed = Signal(object)
     annotation_undo_availability_changed = Signal(bool)
     nifti_file_dropped = Signal(object)
+    graph_state_file_dropped = Signal(object)
     projection_state_changed = Signal(str, object)
     graph_context_requested = Signal(str, object, object, object)
     graph_edge_completion_requested = Signal(str, int)
@@ -732,12 +736,12 @@ class TriPlanarViewerWidget(QWidget):
         super().dragMoveEvent(event)
 
     def dropEvent(self, event: QDropEvent) -> None:
-        dropped_path = self._dropped_nifti_path(event)
+        dropped_path = self._dropped_path(event)
         if dropped_path is None:
             event.ignore()
             return
         event.acceptProposedAction()
-        self.nifti_file_dropped.emit(dropped_path)
+        self._emit_dropped_path(dropped_path)
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:
         if watched in self._drop_event_sources and self._handle_drop_event(event):
@@ -1091,7 +1095,7 @@ class TriPlanarViewerWidget(QWidget):
         self._apply_annotation_overlay_to_views()
 
     def _accept_drop_event(self, event: QDragEnterEvent | QDragMoveEvent) -> bool:
-        if self._dropped_nifti_path(event) is None:
+        if self._dropped_path(event) is None:
             event.ignore()
             return False
         event.acceptProposedAction()
@@ -1115,14 +1119,14 @@ class TriPlanarViewerWidget(QWidget):
         drop_event = event if isinstance(event, QDropEvent) else None
         if drop_event is None:
             return False
-        dropped_path = self._dropped_nifti_path(drop_event)
+        dropped_path = self._dropped_path(drop_event)
         if dropped_path is None:
             return False
         drop_event.acceptProposedAction()
-        self.nifti_file_dropped.emit(dropped_path)
+        self._emit_dropped_path(dropped_path)
         return True
 
-    def _dropped_nifti_path(
+    def _dropped_path(
         self, event: QDragEnterEvent | QDragMoveEvent | QDropEvent
     ) -> Path | None:
         if not self._drop_loading_enabled:
@@ -1130,7 +1134,13 @@ class TriPlanarViewerWidget(QWidget):
         mime_data = event.mimeData()
         if mime_data is None or not mime_data.hasUrls():
             return None
-        return first_supported_local_nifti_path(mime_data.urls())
+        return first_supported_local_drop_path(mime_data.urls())
+
+    def _emit_dropped_path(self, dropped_path: Path) -> None:
+        if is_supported_graph_state_path(dropped_path):
+            self.graph_state_file_dropped.emit(dropped_path)
+        else:
+            self.nifti_file_dropped.emit(dropped_path)
 
 
 def _clamp_voxel(

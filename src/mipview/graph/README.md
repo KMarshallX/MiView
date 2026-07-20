@@ -11,6 +11,10 @@ the axial, coronal, and sagittal overlays are projections of that shared graph.
 - **Save Graph State…** writes persistent graph content to a local
   `.mipgraph.json` file; **Load Graph State…** restores it into a compatible
   patch.
+- With the source image loaded in the main window, dropping a
+  `.mipgraph.json` file over the viewer extracts a fresh patch from its saved
+  half-open source bounds and restores the graph in a new patch window after
+  the user confirms the restoration prompt.
 
 Creating a node from a 2D projection resolves the missing coordinate from the
 current image ray: MIP uses the finite maximum and MinIP uses the finite minimum.
@@ -95,23 +99,28 @@ clears the shared graph and its measurements.
 
 Graph state files contain a format identifier and schema version, patch geometry,
 nodes, edges and curve controls, original vector colours, retained angle pairs and
-label positions, construction lines, and Graph-specific display settings. Loading
+label positions, construction lines, Graph-specific display settings, projection
+mode, and enabled projection orientations. Loading
 requires matching patch shape, half-open source bounds, and affine. A different
 source path is reported as a warning when geometry remains compatible. Active
 tools, selections, pending operations, and Graph activation are not saved.
 
-Version 1 uses this top-level structure:
+Version 2 uses this top-level structure:
 
 ```json
 {
   "format": "mipview-graph-state",
-  "version": 1,
+  "version": 2,
   "source": {
     "image_path": "/path/to/source.nii.gz",
     "patch_shape": [64, 64, 10],
     "patch_bounds": {},
     "patch_affine": [],
     "voxel_spacing": []
+  },
+  "projection": {
+    "mode": "MINIP",
+    "enabled_orientations": ["axial", "coronal"]
   },
   "display": {},
   "graph": {"nodes": [], "edges": []},
@@ -122,4 +131,7 @@ Version 1 uses this top-level structure:
 ```
 
 The loader validates all nested fields and references; the abbreviated objects
-above document the container layout rather than valid empty field values.
+above document the container layout rather than valid empty field values. Version
+1 files remain loadable. Because version 1 did not record projection state, all
+three projection orientations are left disabled when one is loaded; the neutral
+mode value is MIP.

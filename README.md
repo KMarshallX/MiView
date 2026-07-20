@@ -14,7 +14,9 @@ It is designed as a focused research tool for:
 - orthogonal **MIP / MinIP** inspection of selected, modified patches, optionally
   restricted to a loaded file-backed segmentation mask, with opt-in MIP of the
   active file or annotation segmentation overlay,
-- projection-graph editing with local state save/load, persistent directed vectors, straight or curved edges, and physical-spacing-aware one-to-one angle measurements,
+- projection-graph editing with local state save/load, drag-and-drop patch restoration,
+  persistent directed vectors, straight or curved edges, restored MIP/MinIP
+  orientation settings, and physical-spacing-aware one-to-one angle measurements,
 - patch-window triplanar screenshot export at 1–200% output resolution,
 - controlled local IPC and `mipview-ctl` commands for viewer, patch, annotation, projection, and graph workflows.
 

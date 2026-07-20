@@ -57,6 +57,7 @@ class CommandRegistry:
         self.register("graph.status", self.controller.get_graph_status)
         self.register("graph.save", self.controller.save_graph_state)
         self.register("graph.load", self.controller.load_graph_state)
+        self.register("graph.open", self.controller.open_graph_state)
         self.register("graph.activate", self.controller.set_graph_active)
         self.register("graph.set_display", self.controller.set_graph_display)
         self.register("graph.add_node", self.controller.add_graph_node)

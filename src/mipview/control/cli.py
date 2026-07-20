@@ -270,6 +270,11 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     graph_status = graph_subparsers.add_parser("status", help="Show graph session state.")
     graph_status.add_argument("session_id", metavar="SESSION_ID")
+    graph_open = graph_subparsers.add_parser(
+        "open",
+        help="Recreate a patch window from a graph state file and the loaded image.",
+    )
+    graph_open.add_argument("path", metavar="PATH")
     graph_save = graph_subparsers.add_parser(
         "save", help="Save persistent graph state to a local JSON file."
     )
@@ -590,6 +595,8 @@ def _command_from_args(args: argparse.Namespace) -> tuple[str, dict[str, Any], A
             )
 
     if args.group == "graph":
+        if args.graph_command == "open":
+            return "graph.open", {"path": args.path}, None
         if args.graph_command == "status":
             return "graph.status", {"session_id": args.session_id}, None
         if args.graph_command in {"save", "load"}:

@@ -23,7 +23,8 @@ from mipview.viewer.slice_geometry import Orientation
 
 
 GRAPH_STATE_FORMAT = "mipview-graph-state"
-GRAPH_STATE_VERSION = 1
+GRAPH_STATE_VERSION = 2
+SUPPORTED_GRAPH_STATE_VERSIONS = (1, GRAPH_STATE_VERSION)
 AFFINE_ABSOLUTE_TOLERANCE = 1e-5
 ANGLE_ABSOLUTE_TOLERANCE = 1e-6
 
@@ -40,6 +41,20 @@ class GraphFileContext:
     patch_bounds: PatchBounds | None
     patch_affine: np.ndarray
     voxel_spacing: tuple[float, float, float]
+    projection_mode: str = "MIP"
+    enabled_orientations: tuple[Orientation, ...] = ()
+
+
+@dataclass(frozen=True)
+class GraphRestoreMetadata:
+    version: int
+    source_image_path: Path | None
+    patch_shape: tuple[int, int, int]
+    patch_bounds: PatchBounds | None
+    patch_affine: np.ndarray
+    voxel_spacing: tuple[float, float, float]
+    projection_mode: str
+    enabled_orientations: tuple[Orientation, ...]
 
 
 @dataclass(frozen=True)
@@ -47,6 +62,9 @@ class GraphLoadResult:
     state: ProjectionGraphState
     warnings: tuple[str, ...]
     counts: dict[str, int]
+    version: int
+    projection_mode: str
+    enabled_orientations: tuple[Orientation, ...]
 
 
 def graph_state_counts(state: ProjectionGraphState) -> dict[str, int]:
@@ -111,19 +129,27 @@ def load_graph_state_file(
     context: GraphFileContext,
     geometry_provider: VectorGeometryProvider,
 ) -> GraphLoadResult:
-    input_path = Path(path)
-    if not input_path.exists():
-        raise FileNotFoundError(f"Graph state file not found: {input_path}")
-    if not input_path.is_file():
-        raise ValueError(f"Expected a graph state file, got: {input_path}")
-    try:
-        with input_path.open("r", encoding="utf-8") as stream:
-            document = json.load(stream)
-    except json.JSONDecodeError as exc:
-        raise ValueError(
-            f"Invalid graph state JSON at line {exc.lineno}, column {exc.colno}."
-        ) from exc
+    document = _read_graph_document(path)
     return graph_state_from_document(document, context, geometry_provider)
+
+
+def read_graph_restore_metadata(path: str | Path) -> GraphRestoreMetadata:
+    """Read the spatial and projection metadata needed to recreate a patch window."""
+
+    root = _validated_root(_read_graph_document(path))
+    version = _graph_document_version(root)
+    source = _parse_source_metadata(_require_object(root.get("source"), "source"))
+    projection_mode, enabled_orientations = _parse_projection_settings(root, version)
+    return GraphRestoreMetadata(
+        version=version,
+        source_image_path=source[0],
+        patch_shape=source[1],
+        patch_bounds=source[2],
+        patch_affine=source[3],
+        voxel_spacing=source[4],
+        projection_mode=projection_mode,
+        enabled_orientations=enabled_orientations,
+    )
 
 
 def graph_state_document(
@@ -156,6 +182,7 @@ def graph_state_document(
             "patch_affine": affine.tolist(),
             "voxel_spacing": [float(value) for value in context.voxel_spacing],
         },
+        "projection": _projection_payload(context),
         "display": {
             "visible": state.visible,
             "opacity": state.opacity,
@@ -230,14 +257,9 @@ def graph_state_from_document(
     context: GraphFileContext,
     geometry_provider: VectorGeometryProvider,
 ) -> GraphLoadResult:
-    root = _require_object(document, "root")
-    if root.get("format") != GRAPH_STATE_FORMAT:
-        raise ValueError("The file is not a MipView graph state document.")
-    version = _require_int(root.get("version"), "version", minimum=1)
-    if version != GRAPH_STATE_VERSION:
-        raise ValueError(
-            f"Unsupported graph state version {version}; expected {GRAPH_STATE_VERSION}."
-        )
+    root = _validated_root(document)
+    version = _graph_document_version(root)
+    projection_mode, enabled_orientations = _parse_projection_settings(root, version)
 
     warnings = _validate_source_context(
         _require_object(root.get("source"), "source"), context
@@ -485,26 +507,114 @@ def graph_state_from_document(
     ) = _parse_line(lines.get("normal"), "construction_lines.normal", state)
 
     counts = graph_state_counts(state)
-    return GraphLoadResult(state=state, warnings=tuple(warnings), counts=counts)
+    return GraphLoadResult(
+        state=state,
+        warnings=tuple(warnings),
+        counts=counts,
+        version=version,
+        projection_mode=projection_mode,
+        enabled_orientations=enabled_orientations,
+    )
 
 
-def _validate_source_context(
-    payload: dict[str, Any], context: GraphFileContext
-) -> list[str]:
+def _read_graph_document(path: str | Path) -> object:
+    input_path = Path(path)
+    if not input_path.exists():
+        raise FileNotFoundError(f"Graph state file not found: {input_path}")
+    if not input_path.is_file():
+        raise ValueError(f"Expected a graph state file, got: {input_path}")
+    try:
+        with input_path.open("r", encoding="utf-8") as stream:
+            return json.load(stream)
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"Invalid graph state JSON at line {exc.lineno}, column {exc.colno}."
+        ) from exc
+
+
+def _validated_root(document: object) -> dict[str, Any]:
+    root = _require_object(document, "root")
+    if root.get("format") != GRAPH_STATE_FORMAT:
+        raise ValueError("The file is not a MipView graph state document.")
+    return root
+
+
+def _graph_document_version(root: dict[str, Any]) -> int:
+    version = _require_int(root.get("version"), "version", minimum=1)
+    if version not in SUPPORTED_GRAPH_STATE_VERSIONS:
+        supported = ", ".join(str(value) for value in SUPPORTED_GRAPH_STATE_VERSIONS)
+        raise ValueError(
+            f"Unsupported graph state version {version}; supported versions are "
+            f"{supported}."
+        )
+    return version
+
+
+def _projection_payload(context: GraphFileContext) -> dict[str, object]:
+    mode = context.projection_mode.strip().upper()
+    if mode not in {"MIP", "MINIP"}:
+        raise ValueError("Projection mode must be MIP or MinIP.")
+    orientations: list[Orientation] = []
+    for orientation in context.enabled_orientations:
+        if orientation not in ORIENTATIONS:
+            raise ValueError(
+                "Enabled projection orientations must be axial, coronal, or sagittal."
+            )
+        if orientation in orientations:
+            raise ValueError(f"Duplicate enabled projection orientation: {orientation}.")
+        orientations.append(orientation)
+    return {
+        "mode": mode,
+        "enabled_orientations": orientations,
+    }
+
+
+def _parse_projection_settings(
+    root: dict[str, Any], version: int
+) -> tuple[str, tuple[Orientation, ...]]:
+    if version == 1:
+        # Version 1 did not persist projection state. Keep every orientation off.
+        return ("MIP", ())
+    payload = _require_object(root.get("projection"), "projection")
+    mode_value = payload.get("mode")
+    if not isinstance(mode_value, str) or mode_value.strip().upper() not in {
+        "MIP",
+        "MINIP",
+    }:
+        raise ValueError("projection.mode must be MIP or MinIP.")
+    mode = mode_value.strip().upper()
+    orientations: list[Orientation] = []
+    for index, value in enumerate(
+        _require_list(
+            payload.get("enabled_orientations"),
+            "projection.enabled_orientations",
+        )
+    ):
+        orientation = _require_orientation(
+            value, f"projection.enabled_orientations[{index}]"
+        )
+        if orientation in orientations:
+            raise ValueError(
+                f"Duplicate enabled projection orientation: {orientation}."
+            )
+        orientations.append(orientation)
+    return (mode, tuple(orientations))
+
+
+def _parse_source_metadata(payload: dict[str, Any]) -> tuple[
+    Path | None,
+    tuple[int, int, int],
+    PatchBounds | None,
+    np.ndarray,
+    tuple[float, float, float],
+]:
     shape = tuple(
         _require_int(value, f"source.patch_shape[{axis}]", minimum=1)
         for axis, value in enumerate(
             _require_list(payload.get("patch_shape"), "source.patch_shape", length=3)
         )
     )
-    if shape != context.patch_shape:
-        raise ValueError(
-            f"Graph patch shape {shape} does not match current patch shape "
-            f"{context.patch_shape}."
-        )
     saved_bounds = _parse_bounds(payload.get("patch_bounds"))
-    if saved_bounds != context.patch_bounds:
-        raise ValueError("Graph patch bounds do not match the current patch bounds.")
     affine_values = _require_list(
         payload.get("patch_affine"), "source.patch_affine", length=4
     )
@@ -520,6 +630,33 @@ def _validate_source_context(
         ],
         dtype=np.float64,
     )
+    spacing_values = _require_list(
+        payload.get("voxel_spacing"), "source.voxel_spacing", length=3
+    )
+    spacing = tuple(
+        _require_float(
+            value, f"source.voxel_spacing[{axis}]", minimum=0.0, exclusive_minimum=True
+        )
+        for axis, value in enumerate(spacing_values)
+    )
+    saved_path_value = payload.get("image_path")
+    if saved_path_value is not None and not isinstance(saved_path_value, str):
+        raise ValueError("source.image_path must be a string or null.")
+    saved_path = None if saved_path_value is None else Path(saved_path_value)
+    return (saved_path, shape, saved_bounds, affine, spacing)
+
+
+def _validate_source_context(
+    payload: dict[str, Any], context: GraphFileContext
+) -> list[str]:
+    saved_path, shape, saved_bounds, affine, spacing = _parse_source_metadata(payload)
+    if shape != context.patch_shape:
+        raise ValueError(
+            f"Graph patch shape {shape} does not match current patch shape "
+            f"{context.patch_shape}."
+        )
+    if saved_bounds != context.patch_bounds:
+        raise ValueError("Graph patch bounds do not match the current patch bounds.")
     current_affine = np.asarray(context.patch_affine, dtype=np.float64)
     if current_affine.shape != (4, 4) or not np.all(np.isfinite(current_affine)):
         raise ValueError("Current patch affine is invalid.")
@@ -530,15 +667,6 @@ def _validate_source_context(
         atol=AFFINE_ABSOLUTE_TOLERANCE,
     ):
         raise ValueError("Graph patch affine does not match the current patch affine.")
-    spacing_values = _require_list(
-        payload.get("voxel_spacing"), "source.voxel_spacing", length=3
-    )
-    spacing = tuple(
-        _require_float(
-            value, f"source.voxel_spacing[{axis}]", minimum=0.0, exclusive_minimum=True
-        )
-        for axis, value in enumerate(spacing_values)
-    )
     current_spacing = tuple(float(value) for value in context.voxel_spacing)
     if len(current_spacing) != 3 or not all(
         math.isfinite(value) and value > 0.0 for value in current_spacing
@@ -549,13 +677,13 @@ def _validate_source_context(
             "Graph patch voxel spacing does not match the current patch spacing."
         )
 
-    saved_path_value = payload.get("image_path")
-    if saved_path_value is not None and not isinstance(saved_path_value, str):
-        raise ValueError("source.image_path must be a string or null.")
     current_path = (
         None
         if context.source_image_path is None
         else str(context.source_image_path.resolve(strict=False))
+    )
+    saved_path_value = (
+        None if saved_path is None else str(saved_path.resolve(strict=False))
     )
     warnings: list[str] = []
     if saved_path_value != current_path:

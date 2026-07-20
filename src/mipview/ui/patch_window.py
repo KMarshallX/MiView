@@ -7,7 +7,7 @@ from typing import Literal
 from uuid import uuid4
 
 import numpy as np
-from PySide6.QtCore import QPoint, Qt, Signal
+from PySide6.QtCore import QPoint, QSignalBlocker, Qt, Signal
 from PySide6.QtGui import (
     QAction,
     QColor,
@@ -750,8 +750,47 @@ class PatchViewerWindow(QMainWindow):
         self.graph_panel.set_node_size(self.graph_state.node_size)
         self.graph_panel.set_edge_thickness(self.graph_state.edge_thickness)
         self.graph_panel.set_editing_enabled(editing_enabled)
+        self.restore_projection_settings(
+            result.projection_mode,
+            result.enabled_orientations,
+        )
         self._refresh_graph_panel_tool_state()
         return result
+
+    def restore_projection_settings(
+        self,
+        mode: str,
+        enabled_orientations: Sequence[Orientation],
+    ) -> None:
+        normalized_mode = mode.strip().upper()
+        if normalized_mode not in {"MIP", "MINIP"}:
+            raise ValueError("Projection mode must be MIP or MinIP.")
+        enabled = tuple(enabled_orientations)
+        if len(set(enabled)) != len(enabled) or any(
+            orientation not in {"axial", "coronal", "sagittal"}
+            for orientation in enabled
+        ):
+            raise ValueError(
+                "Enabled projections must be unique axial, coronal, or sagittal "
+                "orientations."
+            )
+        controls = (
+            self.projection_mode_combo,
+            self.axial_toggle_button,
+            self.coronal_toggle_button,
+            self.sagittal_toggle_button,
+        )
+        blockers = [QSignalBlocker(control) for control in controls]
+        try:
+            self.projection_mode_combo.setCurrentText(
+                "MIP" if normalized_mode == "MIP" else "MinIP"
+            )
+            self.axial_toggle_button.setChecked("axial" in enabled)
+            self.coronal_toggle_button.setChecked("coronal" in enabled)
+            self.sagittal_toggle_button.setChecked("sagittal" in enabled)
+        finally:
+            del blockers
+        self._sync_projection_controls()
 
     def _graph_file_context(self) -> GraphFileContext:
         unit_scale = spatial_unit_to_mm(self._patch_volume.header.get_xyzt_units()[0])
@@ -764,6 +803,8 @@ class PatchViewerWindow(QMainWindow):
             patch_bounds=self._source_patch_bounds,
             patch_affine=np.asarray(self._patch_volume.affine, dtype=np.float64),
             voxel_spacing=tuple(float(value) for value in spacing),
+            projection_mode=self.slice_viewer.projection_mode(),
+            enabled_orientations=self.slice_viewer.enabled_projection_orientations(),
         )
 
     def _loaded_graph_vector_geometry(
@@ -2713,6 +2754,9 @@ class PatchViewerWindow(QMainWindow):
 
     def source_patch_bounds(self) -> PatchBounds | None:
         return self._source_patch_bounds
+
+    def patch_volume(self) -> NiftiLoadResult:
+        return self._patch_volume
 
     def update_segmentation_overlay(
         self,

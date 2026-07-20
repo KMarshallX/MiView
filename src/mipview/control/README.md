@@ -457,6 +457,7 @@ graph remains available whenever the session contains graph elements.
 
 ```bash
 mipview-ctl graph status SESSION_ID
+mipview-ctl graph open ./vessels.mipgraph.json
 mipview-ctl graph save SESSION_ID ./vessels.mipgraph.json
 mipview-ctl graph save SESSION_ID ./vessels.mipgraph.json --overwrite
 mipview-ctl graph load SESSION_ID ./vessels.mipgraph.json
@@ -486,7 +487,7 @@ mipview-ctl graph delete-node SESSION_ID axial 1
 mipview-ctl graph exit SESSION_ID
 ```
 
-The matching direct commands are `graph.status`, `graph.save`, `graph.load`,
+The matching direct commands are `graph.status`, `graph.open`, `graph.save`, `graph.load`,
 `graph.activate`,
 `graph.set_display`, `graph.add_node`, `graph.delete_node`, `graph.add_edge`,
 `graph.add_voxel_node`, `graph.delete_edge`, `graph.curve_edge`,
@@ -506,10 +507,14 @@ Graph status includes authoritative patch voxels,
 projections, 3D curve controls, vector colour/direction records, pending vector
 creation, angle selection, and all retained measurements. `.mipgraph.json` files
 persist completed graph content, construction lines, and Graph-specific display
-settings. Loading is transactional and requires matching patch shape, bounds, and
+settings, plus MIP/MinIP mode and enabled projection orientations. Loading is
+transactional and requires matching patch shape, bounds, and
 affine; a changed source path is returned in `data.warnings`. Command saves do not
 overwrite and command loads do not replace a non-empty graph unless the matching
-flags are supplied.
+flags are supplied. `graph.open PATH` requires the source image to be loaded,
+extracts a fresh patch from the saved source bounds, and opens a restored patch
+window. Version 1 graph files remain supported and open with all projection
+orientations disabled because that schema did not store projection state.
 
 `graph.split_edge` takes the clicked oriented projection index, inserts a node at
 the nearest point on the target edge, and replaces it with two connected edges.
