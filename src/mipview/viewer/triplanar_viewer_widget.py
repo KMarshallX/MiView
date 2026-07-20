@@ -65,6 +65,7 @@ class TriPlanarViewerWidget(QWidget):
     graph_curve_drag_state_changed = Signal(bool)
     graph_curve_exit_requested = Signal()
     graph_angle_vector_selected = Signal(str, int)
+    graph_element_selected = Signal(str, object)
 
     def __init__(
         self,
@@ -165,6 +166,7 @@ class TriPlanarViewerWidget(QWidget):
             view.graph_angle_vector_selected.connect(
                 self.graph_angle_vector_selected.emit
             )
+            view.graph_element_selected.connect(self.graph_element_selected.emit)
         for widget in self._drop_event_sources:
             widget.installEventFilter(self)
         self.cursor_state.cursor_changed.connect(self._on_cursor_changed)
@@ -432,6 +434,7 @@ class TriPlanarViewerWidget(QWidget):
                     edge_thickness=1,
                     pending_node_id=None,
                     active_tool=None,
+                    selected_node_id=None,
                     selected_edge=None,
                     curve_handle_visible=False,
                     vectors=(),
@@ -440,6 +443,8 @@ class TriPlanarViewerWidget(QWidget):
                     angle_source_vector_id=None,
                     pending_vector_orientation=None,
                     pending_vector_source_node_id=None,
+                    normal_line_edge=None,
+                    extension_line_edge=None,
                 )
                 continue
             layer = graph_state.projected_layer(
@@ -462,8 +467,12 @@ class TriPlanarViewerWidget(QWidget):
                 edge_thickness=graph_state.edge_thickness,
                 pending_node_id=graph_state.pending_edge_node_id,
                 active_tool=graph_state.active_tool,
+                selected_node_id=graph_state.selected_node_id,
                 selected_edge=graph_state.selected_edge,
-                curve_handle_visible=graph_state.selected_edge is not None,
+                curve_handle_visible=(
+                    graph_state.active_tool == "curve_edge"
+                    and graph_state.selected_edge is not None
+                ),
                 vectors=tuple(
                     vector
                     for vector in graph_state.vectors.values()
@@ -481,6 +490,18 @@ class TriPlanarViewerWidget(QWidget):
                 pending_vector_source_node_id=(
                     graph_state.pending_vector_source_node_id
                 ),
+                normal_line_edge=(
+                    graph_state.normal_line_edge
+                    if graph_state.normal_line_orientation == view.orientation
+                    else None
+                ),
+                normal_line_thickness=graph_state.normal_line_thickness,
+                extension_line_edge=(
+                    graph_state.extension_line_edge
+                    if graph_state.extension_line_orientation == view.orientation
+                    else None
+                ),
+                extension_line_thickness=graph_state.extension_line_thickness,
             )
 
     def graph_projected_layer(

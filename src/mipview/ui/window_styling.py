@@ -34,7 +34,7 @@ class ResponsiveFontScaler:
         width_ratio = self._window.width() / float(self._reference_width)
         height_ratio = self._window.height() / float(self._reference_height)
         scale = min(width_ratio, height_ratio)
-        clamped_scale = min(max(scale, 0.85), 1.45)
+        clamped_scale = min(max(scale, 0.70), 1.45)
         target_point_size = self._base_point_size * clamped_scale
         if abs(target_point_size - self._last_point_size) < 0.05:
             return

@@ -64,6 +64,11 @@ class CommandRegistry:
         self.register("graph.delete_edge", self.controller.delete_graph_edge)
         self.register("graph.curve_edge", self.controller.curve_graph_edge)
         self.register("graph.straighten_edge", self.controller.straighten_graph_edge)
+        self.register("graph.set_normal_line", self.controller.set_graph_normal_line)
+        self.register(
+            "graph.set_extension_line",
+            self.controller.set_graph_extension_line,
+        )
         self.register("graph.add_node_vector", self.controller.add_graph_node_vector)
         self.register(
             "graph.add_tangent_vector",

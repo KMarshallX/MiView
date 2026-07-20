@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QProgressBar,
     QProgressDialog,
+    QScrollArea,
     QSplitter,
     QWidget,
 )
@@ -81,8 +82,8 @@ class MainWindow(QMainWindow):
         )
         self.contrast_state = ContrastState(self)
         self.slice_viewer = TriPlanarViewerWidget(maximum_zoom=25.0)
-        self.cursor_panel = CursorInspectionPanel()
-        self.annotation_panel = AnnotationPanel()
+        self.cursor_panel = CursorInspectionPanel(adaptable_width=True)
+        self.annotation_panel = AnnotationPanel(adaptable_width=True)
         self.contrast_control_bar = ContrastControlBar(self)
         self.overlay_opacity_control_bar = OverlayOpacityControlBar(
             self,
@@ -112,6 +113,9 @@ class MainWindow(QMainWindow):
         )
         self.overlay_opacity_control_bar.opacity_changed.connect(
             self._on_segmentation_opacity_changed
+        )
+        self.overlay_opacity_control_bar.segmentation_changed.connect(
+            self._on_overlay_segmentation_changed
         )
         self.segmentation_config_window.unload_segmentation_requested.connect(
             self._on_unload_segmentation_requested
@@ -185,7 +189,16 @@ class MainWindow(QMainWindow):
         right_layout.addWidget(self.annotation_panel)
         right_layout.addStretch(1)
 
-        splitter.addWidget(right_panel)
+        right_scroll_area = QScrollArea(self)
+        right_scroll_area.setWidgetResizable(True)
+        right_scroll_area.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        )
+        right_scroll_area.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        )
+        right_scroll_area.setWidget(right_panel)
+        splitter.addWidget(right_scroll_area)
         splitter.setStretchFactor(0, 4)
         splitter.setStretchFactor(1, 1)
         content_widget.setAcceptDrops(True)
@@ -194,6 +207,9 @@ class MainWindow(QMainWindow):
         splitter.installEventFilter(self)
         self._content_widget = content_widget
         self._main_splitter = splitter
+        splitter.setSizes(
+            [CursorInspectionPanel.PANEL_WIDTH * 4, CursorInspectionPanel.PANEL_WIDTH]
+        )
 
         content_layout.addWidget(self.contrast_control_bar)
         content_layout.addWidget(self.overlay_opacity_control_bar)
@@ -473,6 +489,9 @@ class MainWindow(QMainWindow):
         )
         patch_window.overlay_opacity_changed.connect(
             self._on_segmentation_opacity_changed
+        )
+        patch_window.overlay_segmentation_changed.connect(
+            self._on_overlay_segmentation_changed
         )
         patch_window.annotation_active_label_changed.connect(
             self._on_annotation_active_label_changed
@@ -765,7 +784,9 @@ class MainWindow(QMainWindow):
     def _on_annotation_visibility_changed(self, visible: bool) -> None:
         self.state.annotation.visible = bool(visible)
         self.annotation_panel.set_visible_checked(self.state.annotation.visible)
-        self.slice_viewer.set_annotation_overlay_visible(self.state.annotation.visible)
+        self.slice_viewer.set_annotation_overlay_visible(
+            self.state.annotation.visible and self._active_segmentation_is_annotation()
+        )
         self._update_patch_windows_annotation_display_options()
 
     def _on_annotation_opacity_changed(self, opacity: float) -> None:
@@ -1201,6 +1222,19 @@ class MainWindow(QMainWindow):
             self._apply_active_segmentation_overlay()
             self._refresh_segmentation_ui()
 
+    def _on_overlay_segmentation_changed(self, segmentation_id: object) -> None:
+        if segmentation_id is None:
+            self.state.active_segmentation_id = None
+        elif isinstance(segmentation_id, str) and any(
+            segmentation.id == segmentation_id
+            for segmentation in self.state.loaded_segmentations
+        ):
+            self.state.active_segmentation_id = segmentation_id
+        else:
+            return
+        self._apply_active_segmentation_overlay()
+        self._refresh_segmentation_ui()
+
     def _on_segmentation_opacity_changed(self, opacity: float) -> None:
         if self._active_segmentation_is_annotation():
             self._on_annotation_opacity_changed(opacity)
@@ -1223,6 +1257,11 @@ class MainWindow(QMainWindow):
 
     def _apply_active_segmentation_overlay(self) -> None:
         active_segmentation = self._active_segmentation()
+        self.slice_viewer.set_annotation_overlay_visible(
+            self.state.annotation.visible
+            and active_segmentation is not None
+            and active_segmentation.kind == "annotation"
+        )
         if active_segmentation is None:
             self.slice_viewer.set_segmentation_overlay(
                 None,
@@ -1282,6 +1321,14 @@ class MainWindow(QMainWindow):
         )
         self.segmentation_config_window.set_opacity(active_opacity)
         self.overlay_opacity_control_bar.set_opacity(active_opacity)
+        overlay_options = [
+            (segmentation.id, segmentation.display_name)
+            for segmentation in self.state.loaded_segmentations
+        ]
+        self.overlay_opacity_control_bar.set_segmentations(
+            overlay_options,
+            self.state.active_segmentation_id,
+        )
         self._update_patch_windows_projection_masks_for_current_image()
         self._sync_patch_windows_segmentation_menu_state()
 
@@ -1400,6 +1447,13 @@ class MainWindow(QMainWindow):
             can_open_configuration=(
                 self.state.volume is not None if has_image is None else has_image
             ),
+        )
+        patch_window.set_overlay_segmentations(
+            [
+                (segmentation.id, segmentation.display_name)
+                for segmentation in self.state.loaded_segmentations
+            ],
+            self.state.active_segmentation_id,
         )
 
     def _update_patch_windows_segmentation_opacity_for_current_image(self) -> None:

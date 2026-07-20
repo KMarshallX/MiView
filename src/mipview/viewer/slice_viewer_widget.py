@@ -23,6 +23,10 @@ from mipview.graph.curve import point_to_quadratic_bezier_distance
 from mipview.graph.geometry import point_to_segment_distance
 from mipview.graph.measurement import AngleMeasurement
 from mipview.graph.model import GraphEdge, ProjectionGraphLayer
+from mipview.graph.spatial import (
+    extension_line_plane_endpoints,
+    normal_line_plane_endpoints,
+)
 from mipview.graph.vector import GraphVector, resolve_graph_vector
 from mipview.viewer.intensity import normalize_slice_to_uint8, window_slice_to_uint8
 from mipview.segmentation.overlay import build_segmentation_overlay_rgba
@@ -67,6 +71,7 @@ class SliceViewerWidget(QWidget):
     graph_curve_drag_state_changed = Signal(bool)
     graph_curve_exit_requested = Signal()
     graph_angle_vector_selected = Signal(str, int)
+    graph_element_selected = Signal(str, object)
 
     ZOOM_DRAG_SENSITIVITY = 0.01
     PATCH_HANDLE_RADIUS = 3.0
@@ -119,6 +124,7 @@ class SliceViewerWidget(QWidget):
         self._graph_pending_node_id: int | None = None
         self._graph_preview_label_position: QPointF | None = None
         self._graph_active_tool: str | None = None
+        self._graph_selected_node_id: int | None = None
         self._graph_selected_edge: GraphEdge | None = None
         self._graph_curve_handle_visible = False
         self._graph_vectors: tuple[GraphVector, ...] = ()
@@ -127,6 +133,10 @@ class SliceViewerWidget(QWidget):
         self._graph_angle_source_vector_id: int | None = None
         self._graph_pending_vector_orientation: Orientation | None = None
         self._graph_pending_vector_source_node_id: int | None = None
+        self._graph_normal_line_edge: GraphEdge | None = None
+        self._graph_normal_line_thickness = 1
+        self._graph_extension_line_edge: GraphEdge | None = None
+        self._graph_extension_line_thickness = 1
         self._active_patch_resize_handle: str | None = None
         self._interaction_mode: str | None = None
         self._last_drag_position: QPointF | None = None
@@ -253,6 +263,11 @@ class SliceViewerWidget(QWidget):
         angle_source_vector_id: int | None,
         pending_vector_orientation: Orientation | None,
         pending_vector_source_node_id: int | None,
+        selected_node_id: int | None = None,
+        normal_line_edge: GraphEdge | None = None,
+        normal_line_thickness: int = 1,
+        extension_line_edge: GraphEdge | None = None,
+        extension_line_thickness: int = 1,
     ) -> None:
         self._graph_layer = layer
         self._graph_editing_enabled = bool(editing_enabled)
@@ -264,6 +279,7 @@ class SliceViewerWidget(QWidget):
             None if pending_node_id is None else int(pending_node_id)
         )
         self._graph_active_tool = active_tool
+        self._graph_selected_node_id = selected_node_id
         self._graph_selected_edge = selected_edge
         self._graph_curve_handle_visible = bool(curve_handle_visible)
         self._graph_vectors = tuple(vectors)
@@ -272,6 +288,13 @@ class SliceViewerWidget(QWidget):
         self._graph_angle_source_vector_id = angle_source_vector_id
         self._graph_pending_vector_orientation = pending_vector_orientation
         self._graph_pending_vector_source_node_id = pending_vector_source_node_id
+        self._graph_normal_line_edge = normal_line_edge
+        self._graph_normal_line_thickness = max(int(normal_line_thickness), 1)
+        self._graph_extension_line_edge = extension_line_edge
+        self._graph_extension_line_thickness = max(
+            int(extension_line_thickness),
+            1,
+        )
         if (
             self._graph_pending_node_id is None
             and self._graph_pending_vector_source_node_id is None
@@ -602,14 +625,20 @@ class SliceViewerWidget(QWidget):
 
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        edge_pen = QPen(edge_color, self._graph_edge_thickness)
-        edge_pen.setCosmetic(True)
-        painter.setPen(edge_pen)
+        self._draw_graph_construction_lines(painter, display_rect, alpha)
         painter.setBrush(Qt.BrushStyle.NoBrush)
         for edge in self._graph_layer.edges:
             start = node_positions.get(edge.start_node_id)
             end = node_positions.get(edge.end_node_id)
             if start is not None and end is not None:
+                edge_pen = QPen(
+                    QColor(255, 255, 255, alpha)
+                    if edge == self._graph_selected_edge
+                    else edge_color,
+                    self._graph_edge_thickness,
+                )
+                edge_pen.setCosmetic(True)
+                painter.setPen(edge_pen)
                 control = self._graph_layer.curve_control_points.get(edge)
                 if control is None:
                     painter.drawLine(start, end)
@@ -632,9 +661,13 @@ class SliceViewerWidget(QWidget):
         self._draw_graph_vectors(painter, vector_segments, alpha)
 
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(node_color)
         radius = float(self._graph_node_size)
-        for position in node_positions.values():
+        for node_id, position in node_positions.items():
+            painter.setBrush(
+                QColor(255, 255, 255, alpha)
+                if node_id == self._graph_selected_node_id
+                else node_color
+            )
             painter.drawEllipse(position, radius, radius)
 
         if (
@@ -676,6 +709,44 @@ class SliceViewerWidget(QWidget):
                 painter.setBrush(Qt.BrushStyle.NoBrush)
                 painter.drawLine(start, self._graph_preview_label_position)
         painter.restore()
+
+    def _draw_graph_construction_lines(
+        self,
+        painter: QPainter,
+        display_rect: DisplayRect,
+        alpha: int,
+    ) -> None:
+        if self._graph_layer is None:
+            return
+        for edge, endpoint_resolver, color, thickness in (
+            (
+                self._graph_extension_line_edge,
+                extension_line_plane_endpoints,
+                QColor(0, 191, 255, alpha),
+                self._graph_extension_line_thickness,
+            ),
+            (
+                self._graph_normal_line_edge,
+                normal_line_plane_endpoints,
+                QColor(255, 255, 0, alpha),
+                self._graph_normal_line_thickness,
+            ),
+        ):
+            if edge is None:
+                continue
+            try:
+                first, second = endpoint_resolver(self._graph_layer, edge)
+            except ValueError:
+                continue
+            pen = QPen(color, thickness)
+            pen.setCosmetic(True)
+            pen.setStyle(Qt.PenStyle.DashLine)
+            painter.setPen(pen)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawLine(
+                self._graph_projection_point_to_screen(first, display_rect),
+                self._graph_projection_point_to_screen(second, display_rect),
+            )
 
     def _graph_vector_screen_segments(
         self,
@@ -739,11 +810,9 @@ class SliceViewerWidget(QWidget):
             if length <= 0.0:
                 continue
 
-            selected = vector.id in (
-                self._graph_selected_vector_id,
-                self._graph_angle_source_vector_id,
-            )
-            if selected:
+            selected = vector.id == self._graph_selected_vector_id
+            angle_source = vector.id == self._graph_angle_source_vector_id
+            if angle_source and not selected:
                 selection_pen = QPen(
                     QColor(255, 255, 255, alpha),
                     max(self._graph_edge_thickness, 2) + 5,
@@ -759,7 +828,7 @@ class SliceViewerWidget(QWidget):
             painter.setPen(halo_pen)
             painter.drawLine(start, end)
 
-            arrow_color = QColor(vector.color)
+            arrow_color = QColor("#ffffff") if selected else QColor(vector.color)
             arrow_color.setAlpha(alpha)
             arrow_pen = QPen(arrow_color, max(self._graph_edge_thickness, 2))
             arrow_pen.setCosmetic(True)
@@ -1362,6 +1431,12 @@ class SliceViewerWidget(QWidget):
                 else:
                     self.graph_edge_cancel_requested.emit()
                 return
+            if self._graph_interaction_available():
+                hit = self._graph_hit_at_label_position(mouse_event.position())
+                self.graph_element_selected.emit(self.orientation, hit)
+                if hit.get("kind") != "empty":
+                    self._interaction_mode = "left_graph_select"
+                    return
             if self._start_patch_resize_if_hit(mouse_event.position()):
                 self._interaction_mode = "left_patch_resize"
                 return
@@ -1470,6 +1545,7 @@ class SliceViewerWidget(QWidget):
             "left_graph_curve_drag",
             "left_graph_curve_select",
             "left_graph_angle",
+            "left_graph_select",
         ):
             if self._interaction_mode == "left_graph_curve_drag":
                 self.graph_curve_drag_state_changed.emit(False)

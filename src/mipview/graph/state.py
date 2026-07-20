@@ -34,9 +34,16 @@ class ProjectionGraphState:
     pending_vector_orientation: Orientation | None = None
     pending_vector_source_node_id: int | None = None
     active_tool: GraphTool | None = None
+    selected_node_id: int | None = None
     selected_edge_orientation: Orientation | None = None
     selected_edge: GraphEdge | None = None
     selected_vector_id: int | None = None
+    normal_line_orientation: Orientation | None = None
+    normal_line_edge: GraphEdge | None = None
+    normal_line_thickness: int = 1
+    extension_line_orientation: Orientation | None = None
+    extension_line_edge: GraphEdge | None = None
+    extension_line_thickness: int = 1
     curve_drag_active: bool = False
     angle_source_vector_id: int | None = None
     vectors: dict[int, GraphVector] = field(default_factory=dict)
@@ -96,6 +103,7 @@ class ProjectionGraphState:
         self._ensure_node(node_id)
         self.cancel_active_tool()
         self.cancel_pending_vector()
+        self.clear_selection()
         self.pending_edge_orientation = orientation
         self.pending_edge_node_id = int(node_id)
         self.active_orientation = orientation
@@ -108,6 +116,7 @@ class ProjectionGraphState:
         self._ensure_node(source_node_id)
         self.cancel_active_tool()
         self.cancel_pending_edge()
+        self.clear_selection()
         self.pending_vector_orientation = orientation
         self.pending_vector_source_node_id = int(source_node_id)
         self.active_orientation = orientation
@@ -131,6 +140,9 @@ class ProjectionGraphState:
             target_node_id=int(target_node_id),
         )
         self.cancel_pending_vector()
+        self.selected_node_id = None
+        self.selected_edge_orientation = None
+        self.selected_edge = None
         self.selected_vector_id = vector.id
         self.active_orientation = orientation
         return vector
@@ -158,6 +170,9 @@ class ProjectionGraphState:
                     f"for edge {edge.start_node_id}-{edge.end_node_id} in {orientation}."
                 )
         vector = self._new_vector(orientation=orientation, kind=kind, edge=edge)
+        self.selected_node_id = None
+        self.selected_edge_orientation = None
+        self.selected_edge = None
         self.selected_vector_id = vector.id
         self.active_orientation = orientation
         return vector
@@ -188,6 +203,9 @@ class ProjectionGraphState:
         vector = self._ensure_vector(vector_id)
         flipped = vector.flipped()
         self.vectors[flipped.id] = flipped
+        self.selected_node_id = None
+        self.selected_edge_orientation = None
+        self.selected_edge = None
         self.selected_vector_id = flipped.id
         self._recalculate_measurements_for_vector(
             flipped.id,
@@ -209,6 +227,7 @@ class ProjectionGraphState:
     def activate_curve_tool(self) -> None:
         self.cancel_pending_edge()
         self.cancel_pending_vector()
+        self.clear_selection()
         self.angle_source_vector_id = None
         self.active_tool = "curve_edge"
         self.curve_drag_active = False
@@ -222,6 +241,9 @@ class ProjectionGraphState:
         edge = GraphEdge.between(first_node_id, second_node_id)
         self.graph.ensure_curve_control_point(edge)
         self.invalidate_edge_vectors(edge)
+        self.invalidate_construction_lines(edge)
+        self.selected_node_id = None
+        self.selected_vector_id = None
         self.active_tool = "curve_edge"
         self.selected_edge_orientation = orientation
         self.selected_edge = edge
@@ -232,8 +254,7 @@ class ProjectionGraphState:
     def activate_angle_tool(self) -> None:
         self.cancel_pending_edge()
         self.cancel_pending_vector()
-        self.selected_edge_orientation = None
-        self.selected_edge = None
+        self.clear_selection()
         self.curve_drag_active = False
         self.active_tool = "calculate_angle"
         self.angle_source_vector_id = None
@@ -312,6 +333,86 @@ class ProjectionGraphState:
         self.curve_drag_active = False
         self.angle_source_vector_id = None
 
+    def select_node(self, orientation: Orientation, node_id: int) -> None:
+        self._ensure_node(node_id)
+        self.selected_node_id = int(node_id)
+        self.selected_edge_orientation = None
+        self.selected_edge = None
+        self.selected_vector_id = None
+        self.active_orientation = orientation
+
+    def select_edge(self, orientation: Orientation, edge: GraphEdge) -> None:
+        if edge not in self.graph.edges:
+            raise ValueError(
+                f"Graph edge {edge.start_node_id}-{edge.end_node_id} does not exist."
+            )
+        self.selected_node_id = None
+        self.selected_edge_orientation = orientation
+        self.selected_edge = edge
+        self.selected_vector_id = None
+        self.active_orientation = orientation
+
+    def select_vector(self, vector_id: int) -> None:
+        vector = self._ensure_vector(vector_id)
+        self.selected_node_id = None
+        self.selected_edge_orientation = None
+        self.selected_edge = None
+        self.selected_vector_id = vector.id
+        self.active_orientation = vector.orientation
+
+    def clear_selection(self) -> None:
+        self.selected_node_id = None
+        self.selected_edge_orientation = None
+        self.selected_edge = None
+        self.selected_vector_id = None
+
+    def set_normal_line(
+        self,
+        orientation: Orientation,
+        edge: GraphEdge,
+        visible: bool,
+    ) -> bool:
+        self._validate_straight_edge(edge, "normal")
+        if visible:
+            self.normal_line_orientation = orientation
+            self.normal_line_edge = edge
+            return True
+        if self.normal_line_orientation == orientation and self.normal_line_edge == edge:
+            self.clear_normal_line()
+        return False
+
+    def clear_normal_line(self) -> None:
+        self.normal_line_orientation = None
+        self.normal_line_edge = None
+
+    def set_extension_line(
+        self,
+        orientation: Orientation,
+        edge: GraphEdge,
+        visible: bool,
+    ) -> bool:
+        self._validate_straight_edge(edge, "extension")
+        if visible:
+            self.extension_line_orientation = orientation
+            self.extension_line_edge = edge
+            return True
+        if (
+            self.extension_line_orientation == orientation
+            and self.extension_line_edge == edge
+        ):
+            self.clear_extension_line()
+        return False
+
+    def clear_extension_line(self) -> None:
+        self.extension_line_orientation = None
+        self.extension_line_edge = None
+
+    def invalidate_construction_lines(self, edge: GraphEdge) -> None:
+        if self.normal_line_edge == edge:
+            self.clear_normal_line()
+        if self.extension_line_edge == edge:
+            self.clear_extension_line()
+
     def clear_graph(self) -> tuple[int, int]:
         node_count = len(self.graph.nodes)
         edge_count = len(self.graph.edges)
@@ -319,7 +420,10 @@ class ProjectionGraphState:
         self.cancel_pending_edge()
         self.cancel_pending_vector()
         self.cancel_active_tool()
+        self.clear_selection()
         self._clear_vectors_and_angles()
+        self.clear_normal_line()
+        self.clear_extension_line()
         return node_count, edge_count
 
     def invalidate_edge(self, edge: GraphEdge) -> None:
@@ -328,6 +432,7 @@ class ProjectionGraphState:
             self.selected_edge = None
             self.curve_drag_active = False
         self.invalidate_edge_vectors(edge)
+        self.invalidate_construction_lines(edge)
 
     def invalidate_edge_vectors(self, edge: GraphEdge) -> None:
         for vector_id in [
@@ -337,6 +442,8 @@ class ProjectionGraphState:
 
     def invalidate_node(self, node_id: int) -> None:
         normalized = int(node_id)
+        if self.selected_node_id == normalized:
+            self.selected_node_id = None
         if self.selected_edge is not None and normalized in (
             self.selected_edge.start_node_id,
             self.selected_edge.end_node_id,
@@ -354,6 +461,12 @@ class ProjectionGraphState:
             if vector.references_node(normalized)
         ]:
             self.delete_vector(vector_id)
+        for edge in (self.normal_line_edge, self.extension_line_edge):
+            if edge is not None and normalized in (
+                edge.start_node_id,
+                edge.end_node_id,
+            ):
+                self.invalidate_construction_lines(edge)
 
     def exit_editing(self) -> None:
         self.editing_enabled = False
@@ -370,8 +483,19 @@ class ProjectionGraphState:
             "edge_thickness": self.edge_thickness,
             "active_orientation": self.active_orientation,
             "active_tool": self.active_tool,
+            "selected_node_id": self.selected_node_id,
             "selected_edge": self._selected_edge_summary(),
             "selected_vector_id": self.selected_vector_id,
+            "normal_line": self._construction_line_summary(
+                self.normal_line_orientation,
+                self.normal_line_edge,
+                self.normal_line_thickness,
+            ),
+            "extension_line": self._construction_line_summary(
+                self.extension_line_orientation,
+                self.extension_line_edge,
+                self.extension_line_thickness,
+            ),
             "curve_drag_active": self.curve_drag_active,
             "pending_edge": (
                 None
@@ -494,6 +618,9 @@ class ProjectionGraphState:
         self.cancel_pending_vector()
         self.cancel_active_tool()
         self._clear_vectors_and_angles()
+        self.clear_selection()
+        self.clear_normal_line()
+        self.clear_extension_line()
 
     def _ensure_node(self, node_id: int) -> None:
         normalized = int(node_id)
@@ -507,6 +634,16 @@ class ProjectionGraphState:
             raise ValueError(f"Graph vector V{normalized} does not exist.")
         return vector
 
+    def _validate_straight_edge(self, edge: GraphEdge, line_name: str) -> None:
+        if edge not in self.graph.edges:
+            raise ValueError(
+                f"Graph edge {edge.start_node_id}-{edge.end_node_id} does not exist."
+            )
+        if edge in self.graph.curve_control_points:
+            raise ValueError(
+                f"A {line_name} line is available only for a straight edge."
+            )
+
     def _selected_edge_summary(self) -> dict[str, object] | None:
         if self.selected_edge is None:
             return None
@@ -514,6 +651,21 @@ class ProjectionGraphState:
             "orientation": self.selected_edge_orientation,
             "start_node_id": self.selected_edge.start_node_id,
             "end_node_id": self.selected_edge.end_node_id,
+        }
+
+    @staticmethod
+    def _construction_line_summary(
+        orientation: Orientation | None,
+        edge: GraphEdge | None,
+        thickness: int,
+    ) -> dict[str, object] | None:
+        if edge is None:
+            return None
+        return {
+            "orientation": orientation,
+            "start_node_id": edge.start_node_id,
+            "end_node_id": edge.end_node_id,
+            "thickness": thickness,
         }
 
     @staticmethod

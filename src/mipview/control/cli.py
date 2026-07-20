@@ -338,6 +338,22 @@ def _build_parser() -> argparse.ArgumentParser:
     graph_straighten_edge.add_argument("view", metavar="VIEW")
     graph_straighten_edge.add_argument("start_node_id", metavar="START_NODE_ID", type=int)
     graph_straighten_edge.add_argument("end_node_id", metavar="END_NODE_ID", type=int)
+    for command_name, help_text in (
+        (
+            "normal-line",
+            "Show or hide the projected normal through a straight graph edge.",
+        ),
+        (
+            "extension-line",
+            "Show or hide the projected extension through a straight graph edge.",
+        ),
+    ):
+        line_parser = graph_subparsers.add_parser(command_name, help=help_text)
+        line_parser.add_argument("session_id", metavar="SESSION_ID")
+        line_parser.add_argument("view", metavar="VIEW")
+        line_parser.add_argument("start_node_id", metavar="START_NODE_ID", type=int)
+        line_parser.add_argument("end_node_id", metavar="END_NODE_ID", type=int)
+        line_parser.add_argument("visibility", choices=("show", "hide"))
     graph_add_node_vector = graph_subparsers.add_parser(
         "add-node-vector", help="Create a directed vector between two graph nodes."
     )
@@ -651,6 +667,22 @@ def _command_from_args(args: argparse.Namespace) -> tuple[str, dict[str, Any], A
                     "view": args.view,
                     "source_node_id": args.source_node_id,
                     "target_node_id": args.target_node_id,
+                },
+                None,
+            )
+        if args.graph_command in {"normal-line", "extension-line"}:
+            return (
+                (
+                    "graph.set_normal_line"
+                    if args.graph_command == "normal-line"
+                    else "graph.set_extension_line"
+                ),
+                {
+                    "session_id": args.session_id,
+                    "view": args.view,
+                    "start_node_id": args.start_node_id,
+                    "end_node_id": args.end_node_id,
+                    "visible": args.visibility == "show",
                 },
                 None,
             )

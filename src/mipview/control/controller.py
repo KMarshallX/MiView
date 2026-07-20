@@ -574,6 +574,40 @@ class MipViewController:
             },
         )
 
+    def set_graph_normal_line(
+        self,
+        session_id: str,
+        view: str,
+        start_node_id: int,
+        end_node_id: int,
+        visible: bool,
+    ) -> CommandResult:
+        return self._set_graph_construction_line(
+            session_id,
+            view,
+            start_node_id,
+            end_node_id,
+            visible,
+            normal=True,
+        )
+
+    def set_graph_extension_line(
+        self,
+        session_id: str,
+        view: str,
+        start_node_id: int,
+        end_node_id: int,
+        visible: bool,
+    ) -> CommandResult:
+        return self._set_graph_construction_line(
+            session_id,
+            view,
+            start_node_id,
+            end_node_id,
+            visible,
+            normal=False,
+        )
+
     def add_graph_tangent_vector(
         self,
         session_id: str,
@@ -816,6 +850,47 @@ class MipViewController:
             if kind == "edge_tangent"
             else "Graph normal vector created.",
             {"session_id": session_id, "vector": _graph_vector_payload(vector)},
+        )
+
+    def _set_graph_construction_line(
+        self,
+        session_id: str,
+        view: str,
+        start_node_id: int,
+        end_node_id: int,
+        visible: bool,
+        *,
+        normal: bool,
+    ) -> CommandResult:
+        patch_window = self._graph_patch_window(session_id)
+        if patch_window is None:
+            return self._graph_session_not_found(session_id)
+        orientation = _validate_orientation(view)
+        if orientation is None:
+            return CommandResult(False, "Graph view must be axial, coronal, or sagittal.")
+        setter = (
+            patch_window.set_graph_normal_line
+            if normal
+            else patch_window.set_graph_extension_line
+        )
+        try:
+            is_visible = setter(
+                orientation,
+                int(start_node_id),
+                int(end_node_id),
+                bool(visible),
+            )
+        except (TypeError, ValueError) as exc:
+            return CommandResult(False, str(exc), {"session_id": session_id})
+        line_name = "normal_line" if normal else "extension_line"
+        return CommandResult(
+            True,
+            f"Graph edge {line_name.replace('_', ' ')} "
+            f"{'displayed' if is_visible else 'hidden'}.",
+            {
+                "session_id": session_id,
+                line_name: patch_window.graph_status()[line_name],
+            },
         )
 
     def _mutate_graph_edge(

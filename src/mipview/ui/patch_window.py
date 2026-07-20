@@ -51,7 +51,9 @@ from mipview.graph import (
     ProjectionGraphState,
 )
 from mipview.graph.spatial import (
+    extension_line_plane_endpoints,
     nearest_projected_edge_parameter,
+    normal_line_plane_endpoints,
 )
 from mipview.io.nifti_io import NiftiLoadResult
 from mipview.patch.history import PatchHistoryManager
@@ -98,6 +100,7 @@ class PatchViewerWindow(QMainWindow):
     annotation_brush_radius_changed = Signal(int)
     annotation_brush_mode_changed = Signal(str)
     overlay_opacity_changed = Signal(float)
+    overlay_segmentation_changed = Signal(object)
     unload_current_segmentation_requested = Signal()
     open_segmentation_configuration_requested = Signal()
 
@@ -179,6 +182,9 @@ class PatchViewerWindow(QMainWindow):
         self.overlay_opacity_control_bar.opacity_changed.connect(
             self._on_overlay_opacity_changed
         )
+        self.overlay_opacity_control_bar.segmentation_changed.connect(
+            self.overlay_segmentation_changed.emit
+        )
         self.slice_viewer = TriPlanarViewerWidget(self)
         self.slice_viewer.set_projection_segmentation_source(
             self._active_segmentation_kind
@@ -205,7 +211,7 @@ class PatchViewerWindow(QMainWindow):
         self._right_control_stack_layout.setContentsMargins(0, 0, 0, 0)
         self._right_control_stack_layout.setSpacing(8)
         self._right_control_stack_layout.setSizeConstraint(
-            QLayout.SizeConstraint.SetMinAndMaxSize
+            QLayout.SizeConstraint.SetDefaultConstraint
         )
         self._right_control_stack_layout.addWidget(self.cursor_panel)
         self._right_control_stack_layout.addStretch(1)
@@ -279,6 +285,9 @@ class PatchViewerWindow(QMainWindow):
         self.slice_viewer.graph_angle_vector_selected.connect(
             self._on_graph_angle_vector_selected
         )
+        self.slice_viewer.graph_element_selected.connect(
+            self._on_graph_element_selected
+        )
         self.annotation_panel.create_requested.connect(
             lambda: self.annotation_create_requested.emit(self)
         )
@@ -340,7 +349,10 @@ class PatchViewerWindow(QMainWindow):
         self.slice_viewer.set_annotation_overlay(
             annotation_mask,
             opacity=self._annotation_opacity,
-            visible=annotation_visible,
+            visible=(
+                annotation_visible
+                and self._active_segmentation_kind == "annotation"
+            ),
             active_label=annotation_active_label,
         )
         self.sync_annotation_controls(
@@ -434,6 +446,7 @@ class PatchViewerWindow(QMainWindow):
     def _build_mip_minip_panel(self, parent: QWidget | None = None) -> QGroupBox:
         panel = QGroupBox("MIP / MinIP", parent)
         form = QFormLayout(panel)
+        form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
 
         self.projection_mode_combo = QComboBox(panel)
         self.projection_mode_combo.addItems(["MIP", "MinIP"])
@@ -452,7 +465,7 @@ class PatchViewerWindow(QMainWindow):
         )
 
         direction_row = QWidget(panel)
-        direction_layout = QHBoxLayout(direction_row)
+        direction_layout = QVBoxLayout(direction_row)
         direction_layout.setContentsMargins(0, 0, 0, 0)
         direction_layout.setSpacing(6)
 
@@ -958,12 +971,49 @@ class PatchViewerWindow(QMainWindow):
             control_point,
         )
         self.graph_state.invalidate_edge_vectors(edge)
+        self.graph_state.invalidate_construction_lines(edge)
         self.graph_state.active_orientation = orientation
         if self.graph_state.selected_edge == edge:
             self.graph_state.selected_edge_orientation = orientation
         self.slice_viewer.refresh_graph_overlay()
         self._refresh_graph_panel_tool_state()
         return edge
+
+    def set_graph_normal_line(
+        self,
+        orientation: Orientation,
+        first_node_id: int,
+        second_node_id: int,
+        visible: bool,
+    ) -> bool:
+        self._validate_graph_edit_operation(orientation)
+        edge = GraphEdge.between(first_node_id, second_node_id)
+        if visible:
+            normal_line_plane_endpoints(
+                self.slice_viewer.graph_projected_layer(orientation),
+                edge,
+            )
+        result = self.graph_state.set_normal_line(orientation, edge, visible)
+        self.slice_viewer.refresh_graph_overlay()
+        return result
+
+    def set_graph_extension_line(
+        self,
+        orientation: Orientation,
+        first_node_id: int,
+        second_node_id: int,
+        visible: bool,
+    ) -> bool:
+        self._validate_graph_edit_operation(orientation)
+        edge = GraphEdge.between(first_node_id, second_node_id)
+        if visible:
+            extension_line_plane_endpoints(
+                self.slice_viewer.graph_projected_layer(orientation),
+                edge,
+            )
+        result = self.graph_state.set_extension_line(orientation, edge, visible)
+        self.slice_viewer.refresh_graph_overlay()
+        return result
 
     def straighten_graph_edge(
         self,
@@ -1107,6 +1157,43 @@ class PatchViewerWindow(QMainWindow):
     def _on_graph_orientation_interacted(self, orientation: str) -> None:
         if orientation in self.slice_viewer.enabled_projection_orientations():
             self.graph_state.active_orientation = orientation  # type: ignore[assignment]
+
+    def _on_graph_element_selected(self, orientation: str, hit: object) -> None:
+        if orientation not in ("axial", "coronal", "sagittal") or not isinstance(
+            hit, dict
+        ):
+            return
+        graph_orientation: Orientation = orientation  # type: ignore[assignment]
+        kind = hit.get("kind")
+        try:
+            if kind == "node":
+                self.graph_state.select_node(graph_orientation, int(hit["node_id"]))
+                message = f"Selected graph node {int(hit['node_id'])}"
+            elif kind == "edge":
+                edge = GraphEdge.between(
+                    int(hit["start_node_id"]),
+                    int(hit["end_node_id"]),
+                )
+                self.graph_state.select_edge(graph_orientation, edge)
+                message = (
+                    f"Selected graph edge {edge.start_node_id}-{edge.end_node_id}"
+                )
+            elif kind == "vector":
+                vector_ids = hit.get("vector_ids")
+                if not isinstance(vector_ids, list) or not vector_ids:
+                    return
+                vector_id = int(vector_ids[0])
+                self.graph_state.select_vector(vector_id)
+                message = f"Selected graph vector V{vector_id}"
+            else:
+                self.graph_state.clear_selection()
+                message = "Graph selection cleared"
+        except (KeyError, TypeError, ValueError) as exc:
+            self.statusBar().showMessage(str(exc))
+            return
+        self.slice_viewer.refresh_graph_overlay()
+        self._refresh_graph_panel_tool_state()
+        self.statusBar().showMessage(message)
 
     def _on_graph_context_requested(
         self,
@@ -1272,6 +1359,40 @@ class PatchViewerWindow(QMainWindow):
         )
         menu.addSeparator()
         if edge not in self.graph_state.graph.curve_control_points:
+            normal_is_visible = (
+                self.graph_state.normal_line_orientation == orientation
+                and self.graph_state.normal_line_edge == edge
+            )
+            normal_line_action = menu.addAction(
+                "Hide the normal line"
+                if normal_is_visible
+                else "Display the normal line"
+            )
+            normal_line_action.triggered.connect(
+                lambda _checked=False: self._set_graph_normal_line_from_ui(
+                    orientation,
+                    start_node_id,
+                    end_node_id,
+                    not normal_is_visible,
+                )
+            )
+            extension_is_visible = (
+                self.graph_state.extension_line_orientation == orientation
+                and self.graph_state.extension_line_edge == edge
+            )
+            extension_line_action = menu.addAction(
+                "Hide the extension line"
+                if extension_is_visible
+                else "Display the extension line"
+            )
+            extension_line_action.triggered.connect(
+                lambda _checked=False: self._set_graph_extension_line_from_ui(
+                    orientation,
+                    start_node_id,
+                    end_node_id,
+                    not extension_is_visible,
+                )
+            )
             for kind, label in (
                 ("edge_normal", "Display the normal vector"),
                 ("edge_tangent", "Display the tangent vector"),
@@ -1313,6 +1434,52 @@ class PatchViewerWindow(QMainWindow):
                 start_node_id,
                 end_node_id,
             )
+        )
+
+    def _set_graph_normal_line_from_ui(
+        self,
+        orientation: Orientation,
+        start_node_id: int,
+        end_node_id: int,
+        visible: bool,
+    ) -> None:
+        try:
+            self.set_graph_normal_line(
+                orientation,
+                start_node_id,
+                end_node_id,
+                visible,
+            )
+        except ValueError as exc:
+            self.statusBar().showMessage(str(exc))
+            return
+        self.statusBar().showMessage(
+            "Displayed graph edge normal line"
+            if visible
+            else "Hid graph edge normal line"
+        )
+
+    def _set_graph_extension_line_from_ui(
+        self,
+        orientation: Orientation,
+        start_node_id: int,
+        end_node_id: int,
+        visible: bool,
+    ) -> None:
+        try:
+            self.set_graph_extension_line(
+                orientation,
+                start_node_id,
+                end_node_id,
+                visible,
+            )
+        except ValueError as exc:
+            self.statusBar().showMessage(str(exc))
+            return
+        self.statusBar().showMessage(
+            "Displayed graph edge extension line"
+            if visible
+            else "Hid graph edge extension line"
         )
 
     def _add_graph_node_from_ui(
@@ -2185,7 +2352,11 @@ class PatchViewerWindow(QMainWindow):
                 )
 
         annotation_planes = projection_planes.get("annotation")
-        if isinstance(annotation_planes, dict) and self._annotation_visible:
+        if (
+            isinstance(annotation_planes, dict)
+            and self._annotation_visible
+            and self._active_segmentation_kind == "annotation"
+        ):
             annotation_plane = annotation_planes.get(orientation_title)
             if annotation_plane is not None:
                 self._draw_annotation_export_overlay(
@@ -2365,6 +2536,10 @@ class PatchViewerWindow(QMainWindow):
             segmentation_volume,
             opacity=self._segmentation_opacity,
         )
+        self.slice_viewer.set_annotation_overlay_visible(
+            self._annotation_visible
+            and self._active_segmentation_kind == "annotation"
+        )
         self._refresh_seg_patch_save_enabled()
 
     def update_projection_mask_layers(
@@ -2410,6 +2585,16 @@ class PatchViewerWindow(QMainWindow):
                 self._segmentation_opacity
             )
 
+    def set_overlay_segmentations(
+        self,
+        segmentations: Sequence[tuple[str, str]],
+        active_segmentation_id: str | None,
+    ) -> None:
+        self.overlay_opacity_control_bar.set_segmentations(
+            segmentations,
+            active_segmentation_id,
+        )
+
     def update_annotation_overlay(
         self,
         annotation_mask: AnnotationMask | None,
@@ -2428,7 +2613,9 @@ class PatchViewerWindow(QMainWindow):
         self.slice_viewer.set_annotation_overlay(
             annotation_mask,
             opacity=self._annotation_opacity,
-            visible=visible,
+            visible=(
+                visible and self._active_segmentation_kind == "annotation"
+            ),
             active_label=active_label,
         )
         self.sync_annotation_controls(
@@ -2459,7 +2646,9 @@ class PatchViewerWindow(QMainWindow):
         self._annotation_visible = bool(visible)
         self._annotation_active_label = max(int(active_label), 0)
         self.slice_viewer.set_annotation_overlay_opacity(self._annotation_opacity)
-        self.slice_viewer.set_annotation_overlay_visible(visible)
+        self.slice_viewer.set_annotation_overlay_visible(
+            visible and self._active_segmentation_kind == "annotation"
+        )
         self.slice_viewer.set_annotation_active_label(active_label)
         self.annotation_panel.set_visible_checked(visible)
         self.annotation_panel.set_opacity(opacity)
@@ -2601,10 +2790,16 @@ class PatchViewerWindow(QMainWindow):
         )
         self.slice_viewer.setMinimumSize(viewer_min_width, viewer_min_height)
 
-        panel_widths = [self._required_widget_width(self.cursor_panel)]
-        panel_widths.extend(self._required_widget_width(panel) for panel in self._right_panels)
         layout_margins = self._right_control_stack_layout.contentsMargins()
-        right_min_width = max(panel_widths) + layout_margins.left() + layout_margins.right()
+        right_min_width = (
+            max(
+                self.cursor_panel.minimumWidth(),
+                self.annotation_panel.minimumWidth(),
+                self.graph_panel.minimumWidth(),
+            )
+            + layout_margins.left()
+            + layout_margins.right()
+        )
         self._right_control_container.setMinimumWidth(right_min_width)
 
     def _apply_initial_window_size(self) -> None:
@@ -2614,7 +2809,10 @@ class PatchViewerWindow(QMainWindow):
 
         available = screen.availableGeometry()
         viewer_width = self.slice_viewer.minimumWidth()
-        right_width = self._right_control_container.minimumWidth()
+        right_width = max(
+            self._right_control_container.minimumWidth(),
+            CursorInspectionPanel.PANEL_WIDTH,
+        )
         self._main_splitter.setSizes([viewer_width, right_width])
 
         central_widget = self.centralWidget()

@@ -31,6 +31,7 @@ class GraphPanel(QWidget):
     clear_angles_requested = Signal()
 
     PANEL_WIDTH = 220
+    ADAPTABLE_MINIMUM_WIDTH = 130
 
     def __init__(
         self,
@@ -40,7 +41,7 @@ class GraphPanel(QWidget):
     ) -> None:
         super().__init__(parent)
         if adaptable_width:
-            self.setMinimumWidth(self.PANEL_WIDTH)
+            self.setMinimumWidth(self.ADAPTABLE_MINIMUM_WIDTH)
             self.setSizePolicy(
                 QSizePolicy.Policy.Expanding,
                 QSizePolicy.Policy.Preferred,
@@ -50,6 +51,8 @@ class GraphPanel(QWidget):
 
         group = QGroupBox("Graph", self)
         form = QFormLayout(group)
+        if adaptable_width:
+            form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
 
         self.activation_button = QPushButton("Activate", group)
         self.activation_button.clicked.connect(self.activation_requested.emit)
@@ -78,7 +81,9 @@ class GraphPanel(QWidget):
         )
 
         tool_row = QWidget(group)
-        tool_layout = QHBoxLayout(tool_row)
+        tool_layout = (
+            QVBoxLayout(tool_row) if adaptable_width else QHBoxLayout(tool_row)
+        )
         tool_layout.setContentsMargins(0, 0, 0, 0)
         tool_layout.setSpacing(6)
         self.curve_edge_button = QPushButton("Curve Edge", tool_row)
@@ -100,7 +105,11 @@ class GraphPanel(QWidget):
             self.calculate_angle_requested.emit
         )
         angle_action_row = QWidget(group)
-        angle_action_layout = QHBoxLayout(angle_action_row)
+        angle_action_layout = (
+            QVBoxLayout(angle_action_row)
+            if adaptable_width
+            else QHBoxLayout(angle_action_row)
+        )
         angle_action_layout.setContentsMargins(0, 0, 0, 0)
         angle_action_layout.setSpacing(6)
         self.cancel_button = QPushButton("Cancel", angle_action_row)
