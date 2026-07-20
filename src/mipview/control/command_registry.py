@@ -51,9 +51,13 @@ class CommandRegistry:
         self.register("patch.select", self.controller.select_patch)
         self.register("patch.export_raw", self.controller.export_raw_patch)
         self.register("patch.save", self.controller.save_patch)
+        self.register("patch.screenshot", self.controller.capture_patch_screenshot)
         self.register("projection.mode", self.controller.set_projection_mode)
         self.register("projection.save", self.controller.save_projection)
         self.register("graph.status", self.controller.get_graph_status)
+        self.register("graph.save", self.controller.save_graph_state)
+        self.register("graph.load", self.controller.load_graph_state)
+        self.register("graph.open", self.controller.open_graph_state)
         self.register("graph.activate", self.controller.set_graph_active)
         self.register("graph.set_display", self.controller.set_graph_display)
         self.register("graph.add_node", self.controller.add_graph_node)
@@ -68,9 +72,25 @@ class CommandRegistry:
             "graph.set_extension_line",
             self.controller.set_graph_extension_line,
         )
+        self.register("graph.add_node_vector", self.controller.add_graph_node_vector)
+        self.register(
+            "graph.add_tangent_vector",
+            self.controller.add_graph_tangent_vector,
+        )
+        self.register(
+            "graph.add_normal_vector",
+            self.controller.add_graph_normal_vector,
+        )
+        self.register("graph.flip_vector", self.controller.flip_graph_vector)
+        self.register("graph.delete_vector", self.controller.delete_graph_vector)
         self.register("graph.split_edge", self.controller.split_graph_edge)
         self.register("graph.calculate_angle", self.controller.calculate_graph_angle)
-        self.register("graph.clear_angle", self.controller.clear_graph_angle)
+        self.register(
+            "graph.set_angle_label_position",
+            self.controller.set_graph_angle_label_position,
+        )
+        self.register("graph.delete_angle", self.controller.delete_graph_angle)
+        self.register("graph.clear_angles", self.controller.clear_graph_angles)
         self.register("graph.clear", self.controller.clear_graph)
         self.register("annotation.create", self.controller.create_annotation)
         self.register("annotation.paint_stroke", self.controller.paint_annotation_stroke)

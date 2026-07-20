@@ -29,6 +29,7 @@ class AnnotationPanel(QWidget):
     undo_requested = Signal()
 
     PANEL_WIDTH = 220
+    ADAPTABLE_MINIMUM_WIDTH = 130
     EXPORT_NIFTI = "nifti"
     EXPORT_JSON = "json"
     EXPORT_BOTH = "both"
@@ -42,7 +43,7 @@ class AnnotationPanel(QWidget):
     ) -> None:
         super().__init__(parent)
         if adaptable_width:
-            self.setMinimumWidth(self.PANEL_WIDTH)
+            self.setMinimumWidth(self.ADAPTABLE_MINIMUM_WIDTH)
             self.setSizePolicy(
                 QSizePolicy.Policy.Expanding,
                 QSizePolicy.Policy.Preferred,
@@ -54,6 +55,8 @@ class AnnotationPanel(QWidget):
 
         group = QGroupBox("Annotation", self)
         form = QFormLayout(group)
+        if adaptable_width:
+            form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
 
         self.create_button = QPushButton("Create", group)
         self.create_button.clicked.connect(self.create_requested.emit)
@@ -66,7 +69,9 @@ class AnnotationPanel(QWidget):
             self.save_button.setVisible(False)
 
         action_row = QWidget(group)
-        action_layout = QHBoxLayout(action_row)
+        action_layout = (
+            QVBoxLayout(action_row) if adaptable_width else QHBoxLayout(action_row)
+        )
         action_layout.setContentsMargins(0, 0, 0, 0)
         action_layout.addWidget(self.create_button)
         if self._show_file_actions:
@@ -93,7 +98,9 @@ class AnnotationPanel(QWidget):
         self.brush_radius_spinbox.valueChanged.connect(self.brush_radius_changed.emit)
 
         mode_row = QWidget(group)
-        mode_layout = QHBoxLayout(mode_row)
+        mode_layout = (
+            QVBoxLayout(mode_row) if adaptable_width else QHBoxLayout(mode_row)
+        )
         mode_layout.setContentsMargins(0, 0, 0, 0)
         self.paint_button = QPushButton("Paint", mode_row)
         self.paint_button.setCheckable(True)

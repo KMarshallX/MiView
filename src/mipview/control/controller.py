@@ -307,6 +307,85 @@ class MipViewController:
             patch_window.graph_status(),
         )
 
+    def save_graph_state(
+        self,
+        session_id: str,
+        path: str,
+        overwrite: bool = False,
+    ) -> CommandResult:
+        patch_window = self._graph_patch_window(session_id)
+        if patch_window is None:
+            return self._graph_session_not_found(session_id)
+        if not str(path).strip():
+            return CommandResult(False, "Graph state path is required.")
+        try:
+            saved_path = patch_window.save_graph_state(
+                path,
+                overwrite=bool(overwrite),
+            )
+        except (OSError, ValueError) as exc:
+            return CommandResult(False, str(exc), {"session_id": session_id})
+        return CommandResult(
+            True,
+            "Graph state saved.",
+            {
+                "session_id": session_id,
+                "path": str(saved_path),
+                "counts": patch_window.graph_persistent_counts(),
+                "warnings": [],
+            },
+        )
+
+    def load_graph_state(
+        self,
+        session_id: str,
+        path: str,
+        replace: bool = False,
+    ) -> CommandResult:
+        patch_window = self._graph_patch_window(session_id)
+        if patch_window is None:
+            return self._graph_session_not_found(session_id)
+        if not str(path).strip():
+            return CommandResult(False, "Graph state path is required.")
+        try:
+            result = patch_window.load_graph_state(path, replace=bool(replace))
+        except (OSError, ValueError) as exc:
+            return CommandResult(False, str(exc), {"session_id": session_id})
+        return CommandResult(
+            True,
+            "Graph state loaded.",
+            {
+                "session_id": session_id,
+                "path": str(Path(path)),
+                "counts": dict(result.counts),
+                "warnings": list(result.warnings),
+                "schema_version": result.version,
+                "projection_mode": result.projection_mode,
+                "enabled_orientations": list(result.enabled_orientations),
+            },
+        )
+
+    def open_graph_state(self, path: str) -> CommandResult:
+        if not str(path).strip():
+            return CommandResult(False, "Graph state path is required.")
+        try:
+            patch_window, result = self.main_window.restore_graph_patch(path)
+        except (OSError, ValueError) as exc:
+            return CommandResult(False, str(exc), {"path": str(path)})
+        return CommandResult(
+            True,
+            "Graph patch restored.",
+            {
+                "session_id": patch_window.graph_session_id,
+                "path": str(Path(path)),
+                "counts": dict(result.counts),
+                "warnings": list(result.warnings),
+                "schema_version": result.version,
+                "projection_mode": result.projection_mode,
+                "enabled_orientations": list(result.enabled_orientations),
+            },
+        )
+
     def set_graph_active(self, session_id: str, enabled: bool) -> CommandResult:
         patch_window = self._graph_patch_window(session_id)
         if patch_window is None:
@@ -544,13 +623,12 @@ class MipViewController:
             },
         )
 
-    def set_graph_normal_line(
+    def add_graph_node_vector(
         self,
         session_id: str,
         view: str,
-        start_node_id: int,
-        end_node_id: int,
-        visible: bool,
+        source_node_id: int,
+        target_node_id: int,
     ) -> CommandResult:
         patch_window = self._graph_patch_window(session_id)
         if patch_window is None:
@@ -559,23 +637,37 @@ class MipViewController:
         if orientation is None:
             return CommandResult(False, "Graph view must be axial, coronal, or sagittal.")
         try:
-            normal_visible = patch_window.set_graph_normal_line(
+            vector = patch_window.add_graph_node_vector(
                 orientation,
-                int(start_node_id),
-                int(end_node_id),
-                bool(visible),
+                int(source_node_id),
+                int(target_node_id),
             )
         except (TypeError, ValueError) as exc:
             return CommandResult(False, str(exc), {"session_id": session_id})
         return CommandResult(
             True,
-            "Graph edge normal line displayed."
-            if normal_visible
-            else "Graph edge normal line hidden.",
+            "Graph node vector created.",
             {
                 "session_id": session_id,
-                "normal_line": patch_window.graph_status()["normal_line"],
+                "vector": _graph_vector_payload(vector),
             },
+        )
+
+    def set_graph_normal_line(
+        self,
+        session_id: str,
+        view: str,
+        start_node_id: int,
+        end_node_id: int,
+        visible: bool,
+    ) -> CommandResult:
+        return self._set_graph_construction_line(
+            session_id,
+            view,
+            start_node_id,
+            end_node_id,
+            visible,
+            normal=True,
         )
 
     def set_graph_extension_line(
@@ -586,30 +678,71 @@ class MipViewController:
         end_node_id: int,
         visible: bool,
     ) -> CommandResult:
+        return self._set_graph_construction_line(
+            session_id,
+            view,
+            start_node_id,
+            end_node_id,
+            visible,
+            normal=False,
+        )
+
+    def add_graph_tangent_vector(
+        self,
+        session_id: str,
+        view: str,
+        edge_start_node_id: int,
+        edge_end_node_id: int,
+    ) -> CommandResult:
+        return self._add_graph_edge_vector(
+            session_id,
+            view,
+            edge_start_node_id,
+            edge_end_node_id,
+            "edge_tangent",
+        )
+
+    def add_graph_normal_vector(
+        self,
+        session_id: str,
+        view: str,
+        edge_start_node_id: int,
+        edge_end_node_id: int,
+    ) -> CommandResult:
+        return self._add_graph_edge_vector(
+            session_id,
+            view,
+            edge_start_node_id,
+            edge_end_node_id,
+            "edge_normal",
+        )
+
+    def flip_graph_vector(self, session_id: str, vector_id: int) -> CommandResult:
         patch_window = self._graph_patch_window(session_id)
         if patch_window is None:
             return self._graph_session_not_found(session_id)
-        orientation = _validate_orientation(view)
-        if orientation is None:
-            return CommandResult(False, "Graph view must be axial, coronal, or sagittal.")
         try:
-            extension_visible = patch_window.set_graph_extension_line(
-                orientation,
-                int(start_node_id),
-                int(end_node_id),
-                bool(visible),
-            )
+            vector = patch_window.flip_graph_vector(int(vector_id))
         except (TypeError, ValueError) as exc:
             return CommandResult(False, str(exc), {"session_id": session_id})
         return CommandResult(
             True,
-            "Graph edge extension line displayed."
-            if extension_visible
-            else "Graph edge extension line hidden.",
-            {
-                "session_id": session_id,
-                "extension_line": patch_window.graph_status()["extension_line"],
-            },
+            "Graph vector flipped.",
+            {"session_id": session_id, "vector": _graph_vector_payload(vector)},
+        )
+
+    def delete_graph_vector(self, session_id: str, vector_id: int) -> CommandResult:
+        patch_window = self._graph_patch_window(session_id)
+        if patch_window is None:
+            return self._graph_session_not_found(session_id)
+        try:
+            vector = patch_window.delete_graph_vector(int(vector_id))
+        except (TypeError, ValueError) as exc:
+            return CommandResult(False, str(exc), {"session_id": session_id})
+        return CommandResult(
+            True,
+            "Graph vector deleted.",
+            {"session_id": session_id, "vector": _graph_vector_payload(vector)},
         )
 
     def split_graph_edge(
@@ -660,25 +793,16 @@ class MipViewController:
     def calculate_graph_angle(
         self,
         session_id: str,
-        view: str,
-        vector_1_source: int,
-        vector_1_target: int,
-        vector_2_source: int,
-        vector_2_target: int,
+        source_vector_id: int,
+        target_vector_id: int,
     ) -> CommandResult:
         patch_window = self._graph_patch_window(session_id)
         if patch_window is None:
             return self._graph_session_not_found(session_id)
-        orientation = _validate_orientation(view)
-        if orientation is None:
-            return CommandResult(False, "Graph view must be axial, coronal, or sagittal.")
         try:
-            angle = patch_window.calculate_graph_angle(
-                orientation,
-                int(vector_1_source),
-                int(vector_1_target),
-                int(vector_2_source),
-                int(vector_2_target),
+            measurement = patch_window.calculate_graph_angle(
+                int(source_vector_id),
+                int(target_vector_id),
             )
         except (TypeError, ValueError) as exc:
             return CommandResult(False, str(exc), {"session_id": session_id})
@@ -687,28 +811,106 @@ class MipViewController:
             "Graph angle calculated.",
             {
                 "session_id": session_id,
-                "view": orientation,
-                "angle_degrees": float(angle),
-                "vector_1": {
-                    "source_node_id": int(vector_1_source),
-                    "target_node_id": int(vector_1_target),
-                },
-                "vector_2": {
-                    "source_node_id": int(vector_2_source),
-                    "target_node_id": int(vector_2_target),
-                },
+                "measurement_id": measurement.id,
+                "source_vector_id": measurement.source_vector_id,
+                "target_vector_id": measurement.target_vector_id,
+                "angle_degrees": float(measurement.angle_degrees),
             },
         )
 
-    def clear_graph_angle(self, session_id: str) -> CommandResult:
+    def delete_graph_angle(
+        self,
+        session_id: str,
+        measurement_id: int,
+    ) -> CommandResult:
         patch_window = self._graph_patch_window(session_id)
         if patch_window is None:
             return self._graph_session_not_found(session_id)
-        patch_window.clear_graph_angle()
+        try:
+            measurement = patch_window.delete_graph_angle(int(measurement_id))
+        except (TypeError, ValueError) as exc:
+            return CommandResult(False, str(exc), {"session_id": session_id})
         return CommandResult(
             True,
-            "Graph angle cleared.",
-            patch_window.graph_status(),
+            "Graph angle deleted.",
+            {
+                "session_id": session_id,
+                "measurement_id": measurement.id,
+            },
+        )
+
+    def set_graph_angle_label_position(
+        self,
+        session_id: str,
+        measurement_id: int,
+        x_fraction: float,
+        y_fraction: float,
+    ) -> CommandResult:
+        patch_window = self._graph_patch_window(session_id)
+        if patch_window is None:
+            return self._graph_session_not_found(session_id)
+        try:
+            measurement = patch_window.set_graph_angle_label_position(
+                int(measurement_id),
+                float(x_fraction),
+                float(y_fraction),
+            )
+        except (TypeError, ValueError) as exc:
+            return CommandResult(False, str(exc), {"session_id": session_id})
+        return CommandResult(
+            True,
+            "Graph angle label position updated.",
+            {
+                "session_id": session_id,
+                "measurement_id": measurement.id,
+                "label_position": list(measurement.label_position or ()),
+            },
+        )
+
+    def clear_graph_angles(self, session_id: str) -> CommandResult:
+        patch_window = self._graph_patch_window(session_id)
+        if patch_window is None:
+            return self._graph_session_not_found(session_id)
+        count = patch_window.clear_graph_angles()
+        return CommandResult(
+            True,
+            "Graph angles cleared.",
+            {**patch_window.graph_status(), "cleared_angle_count": count},
+        )
+
+    def capture_patch_screenshot(
+        self,
+        session_id: str,
+        path: str,
+        resolution_percent: int = 100,
+    ) -> CommandResult:
+        patch_window = self._graph_patch_window(session_id)
+        if patch_window is None:
+            return self._graph_session_not_found(session_id)
+        if not str(path).strip():
+            return CommandResult(False, "Screenshot path is required.")
+        try:
+            saved_path, size = patch_window.export_viewer_screenshot(
+                str(path),
+                int(resolution_percent),
+            )
+        except (OSError, TypeError, ValueError) as exc:
+            return CommandResult(
+                False,
+                f"Patch screenshot failed: {exc}",
+                {"session_id": session_id, "path": str(path)},
+            )
+        return CommandResult(
+            True,
+            "Patch triplanar screenshot saved.",
+            {
+                "session_id": session_id,
+                "path": str(saved_path),
+                "resolution_percent": int(resolution_percent),
+                "width": int(size[0]),
+                "height": int(size[1]),
+                "target": "patch_triplanar_viewer",
+            },
         )
 
     def clear_graph(self, session_id: str) -> CommandResult:
@@ -723,6 +925,78 @@ class MipViewController:
                 **patch_window.graph_status(),
                 "cleared_node_count": node_count,
                 "cleared_edge_count": edge_count,
+            },
+        )
+
+    def _add_graph_edge_vector(
+        self,
+        session_id: str,
+        view: str,
+        start_node_id: int,
+        end_node_id: int,
+        kind: str,
+    ) -> CommandResult:
+        patch_window = self._graph_patch_window(session_id)
+        if patch_window is None:
+            return self._graph_session_not_found(session_id)
+        orientation = _validate_orientation(view)
+        if orientation is None:
+            return CommandResult(False, "Graph view must be axial, coronal, or sagittal.")
+        try:
+            vector = patch_window.add_graph_edge_vector(
+                orientation,
+                int(start_node_id),
+                int(end_node_id),
+                kind,
+            )
+        except (TypeError, ValueError) as exc:
+            return CommandResult(False, str(exc), {"session_id": session_id})
+        return CommandResult(
+            True,
+            "Graph tangent vector created."
+            if kind == "edge_tangent"
+            else "Graph normal vector created.",
+            {"session_id": session_id, "vector": _graph_vector_payload(vector)},
+        )
+
+    def _set_graph_construction_line(
+        self,
+        session_id: str,
+        view: str,
+        start_node_id: int,
+        end_node_id: int,
+        visible: bool,
+        *,
+        normal: bool,
+    ) -> CommandResult:
+        patch_window = self._graph_patch_window(session_id)
+        if patch_window is None:
+            return self._graph_session_not_found(session_id)
+        orientation = _validate_orientation(view)
+        if orientation is None:
+            return CommandResult(False, "Graph view must be axial, coronal, or sagittal.")
+        setter = (
+            patch_window.set_graph_normal_line
+            if normal
+            else patch_window.set_graph_extension_line
+        )
+        try:
+            is_visible = setter(
+                orientation,
+                int(start_node_id),
+                int(end_node_id),
+                bool(visible),
+            )
+        except (TypeError, ValueError) as exc:
+            return CommandResult(False, str(exc), {"session_id": session_id})
+        line_name = "normal_line" if normal else "extension_line"
+        return CommandResult(
+            True,
+            f"Graph edge {line_name.replace('_', ' ')} "
+            f"{'displayed' if is_visible else 'hidden'}.",
+            {
+                "session_id": session_id,
+                line_name: patch_window.graph_status()[line_name],
             },
         )
 
@@ -1287,3 +1561,25 @@ def _validate_orientation(view: str | None) -> Orientation | None:
     if normalized not in SUPPORTED_ORIENTATIONS:
         return None
     return normalized  # type: ignore[return-value]
+
+
+def _graph_vector_payload(vector: Any) -> dict[str, Any]:
+    edge = getattr(vector, "edge", None)
+    return {
+        "id": int(vector.id),
+        "orientation": str(vector.orientation),
+        "kind": str(vector.kind),
+        "source_node_id": vector.source_node_id,
+        "target_node_id": vector.target_node_id,
+        "edge": (
+            None
+            if edge is None
+            else {
+                "start_node_id": int(edge.start_node_id),
+                "end_node_id": int(edge.end_node_id),
+            }
+        ),
+        "reversed": bool(vector.reversed),
+        "color_index": int(vector.color_index),
+        "color": str(vector.color),
+    }

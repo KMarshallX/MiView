@@ -27,6 +27,7 @@ class CursorInspectionPanel(QWidget):
     find_patch_box_requested = Signal()
 
     PANEL_WIDTH = 220
+    ADAPTABLE_MINIMUM_WIDTH = 130
 
     def __init__(
         self,
@@ -36,7 +37,7 @@ class CursorInspectionPanel(QWidget):
     ) -> None:
         super().__init__(parent)
         if adaptable_width:
-            self.setMinimumWidth(self.PANEL_WIDTH)
+            self.setMinimumWidth(self.ADAPTABLE_MINIMUM_WIDTH)
             self.setSizePolicy(
                 QSizePolicy.Policy.Expanding,
                 QSizePolicy.Policy.Preferred,
@@ -46,6 +47,8 @@ class CursorInspectionPanel(QWidget):
 
         group = QGroupBox("Cursor Inspection", self)
         form = QFormLayout(group)
+        if adaptable_width:
+            form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
 
         self.x_value = QLabel("-", group)
         self.y_value = QLabel("-", group)
@@ -63,6 +66,8 @@ class CursorInspectionPanel(QWidget):
 
         self.patch_group = QGroupBox("Patch Selection", self)
         patch_form = QFormLayout(self.patch_group)
+        if adaptable_width:
+            patch_form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
         self.patch_activation_button = QPushButton("Enable", self.patch_group)
         self.patch_activation_button.setCheckable(True)
         self.patch_activation_button.toggled.connect(self._on_patch_activation_toggled)

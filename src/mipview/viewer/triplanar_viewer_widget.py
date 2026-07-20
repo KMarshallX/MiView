@@ -18,7 +18,10 @@ from mipview.graph.spatial import (
     resolve_projection_voxel,
     update_control_point_from_projection,
 )
-from mipview.ui.drop_loading import first_supported_local_nifti_path
+from mipview.ui.drop_loading import (
+    first_supported_local_drop_path,
+    is_supported_graph_state_path,
+)
 from mipview.state.cursor_state import CursorState
 from mipview.state.zoom_state import ZoomState
 from mipview.io.nifti_io import NiftiLoadResult
@@ -53,17 +56,21 @@ class TriPlanarViewerWidget(QWidget):
     annotation_changed = Signal(object)
     annotation_undo_availability_changed = Signal(bool)
     nifti_file_dropped = Signal(object)
+    graph_state_file_dropped = Signal(object)
     projection_state_changed = Signal(str, object)
     graph_context_requested = Signal(str, object, object, object)
     graph_edge_completion_requested = Signal(str, int)
     graph_edge_cancel_requested = Signal()
+    graph_vector_completion_requested = Signal(str, object, object)
     graph_orientation_interacted = Signal(str)
     graph_layers_cleared = Signal(object)
     graph_curve_edge_selected = Signal(str, int, int)
     graph_curve_control_changed = Signal(str, int, int, float, float)
     graph_curve_drag_state_changed = Signal(bool)
     graph_curve_exit_requested = Signal()
-    graph_angle_node_selected = Signal(str, int)
+    graph_angle_vector_selected = Signal(str, int)
+    graph_angle_label_position_changed = Signal(str, int, float, float)
+    graph_element_selected = Signal(str, object)
 
     def __init__(
         self,
@@ -143,6 +150,9 @@ class TriPlanarViewerWidget(QWidget):
             view.graph_edge_cancel_requested.connect(
                 self.graph_edge_cancel_requested.emit
             )
+            view.graph_vector_completion_requested.connect(
+                self.graph_vector_completion_requested.emit
+            )
             view.graph_orientation_interacted.connect(
                 self._on_graph_orientation_interacted
             )
@@ -158,9 +168,13 @@ class TriPlanarViewerWidget(QWidget):
             view.graph_curve_exit_requested.connect(
                 self.graph_curve_exit_requested.emit
             )
-            view.graph_angle_node_selected.connect(
-                self.graph_angle_node_selected.emit
+            view.graph_angle_vector_selected.connect(
+                self.graph_angle_vector_selected.emit
             )
+            view.graph_angle_label_position_changed.connect(
+                self.graph_angle_label_position_changed.emit
+            )
+            view.graph_element_selected.connect(self.graph_element_selected.emit)
         for widget in self._drop_event_sources:
             widget.installEventFilter(self)
         self.cursor_state.cursor_changed.connect(self._on_cursor_changed)
@@ -428,13 +442,18 @@ class TriPlanarViewerWidget(QWidget):
                     edge_thickness=1,
                     pending_node_id=None,
                     active_tool=None,
+                    selected_node_id=None,
                     selected_edge=None,
                     curve_handle_visible=False,
-                    angle_vectors=(),
+                    vectors=(),
+                    measurements=(),
+                    selected_vector_id=None,
+                    angle_source_vector_id=None,
+                    pending_vector_orientation=None,
+                    pending_vector_source_node_id=None,
                     normal_line_edge=None,
-                    normal_line_thickness=1,
                     extension_line_edge=None,
-                    extension_line_thickness=1,
+                    vector_colors={},
                 )
                 continue
             layer = graph_state.projected_layer(
@@ -457,16 +476,28 @@ class TriPlanarViewerWidget(QWidget):
                 edge_thickness=graph_state.edge_thickness,
                 pending_node_id=graph_state.pending_edge_node_id,
                 active_tool=graph_state.active_tool,
+                selected_node_id=graph_state.selected_node_id,
                 selected_edge=graph_state.selected_edge,
-                curve_handle_visible=graph_state.selected_edge is not None,
-                angle_vectors=tuple(
+                curve_handle_visible=(
+                    graph_state.active_tool == "curve_edge"
+                    and graph_state.selected_edge is not None
+                ),
+                vectors=tuple(
                     vector
-                    for vector in (
-                        graph_state.angle_vector_1,
-                        graph_state.angle_vector_2,
-                        *graph_state.draft_angle_vectors(),
-                    )
-                    if vector is not None and vector.orientation == view.orientation
+                    for vector in graph_state.vectors.values()
+                    if vector.orientation == view.orientation
+                ),
+                measurements=tuple(
+                    measurement
+                    for measurement in graph_state.angle_measurements.values()
+                    if graph_state.vectors[measurement.source_vector_id].orientation
+                    == view.orientation
+                ),
+                selected_vector_id=graph_state.selected_vector_id,
+                angle_source_vector_id=graph_state.angle_source_vector_id,
+                pending_vector_orientation=graph_state.pending_vector_orientation,
+                pending_vector_source_node_id=(
+                    graph_state.pending_vector_source_node_id
                 ),
                 normal_line_edge=(
                     graph_state.normal_line_edge
@@ -480,7 +511,16 @@ class TriPlanarViewerWidget(QWidget):
                     else None
                 ),
                 extension_line_thickness=graph_state.extension_line_thickness,
+                vector_colors={
+                    vector.id: graph_state.effective_vector_color(vector.id)
+                    for vector in graph_state.vectors.values()
+                    if vector.orientation == view.orientation
+                },
             )
+
+    def cancel_graph_angle_label_move(self) -> None:
+        for view in self._views:
+            view.cancel_graph_angle_label_move()
 
     def graph_projected_layer(
         self,
@@ -696,12 +736,12 @@ class TriPlanarViewerWidget(QWidget):
         super().dragMoveEvent(event)
 
     def dropEvent(self, event: QDropEvent) -> None:
-        dropped_path = self._dropped_nifti_path(event)
+        dropped_path = self._dropped_path(event)
         if dropped_path is None:
             event.ignore()
             return
         event.acceptProposedAction()
-        self.nifti_file_dropped.emit(dropped_path)
+        self._emit_dropped_path(dropped_path)
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:
         if watched in self._drop_event_sources and self._handle_drop_event(event):
@@ -1055,7 +1095,7 @@ class TriPlanarViewerWidget(QWidget):
         self._apply_annotation_overlay_to_views()
 
     def _accept_drop_event(self, event: QDragEnterEvent | QDragMoveEvent) -> bool:
-        if self._dropped_nifti_path(event) is None:
+        if self._dropped_path(event) is None:
             event.ignore()
             return False
         event.acceptProposedAction()
@@ -1079,14 +1119,14 @@ class TriPlanarViewerWidget(QWidget):
         drop_event = event if isinstance(event, QDropEvent) else None
         if drop_event is None:
             return False
-        dropped_path = self._dropped_nifti_path(drop_event)
+        dropped_path = self._dropped_path(drop_event)
         if dropped_path is None:
             return False
         drop_event.acceptProposedAction()
-        self.nifti_file_dropped.emit(dropped_path)
+        self._emit_dropped_path(dropped_path)
         return True
 
-    def _dropped_nifti_path(
+    def _dropped_path(
         self, event: QDragEnterEvent | QDragMoveEvent | QDropEvent
     ) -> Path | None:
         if not self._drop_loading_enabled:
@@ -1094,7 +1134,13 @@ class TriPlanarViewerWidget(QWidget):
         mime_data = event.mimeData()
         if mime_data is None or not mime_data.hasUrls():
             return None
-        return first_supported_local_nifti_path(mime_data.urls())
+        return first_supported_local_drop_path(mime_data.urls())
+
+    def _emit_dropped_path(self, dropped_path: Path) -> None:
+        if is_supported_graph_state_path(dropped_path):
+            self.graph_state_file_dropped.emit(dropped_path)
+        else:
+            self.nifti_file_dropped.emit(dropped_path)
 
 
 def _clamp_voxel(

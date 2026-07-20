@@ -111,12 +111,17 @@ def resolve_projection_voxel(
         oriented_volume.display_data[tuple(ray_selector)],
         dtype=np.float64,
     )
-    valid = np.isfinite(ray_values)
+    finite = np.isfinite(ray_values)
+    valid = finite
     if mask_display_data is not None:
         mask = np.asarray(mask_display_data)
         if mask.shape != oriented_volume.display_shape:
             raise ValueError("Projection mask shape must match the projected volume shape.")
-        valid &= np.asarray(mask[tuple(ray_selector)]) != 0
+        masked_valid = finite & (np.asarray(mask[tuple(ray_selector)]) != 0)
+        # A click outside the projected mask still needs a reviewable 3D depth.
+        # Prefer masked contributors when present; otherwise resolve against the
+        # unmasked image ray using the same MIP/MinIP rule.
+        valid = masked_valid if np.any(masked_valid) else finite
     if not np.any(valid):
         raise ValueError(
             "The selected projection ray contains no finite contributing voxels."
@@ -223,7 +228,6 @@ def normal_line_plane_endpoints(
         raise ValueError(
             "A normal line cannot be displayed for a zero-length projected edge."
         )
-
     midpoint = ((start[0] + end[0]) / 2.0, (start[1] + end[1]) / 2.0)
     return _clip_infinite_line_to_plane(
         midpoint,
@@ -262,7 +266,6 @@ def _clip_infinite_line_to_plane(
     max_x = float(width - 1)
     max_y = float(height - 1)
     intersections: list[tuple[float, tuple[float, float]]] = []
-
     if direction[0] != 0.0:
         for x in (0.0, max_x):
             parameter = (x - point[0]) / direction[0]
@@ -275,7 +278,6 @@ def _clip_infinite_line_to_plane(
             x = point[0] + (parameter * direction[0])
             if -1e-9 <= x <= max_x + 1e-9:
                 intersections.append((parameter, (min(max(x, 0.0), max_x), y)))
-
     if len(intersections) < 2:
         raise ValueError(
             "The projected construction line does not cross the graph plane."

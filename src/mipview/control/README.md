@@ -22,6 +22,7 @@ Most state-changing commands require a NIfTI image to already be loaded in the r
 - [`patch.select`](#patchselect)
 - [`patch.export_raw`](#patchexport_raw)
 - [`patch.save`](#patchsave)
+- [`patch.screenshot`](#patchscreenshot)
 - [`projection.mode`](#projectionmode)
 - [`projection.save`](#projectionsave)
 - [`graph.*`](#graph-commands)
@@ -358,6 +359,19 @@ Example:
 mipview-ctl patch save ./patch.nii.gz
 ```
 
+### `patch.screenshot`
+
+Save only an open patch window's triplanar viewer, including its current zoom,
+pan, projections, overlays, vectors, and angle legends. Controls are excluded.
+
+```bash
+mipview-ctl patch screenshot SESSION_ID ./triplanar.png --resolution-percent 150
+```
+
+The matching direct command is `patch.screenshot` with `session_id`, `path`, and
+`resolution_percent`. Resolution must be from 1 through 200 and defaults to 100.
+PNG and JPEG are supported; JPEG uses fixed encoding quality 95.
+
 ### `projection.mode`
 
 Function: Set the projection mode to MIP or MinIP.
@@ -443,6 +457,11 @@ graph remains available whenever the session contains graph elements.
 
 ```bash
 mipview-ctl graph status SESSION_ID
+mipview-ctl graph open ./vessels.mipgraph.json
+mipview-ctl graph save SESSION_ID ./vessels.mipgraph.json
+mipview-ctl graph save SESSION_ID ./vessels.mipgraph.json --overwrite
+mipview-ctl graph load SESSION_ID ./vessels.mipgraph.json
+mipview-ctl graph load SESSION_ID ./vessels.mipgraph.json --replace
 mipview-ctl graph activate SESSION_ID
 mipview-ctl graph display SESSION_ID --opacity 0.75 --node-size 3
 mipview-ctl graph add-node SESSION_ID axial 12 18
@@ -450,34 +469,52 @@ mipview-ctl graph add-voxel-node SESSION_ID 12 18 7
 mipview-ctl graph add-edge SESSION_ID axial 1 2
 mipview-ctl graph curve-edge SESSION_ID axial 1 2 18.5 24.0
 mipview-ctl graph straighten-edge SESSION_ID axial 1 2
-mipview-ctl graph normal-line SESSION_ID axial 1 2 show
+mipview-ctl graph add-node-vector SESSION_ID axial 1 2
+mipview-ctl graph add-tangent-vector SESSION_ID axial 1 2
+mipview-ctl graph add-normal-vector SESSION_ID axial 1 2
 mipview-ctl graph extension-line SESSION_ID axial 1 2 show
+mipview-ctl graph normal-line SESSION_ID axial 1 2 show
+mipview-ctl graph flip-vector SESSION_ID 1
 mipview-ctl graph split-edge SESSION_ID axial 1 2 18 24
-mipview-ctl graph calculate-angle SESSION_ID axial 1 2 3 4
-mipview-ctl graph clear-angle SESSION_ID
+mipview-ctl graph calculate-angle SESSION_ID 1 2
+mipview-ctl graph set-angle-label-position SESSION_ID 1 0.35 0.70
+mipview-ctl graph delete-angle SESSION_ID 1
+mipview-ctl graph clear-angles SESSION_ID
+mipview-ctl graph delete-vector SESSION_ID 1
 mipview-ctl graph clear SESSION_ID
 mipview-ctl graph delete-edge SESSION_ID axial 1 2
 mipview-ctl graph delete-node SESSION_ID axial 1
 mipview-ctl graph exit SESSION_ID
 ```
 
-The matching direct commands are `graph.status`, `graph.activate`,
+The matching direct commands are `graph.status`, `graph.open`, `graph.save`, `graph.load`,
+`graph.activate`,
 `graph.set_display`, `graph.add_node`, `graph.delete_node`, `graph.add_edge`,
 `graph.add_voxel_node`, `graph.delete_edge`, `graph.curve_edge`,
-`graph.straighten_edge`, `graph.set_normal_line`, `graph.set_extension_line`,
-`graph.split_edge`, `graph.calculate_angle`, `graph.clear_angle`, and
-`graph.clear`.
+`graph.straighten_edge`, `graph.set_extension_line`, `graph.set_normal_line`,
+`graph.add_node_vector`, `graph.add_tangent_vector`, `graph.add_normal_vector`,
+`graph.flip_vector`, `graph.delete_vector`,
+`graph.split_edge`, `graph.calculate_angle`,
+`graph.set_angle_label_position`, `graph.delete_angle`,
+`graph.clear_angles`, and `graph.clear`.
 
 Curve controls use floating-point oriented projection coordinates and must be
 finite and inside the projection plane. They update a shared 3D control point by
-preserving the coordinate hidden by the selected view. Angle node IDs are ordered
-as vector 1 source/target followed by vector 2 source/target. Both vectors use the command's
-single orientation, and calculation scales their horizontal and vertical
-components by physical in-plane voxel spacing before evaluating the unsigned
-angle. Graph status includes authoritative patch voxels, full-image voxels when
-patch bounds are known, projections in all orientations, 3D curve controls,
-active tool/selection state, both directed vectors, and `angle_degrees`. Graph
-sessions are in-memory only and disappear when their patch window closes.
+preserving the coordinate hidden by the selected view. Angles reference two
+one-to-one vector pairs in one projection and scale their components by physical
+in-plane voxel spacing. Label positions use normalized projection coordinates.
+Graph status includes authoritative patch voxels,
+projections, 3D curve controls, vector colour/direction records, pending vector
+creation, angle selection, and all retained measurements. `.mipgraph.json` files
+persist completed graph content, construction lines, and Graph-specific display
+settings, plus MIP/MinIP mode and enabled projection orientations. Loading is
+transactional and requires matching patch shape, bounds, and
+affine; a changed source path is returned in `data.warnings`. Command saves do not
+overwrite and command loads do not replace a non-empty graph unless the matching
+flags are supplied. `graph.open PATH` requires the source image to be loaded,
+extracts a fresh patch from the saved source bounds, and opens a restored patch
+window. Version 1 graph files remain supported and open with all projection
+orientations disabled because that schema did not store projection state.
 
 `graph.split_edge` takes the clicked oriented projection index, inserts a node at
 the nearest point on the target edge, and replaces it with two connected edges.

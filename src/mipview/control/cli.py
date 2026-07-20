@@ -194,6 +194,18 @@ def _build_parser() -> argparse.ArgumentParser:
         formatter_class=_HelpFormatter,
     )
     patch_save.add_argument("path", metavar="PATH", help="Output NIfTI path.")
+    patch_screenshot = patch_subparsers.add_parser(
+        "screenshot",
+        help="Save an open patch window's triplanar viewer.",
+    )
+    patch_screenshot.add_argument("session_id", metavar="SESSION_ID")
+    patch_screenshot.add_argument("path", metavar="PATH")
+    patch_screenshot.add_argument(
+        "--resolution-percent",
+        type=int,
+        default=100,
+        help="Output resolution from 1 to 200 percent (default: 100).",
+    )
 
     projection_parser = subparsers.add_parser(
         "projection",
@@ -258,6 +270,27 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     graph_status = graph_subparsers.add_parser("status", help="Show graph session state.")
     graph_status.add_argument("session_id", metavar="SESSION_ID")
+    graph_open = graph_subparsers.add_parser(
+        "open",
+        help="Recreate a patch window from a graph state file and the loaded image.",
+    )
+    graph_open.add_argument("path", metavar="PATH")
+    graph_save = graph_subparsers.add_parser(
+        "save", help="Save persistent graph state to a local JSON file."
+    )
+    graph_save.add_argument("session_id", metavar="SESSION_ID")
+    graph_save.add_argument("path", metavar="PATH")
+    graph_save.add_argument("--overwrite", action="store_true")
+    graph_load = graph_subparsers.add_parser(
+        "load", help="Load persistent graph state from a local JSON file."
+    )
+    graph_load.add_argument("session_id", metavar="SESSION_ID")
+    graph_load.add_argument("path", metavar="PATH")
+    graph_load.add_argument(
+        "--replace",
+        action="store_true",
+        help="Replace an existing non-empty graph.",
+    )
     graph_activate = graph_subparsers.add_parser("activate", help="Activate Graph mode.")
     graph_activate.add_argument("session_id", metavar="SESSION_ID")
     graph_exit = graph_subparsers.add_parser("exit", help="Exit Graph mode.")
@@ -326,28 +359,48 @@ def _build_parser() -> argparse.ArgumentParser:
     graph_straighten_edge.add_argument("view", metavar="VIEW")
     graph_straighten_edge.add_argument("start_node_id", metavar="START_NODE_ID", type=int)
     graph_straighten_edge.add_argument("end_node_id", metavar="END_NODE_ID", type=int)
-    graph_normal_line = graph_subparsers.add_parser(
-        "normal-line",
-        help="Show or hide the projected normal through a straight graph edge.",
+    for command_name, help_text in (
+        (
+            "normal-line",
+            "Show or hide the projected normal through a straight graph edge.",
+        ),
+        (
+            "extension-line",
+            "Show or hide the projected extension through a straight graph edge.",
+        ),
+    ):
+        line_parser = graph_subparsers.add_parser(command_name, help=help_text)
+        line_parser.add_argument("session_id", metavar="SESSION_ID")
+        line_parser.add_argument("view", metavar="VIEW")
+        line_parser.add_argument("start_node_id", metavar="START_NODE_ID", type=int)
+        line_parser.add_argument("end_node_id", metavar="END_NODE_ID", type=int)
+        line_parser.add_argument("visibility", choices=("show", "hide"))
+    graph_add_node_vector = graph_subparsers.add_parser(
+        "add-node-vector", help="Create a directed vector between two graph nodes."
     )
-    graph_normal_line.add_argument("session_id", metavar="SESSION_ID")
-    graph_normal_line.add_argument("view", metavar="VIEW")
-    graph_normal_line.add_argument("start_node_id", metavar="START_NODE_ID", type=int)
-    graph_normal_line.add_argument("end_node_id", metavar="END_NODE_ID", type=int)
-    graph_normal_line.add_argument("visibility", choices=("show", "hide"))
-    graph_extension_line = graph_subparsers.add_parser(
-        "extension-line",
-        help="Show or hide the projected extension through a straight graph edge.",
+    graph_add_node_vector.add_argument("session_id", metavar="SESSION_ID")
+    graph_add_node_vector.add_argument("view", metavar="VIEW")
+    graph_add_node_vector.add_argument("source_node_id", metavar="SOURCE", type=int)
+    graph_add_node_vector.add_argument("target_node_id", metavar="TARGET", type=int)
+    for command_name, help_text in (
+        ("add-tangent-vector", "Create a tangent vector for a straight graph edge."),
+        ("add-normal-vector", "Create a normal vector for a straight graph edge."),
+    ):
+        vector_parser = graph_subparsers.add_parser(command_name, help=help_text)
+        vector_parser.add_argument("session_id", metavar="SESSION_ID")
+        vector_parser.add_argument("view", metavar="VIEW")
+        vector_parser.add_argument("edge_start_node_id", metavar="EDGE_START", type=int)
+        vector_parser.add_argument("edge_end_node_id", metavar="EDGE_END", type=int)
+    graph_flip_vector = graph_subparsers.add_parser(
+        "flip-vector", help="Reverse a graph vector's direction."
     )
-    graph_extension_line.add_argument("session_id", metavar="SESSION_ID")
-    graph_extension_line.add_argument("view", metavar="VIEW")
-    graph_extension_line.add_argument(
-        "start_node_id", metavar="START_NODE_ID", type=int
+    graph_flip_vector.add_argument("session_id", metavar="SESSION_ID")
+    graph_flip_vector.add_argument("vector_id", metavar="VECTOR_ID", type=int)
+    graph_delete_vector = graph_subparsers.add_parser(
+        "delete-vector", help="Delete a graph vector and dependent angles."
     )
-    graph_extension_line.add_argument(
-        "end_node_id", metavar="END_NODE_ID", type=int
-    )
-    graph_extension_line.add_argument("visibility", choices=("show", "hide"))
+    graph_delete_vector.add_argument("session_id", metavar="SESSION_ID")
+    graph_delete_vector.add_argument("vector_id", metavar="VECTOR_ID", type=int)
     graph_split_edge = graph_subparsers.add_parser(
         "split-edge", help="Create a node on an edge and replace it with two edges."
     )
@@ -358,18 +411,28 @@ def _build_parser() -> argparse.ArgumentParser:
     graph_split_edge.add_argument("horizontal", metavar="HORIZONTAL", type=int)
     graph_split_edge.add_argument("vertical", metavar="VERTICAL", type=int)
     graph_calculate_angle = graph_subparsers.add_parser(
-        "calculate-angle", help="Calculate an angle from four ordered graph node IDs."
+        "calculate-angle", help="Calculate an angle between two existing vectors."
     )
     graph_calculate_angle.add_argument("session_id", metavar="SESSION_ID")
-    graph_calculate_angle.add_argument("view", metavar="VIEW")
-    graph_calculate_angle.add_argument("vector_1_source", metavar="V1_SOURCE", type=int)
-    graph_calculate_angle.add_argument("vector_1_target", metavar="V1_TARGET", type=int)
-    graph_calculate_angle.add_argument("vector_2_source", metavar="V2_SOURCE", type=int)
-    graph_calculate_angle.add_argument("vector_2_target", metavar="V2_TARGET", type=int)
-    graph_clear_angle = graph_subparsers.add_parser(
-        "clear-angle", help="Clear the stored graph angle measurement."
+    graph_calculate_angle.add_argument("source_vector_id", metavar="SOURCE_VECTOR", type=int)
+    graph_calculate_angle.add_argument("target_vector_id", metavar="TARGET_VECTOR", type=int)
+    graph_set_angle_label = graph_subparsers.add_parser(
+        "set-angle-label-position",
+        help="Set an angle label center using normalized projection coordinates.",
     )
-    graph_clear_angle.add_argument("session_id", metavar="SESSION_ID")
+    graph_set_angle_label.add_argument("session_id", metavar="SESSION_ID")
+    graph_set_angle_label.add_argument("measurement_id", metavar="ANGLE_ID", type=int)
+    graph_set_angle_label.add_argument("x_fraction", metavar="X_FRACTION", type=float)
+    graph_set_angle_label.add_argument("y_fraction", metavar="Y_FRACTION", type=float)
+    graph_delete_angle = graph_subparsers.add_parser(
+        "delete-angle", help="Delete one retained graph angle measurement."
+    )
+    graph_delete_angle.add_argument("session_id", metavar="SESSION_ID")
+    graph_delete_angle.add_argument("measurement_id", metavar="MEASUREMENT_ID", type=int)
+    graph_clear_angles = graph_subparsers.add_parser(
+        "clear-angles", help="Clear all retained graph angle measurements."
+    )
+    graph_clear_angles.add_argument("session_id", metavar="SESSION_ID")
     graph_clear = graph_subparsers.add_parser(
         "clear", help="Clear all graph nodes, edges, curves, and measurements."
     )
@@ -506,6 +569,16 @@ def _command_from_args(args: argparse.Namespace) -> tuple[str, dict[str, Any], A
             return "patch.export_raw", {"path": args.path}, None
         if args.patch_command == "save":
             return "patch.save", {"path": args.path}, None
+        if args.patch_command == "screenshot":
+            return (
+                "patch.screenshot",
+                {
+                    "session_id": args.session_id,
+                    "path": args.path,
+                    "resolution_percent": args.resolution_percent,
+                },
+                None,
+            )
 
     if args.group == "projection":
         if args.projection_command == "mode":
@@ -522,8 +595,20 @@ def _command_from_args(args: argparse.Namespace) -> tuple[str, dict[str, Any], A
             )
 
     if args.group == "graph":
+        if args.graph_command == "open":
+            return "graph.open", {"path": args.path}, None
         if args.graph_command == "status":
             return "graph.status", {"session_id": args.session_id}, None
+        if args.graph_command in {"save", "load"}:
+            arguments = {
+                "session_id": args.session_id,
+                "path": args.path,
+            }
+            if args.graph_command == "save":
+                arguments["overwrite"] = bool(args.overwrite)
+                return "graph.save", arguments, None
+            arguments["replace"] = bool(args.replace)
+            return "graph.load", arguments, None
         if args.graph_command in {"activate", "exit"}:
             return (
                 "graph.activate",
@@ -615,9 +700,24 @@ def _command_from_args(args: argparse.Namespace) -> tuple[str, dict[str, Any], A
                 arguments,
                 None,
             )
-        if args.graph_command == "normal-line":
+        if args.graph_command == "add-node-vector":
             return (
-                "graph.set_normal_line",
+                "graph.add_node_vector",
+                {
+                    "session_id": args.session_id,
+                    "view": args.view,
+                    "source_node_id": args.source_node_id,
+                    "target_node_id": args.target_node_id,
+                },
+                None,
+            )
+        if args.graph_command in {"normal-line", "extension-line"}:
+            return (
+                (
+                    "graph.set_normal_line"
+                    if args.graph_command == "normal-line"
+                    else "graph.set_extension_line"
+                ),
                 {
                     "session_id": args.session_id,
                     "view": args.view,
@@ -627,16 +727,29 @@ def _command_from_args(args: argparse.Namespace) -> tuple[str, dict[str, Any], A
                 },
                 None,
             )
-        if args.graph_command == "extension-line":
+        if args.graph_command in {"add-tangent-vector", "add-normal-vector"}:
             return (
-                "graph.set_extension_line",
+                (
+                    "graph.add_tangent_vector"
+                    if args.graph_command == "add-tangent-vector"
+                    else "graph.add_normal_vector"
+                ),
                 {
                     "session_id": args.session_id,
                     "view": args.view,
-                    "start_node_id": args.start_node_id,
-                    "end_node_id": args.end_node_id,
-                    "visible": args.visibility == "show",
+                    "edge_start_node_id": args.edge_start_node_id,
+                    "edge_end_node_id": args.edge_end_node_id,
                 },
+                None,
+            )
+        if args.graph_command in {"flip-vector", "delete-vector"}:
+            return (
+                (
+                    "graph.flip_vector"
+                    if args.graph_command == "flip-vector"
+                    else "graph.delete_vector"
+                ),
+                {"session_id": args.session_id, "vector_id": args.vector_id},
                 None,
             )
         if args.graph_command == "split-edge":
@@ -657,16 +770,33 @@ def _command_from_args(args: argparse.Namespace) -> tuple[str, dict[str, Any], A
                 "graph.calculate_angle",
                 {
                     "session_id": args.session_id,
-                    "view": args.view,
-                    "vector_1_source": args.vector_1_source,
-                    "vector_1_target": args.vector_1_target,
-                    "vector_2_source": args.vector_2_source,
-                    "vector_2_target": args.vector_2_target,
+                    "source_vector_id": args.source_vector_id,
+                    "target_vector_id": args.target_vector_id,
                 },
                 None,
             )
-        if args.graph_command == "clear-angle":
-            return "graph.clear_angle", {"session_id": args.session_id}, None
+        if args.graph_command == "set-angle-label-position":
+            return (
+                "graph.set_angle_label_position",
+                {
+                    "session_id": args.session_id,
+                    "measurement_id": args.measurement_id,
+                    "x_fraction": args.x_fraction,
+                    "y_fraction": args.y_fraction,
+                },
+                None,
+            )
+        if args.graph_command == "delete-angle":
+            return (
+                "graph.delete_angle",
+                {
+                    "session_id": args.session_id,
+                    "measurement_id": args.measurement_id,
+                },
+                None,
+            )
+        if args.graph_command == "clear-angles":
+            return "graph.clear_angles", {"session_id": args.session_id}, None
         if args.graph_command == "clear":
             return "graph.clear", {"session_id": args.session_id}, None
 
