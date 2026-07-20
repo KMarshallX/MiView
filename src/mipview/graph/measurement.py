@@ -15,6 +15,7 @@ class AngleMeasurement:
     source_vector_id: int
     target_vector_id: int
     angle_degrees: float
+    label_position: tuple[float, float] | None = None
 
 
 def calculate_unsigned_angle_degrees(

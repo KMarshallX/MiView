@@ -55,6 +55,8 @@ class CommandRegistry:
         self.register("projection.mode", self.controller.set_projection_mode)
         self.register("projection.save", self.controller.save_projection)
         self.register("graph.status", self.controller.get_graph_status)
+        self.register("graph.save", self.controller.save_graph_state)
+        self.register("graph.load", self.controller.load_graph_state)
         self.register("graph.activate", self.controller.set_graph_active)
         self.register("graph.set_display", self.controller.set_graph_display)
         self.register("graph.add_node", self.controller.add_graph_node)
@@ -82,6 +84,10 @@ class CommandRegistry:
         self.register("graph.delete_vector", self.controller.delete_graph_vector)
         self.register("graph.split_edge", self.controller.split_graph_edge)
         self.register("graph.calculate_angle", self.controller.calculate_graph_angle)
+        self.register(
+            "graph.set_angle_label_position",
+            self.controller.set_graph_angle_label_position,
+        )
         self.register("graph.delete_angle", self.controller.delete_graph_angle)
         self.register("graph.clear_angles", self.controller.clear_graph_angles)
         self.register("graph.clear", self.controller.clear_graph)

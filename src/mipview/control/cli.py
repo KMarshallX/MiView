@@ -270,6 +270,22 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     graph_status = graph_subparsers.add_parser("status", help="Show graph session state.")
     graph_status.add_argument("session_id", metavar="SESSION_ID")
+    graph_save = graph_subparsers.add_parser(
+        "save", help="Save persistent graph state to a local JSON file."
+    )
+    graph_save.add_argument("session_id", metavar="SESSION_ID")
+    graph_save.add_argument("path", metavar="PATH")
+    graph_save.add_argument("--overwrite", action="store_true")
+    graph_load = graph_subparsers.add_parser(
+        "load", help="Load persistent graph state from a local JSON file."
+    )
+    graph_load.add_argument("session_id", metavar="SESSION_ID")
+    graph_load.add_argument("path", metavar="PATH")
+    graph_load.add_argument(
+        "--replace",
+        action="store_true",
+        help="Replace an existing non-empty graph.",
+    )
     graph_activate = graph_subparsers.add_parser("activate", help="Activate Graph mode.")
     graph_activate.add_argument("session_id", metavar="SESSION_ID")
     graph_exit = graph_subparsers.add_parser("exit", help="Exit Graph mode.")
@@ -395,6 +411,14 @@ def _build_parser() -> argparse.ArgumentParser:
     graph_calculate_angle.add_argument("session_id", metavar="SESSION_ID")
     graph_calculate_angle.add_argument("source_vector_id", metavar="SOURCE_VECTOR", type=int)
     graph_calculate_angle.add_argument("target_vector_id", metavar="TARGET_VECTOR", type=int)
+    graph_set_angle_label = graph_subparsers.add_parser(
+        "set-angle-label-position",
+        help="Set an angle label center using normalized projection coordinates.",
+    )
+    graph_set_angle_label.add_argument("session_id", metavar="SESSION_ID")
+    graph_set_angle_label.add_argument("measurement_id", metavar="ANGLE_ID", type=int)
+    graph_set_angle_label.add_argument("x_fraction", metavar="X_FRACTION", type=float)
+    graph_set_angle_label.add_argument("y_fraction", metavar="Y_FRACTION", type=float)
     graph_delete_angle = graph_subparsers.add_parser(
         "delete-angle", help="Delete one retained graph angle measurement."
     )
@@ -568,6 +592,16 @@ def _command_from_args(args: argparse.Namespace) -> tuple[str, dict[str, Any], A
     if args.group == "graph":
         if args.graph_command == "status":
             return "graph.status", {"session_id": args.session_id}, None
+        if args.graph_command in {"save", "load"}:
+            arguments = {
+                "session_id": args.session_id,
+                "path": args.path,
+            }
+            if args.graph_command == "save":
+                arguments["overwrite"] = bool(args.overwrite)
+                return "graph.save", arguments, None
+            arguments["replace"] = bool(args.replace)
+            return "graph.load", arguments, None
         if args.graph_command in {"activate", "exit"}:
             return (
                 "graph.activate",
@@ -731,6 +765,17 @@ def _command_from_args(args: argparse.Namespace) -> tuple[str, dict[str, Any], A
                     "session_id": args.session_id,
                     "source_vector_id": args.source_vector_id,
                     "target_vector_id": args.target_vector_id,
+                },
+                None,
+            )
+        if args.graph_command == "set-angle-label-position":
+            return (
+                "graph.set_angle_label_position",
+                {
+                    "session_id": args.session_id,
+                    "measurement_id": args.measurement_id,
+                    "x_fraction": args.x_fraction,
+                    "y_fraction": args.y_fraction,
                 },
                 None,
             )

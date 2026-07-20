@@ -29,6 +29,8 @@ class GraphPanel(QWidget):
     cancel_requested = Signal()
     delete_angle_requested = Signal(int)
     clear_angles_requested = Signal()
+    save_state_requested = Signal()
+    load_state_requested = Signal()
 
     PANEL_WIDTH = 220
     ADAPTABLE_MINIMUM_WIDTH = 130
@@ -99,6 +101,19 @@ class GraphPanel(QWidget):
         self.clear_graph_button = QPushButton("Clear All Nodes & Edges", group)
         self.clear_graph_button.clicked.connect(self.clear_graph_requested.emit)
 
+        file_row = QWidget(group)
+        file_layout = (
+            QVBoxLayout(file_row) if adaptable_width else QHBoxLayout(file_row)
+        )
+        file_layout.setContentsMargins(0, 0, 0, 0)
+        file_layout.setSpacing(6)
+        self.save_state_button = QPushButton("Save Graph State…", file_row)
+        self.save_state_button.clicked.connect(self.save_state_requested.emit)
+        file_layout.addWidget(self.save_state_button)
+        self.load_state_button = QPushButton("Load Graph State…", file_row)
+        self.load_state_button.clicked.connect(self.load_state_requested.emit)
+        file_layout.addWidget(self.load_state_button)
+
         self.calculate_angle_button = QPushButton("Calculate Angle", group)
         self.calculate_angle_button.setCheckable(True)
         self.calculate_angle_button.toggled.connect(
@@ -142,6 +157,7 @@ class GraphPanel(QWidget):
         form.addRow(self.angle_step_label)
         form.addRow(self.angle_source_label)
         form.addRow(self.angle_measurement_list)
+        form.addRow(file_row)
 
         layout = QVBoxLayout(self)
         layout.addWidget(group)

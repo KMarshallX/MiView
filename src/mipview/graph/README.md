@@ -1,6 +1,6 @@
 # Projection Graph Mode
 
-Patch windows provide a sparse, session-only graph editor for MIP and MinIP
+Patch windows provide a sparse graph editor for MIP and MinIP
 views. The authoritative graph uses patch-local source-array voxel coordinates;
 the axial, coronal, and sagittal overlays are projections of that shared graph.
 
@@ -8,7 +8,9 @@ the axial, coronal, and sagittal overlays are projections of that shared graph.
 - Completed graph geometry is retained when switching between MIP and MinIP.
 - Graphs are rendered and editable only while their orientation is projected.
 - Graph mode exits automatically after the last projection is disabled.
-- Closing the patch window permanently discards its graph.
+- **Save Graph State…** writes persistent graph content to a local
+  `.mipgraph.json` file; **Load Graph State…** restores it into a compatible
+  patch.
 
 Creating a node from a 2D projection resolves the missing coordinate from the
 current image ray: MIP uses the finite maximum and MinIP uses the finite minimum.
@@ -63,12 +65,18 @@ must use the same projection. Clicking another node completes the vector;
 clicking empty projection space first creates a target node using the current
 MIP/MinIP ray-resolution rules. Invalid rays create neither node nor vector.
 
-**Calculate Angle** continuously selects an existing source vector and target
-vector in the same projection. Each completed directed `0–180°` measurement is
-retained as `A1`, `A2`, and so on. Calculations use physical in-plane spacing.
-The viewer draws stable preset vector colours, dashed supporting lines, an angle
-arc, and a label. Flipping one vector recalculates every dependent measurement.
-Cancel exits the tool without deleting completed angles.
+**Calculate Angle** selects an existing source vector and target vector in the
+same projection. Each vector can belong to only one retained angle pair. The
+target, both dashed supporting lines, and the angle label inherit the source
+vector's colour; deleting the angle restores the target's original palette
+colour. Measurements are directed `0–180°` values calculated with physical
+in-plane spacing. Flipping either vector recalculates its measurement.
+
+Double-left-click an angle label to arm it for one move. A white dashed boundary
+marks the armed label. The next left drag that starts inside that boundary moves
+the label while keeping it inside the rendered projection; releasing locks it
+again. Saved positions use normalized projection coordinates so they remain
+stable when the patch window is resized.
 
 **Clear All Nodes & Edges** clears the shared graph in every orientation,
 including curve controls, pending interactions, and stored angle measurements.
@@ -84,3 +92,34 @@ MIP/MinIP mode, or disabling the locked projection cancels pending creation.
 Changing MIP/MinIP mode also cancels active curve/angle interaction while keeping
 completed curves and measurements. An incompatible patch-volume geometry change
 clears the shared graph and its measurements.
+
+Graph state files contain a format identifier and schema version, patch geometry,
+nodes, edges and curve controls, original vector colours, retained angle pairs and
+label positions, construction lines, and Graph-specific display settings. Loading
+requires matching patch shape, half-open source bounds, and affine. A different
+source path is reported as a warning when geometry remains compatible. Active
+tools, selections, pending operations, and Graph activation are not saved.
+
+Version 1 uses this top-level structure:
+
+```json
+{
+  "format": "mipview-graph-state",
+  "version": 1,
+  "source": {
+    "image_path": "/path/to/source.nii.gz",
+    "patch_shape": [64, 64, 10],
+    "patch_bounds": {},
+    "patch_affine": [],
+    "voxel_spacing": []
+  },
+  "display": {},
+  "graph": {"nodes": [], "edges": []},
+  "vectors": [],
+  "angles": [],
+  "construction_lines": {"extension": {}, "normal": {}}
+}
+```
+
+The loader validates all nested fields and references; the abbreviated objects
+above document the container layout rather than valid empty field values.

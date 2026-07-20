@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 import numpy as np
 from PySide6.QtCore import QEvent, QObject, QPointF, QRect, QRectF, Qt, Signal
 from PySide6.QtGui import (
@@ -71,6 +72,7 @@ class SliceViewerWidget(QWidget):
     graph_curve_drag_state_changed = Signal(bool)
     graph_curve_exit_requested = Signal()
     graph_angle_vector_selected = Signal(str, int)
+    graph_angle_label_position_changed = Signal(str, int, float, float)
     graph_element_selected = Signal(str, object)
 
     ZOOM_DRAG_SENSITIVITY = 0.01
@@ -129,6 +131,10 @@ class SliceViewerWidget(QWidget):
         self._graph_curve_handle_visible = False
         self._graph_vectors: tuple[GraphVector, ...] = ()
         self._graph_measurements: tuple[AngleMeasurement, ...] = ()
+        self._graph_vector_colors: dict[int, str] = {}
+        self._graph_angle_label_rects: dict[int, QRectF] = {}
+        self._graph_armed_angle_label_id: int | None = None
+        self._graph_angle_label_drag_offset = QPointF(0.0, 0.0)
         self._graph_selected_vector_id: int | None = None
         self._graph_angle_source_vector_id: int | None = None
         self._graph_pending_vector_orientation: Orientation | None = None
@@ -268,6 +274,7 @@ class SliceViewerWidget(QWidget):
         normal_line_thickness: int = 1,
         extension_line_edge: GraphEdge | None = None,
         extension_line_thickness: int = 1,
+        vector_colors: Mapping[int, str] | None = None,
     ) -> None:
         self._graph_layer = layer
         self._graph_editing_enabled = bool(editing_enabled)
@@ -284,6 +291,7 @@ class SliceViewerWidget(QWidget):
         self._graph_curve_handle_visible = bool(curve_handle_visible)
         self._graph_vectors = tuple(vectors)
         self._graph_measurements = tuple(measurements)
+        self._graph_vector_colors = dict(vector_colors or {})
         self._graph_selected_vector_id = selected_vector_id
         self._graph_angle_source_vector_id = angle_source_vector_id
         self._graph_pending_vector_orientation = pending_vector_orientation
@@ -295,6 +303,13 @@ class SliceViewerWidget(QWidget):
             int(extension_line_thickness),
             1,
         )
+        measurement_ids = {measurement.id for measurement in self._graph_measurements}
+        if (
+            not self._graph_editing_enabled
+            or not self._graph_visible
+            or self._graph_armed_angle_label_id not in measurement_ids
+        ):
+            self._graph_armed_angle_label_id = None
         if (
             self._graph_pending_node_id is None
             and self._graph_pending_vector_source_node_id is None
@@ -425,6 +440,10 @@ class SliceViewerWidget(QWidget):
                 mouse_event = event if isinstance(event, QMouseEvent) else None
                 if mouse_event is not None:
                     self._handle_mouse_move(mouse_event)
+            elif event.type() == QEvent.Type.MouseButtonDblClick:
+                mouse_event = event if isinstance(event, QMouseEvent) else None
+                if mouse_event is not None and self._handle_mouse_double_click(mouse_event):
+                    return True
             elif event.type() == QEvent.Type.MouseButtonRelease:
                 mouse_event = event if isinstance(event, QMouseEvent) else None
                 if mouse_event is not None:
@@ -437,11 +456,16 @@ class SliceViewerWidget(QWidget):
             elif event.type() == QEvent.Type.Leave:
                 if self._interaction_mode == "left_graph_curve_drag":
                     self.graph_curve_drag_state_changed.emit(False)
+                angle_label_was_armed = self._graph_armed_angle_label_id is not None
                 self._interaction_mode = None
                 self._last_drag_position = None
                 self._right_press_position = None
                 self._active_patch_resize_handle = None
-                if self._graph_preview_label_position is not None:
+                self._graph_armed_angle_label_id = None
+                if (
+                    self._graph_preview_label_position is not None
+                    or angle_label_was_armed
+                ):
                     self._graph_preview_label_position = None
                     self._update_scaled_pixmap()
                 self.image_label.setCursor(Qt.CursorShape.ArrowCursor)
@@ -828,7 +852,8 @@ class SliceViewerWidget(QWidget):
             painter.setPen(halo_pen)
             painter.drawLine(start, end)
 
-            arrow_color = QColor("#ffffff") if selected else QColor(vector.color)
+            display_color = self._graph_vector_colors.get(vector.id, vector.color)
+            arrow_color = QColor("#ffffff") if selected else QColor(display_color)
             arrow_color.setAlpha(alpha)
             arrow_pen = QPen(arrow_color, max(self._graph_edge_thickness, 2))
             arrow_pen.setCosmetic(True)
@@ -866,17 +891,9 @@ class SliceViewerWidget(QWidget):
         vector_segments: dict[int, tuple[QPointF, QPointF]],
         alpha: int,
     ) -> None:
+        self._graph_angle_label_rects.clear()
         if not self._graph_measurements:
             return
-        vectors_by_id = {vector.id: vector for vector in self._graph_vectors}
-        extension_ids = {
-            vector_id
-            for measurement in self._graph_measurements
-            for vector_id in (
-                measurement.source_vector_id,
-                measurement.target_vector_id,
-            )
-        }
         painter.save()
         painter.setClipRect(
             QRectF(
@@ -886,30 +903,18 @@ class SliceViewerWidget(QWidget):
                 display_rect.height,
             )
         )
-        for vector_id in sorted(extension_ids):
-            vector = vectors_by_id.get(vector_id)
-            segment = vector_segments.get(vector_id)
-            if vector is None or segment is None:
-                continue
-            start, end = segment
-            delta_x = end.x() - start.x()
-            delta_y = end.y() - start.y()
-            length = float(np.hypot(delta_x, delta_y))
-            if length <= 0.0:
-                continue
-            unit_x = delta_x / length
-            unit_y = delta_y / length
-            color = QColor(vector.color)
-            color.setAlpha(max(1, int(alpha * 0.58)))
-            pen = QPen(color, 1)
-            pen.setCosmetic(True)
-            pen.setStyle(Qt.PenStyle.DashLine)
-            painter.setPen(pen)
-            painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.drawLine(
-                QPointF(start.x() - unit_x * 10000.0, start.y() - unit_y * 10000.0),
-                QPointF(start.x() + unit_x * 10000.0, start.y() + unit_y * 10000.0),
+        for measurement in self._graph_measurements:
+            color = QColor(
+                self._graph_vector_colors.get(measurement.source_vector_id, "#ffffff")
             )
+            color.setAlpha(max(1, int(alpha * 0.58)))
+            for vector_id in (
+                measurement.source_vector_id,
+                measurement.target_vector_id,
+            ):
+                segment = vector_segments.get(vector_id)
+                if segment is not None:
+                    self._draw_vector_extension_line(painter, segment, color)
         painter.restore()
 
         for measurement in self._graph_measurements:
@@ -918,28 +923,78 @@ class SliceViewerWidget(QWidget):
             if source is None or target is None:
                 continue
             intersection = _infinite_line_intersection(source, target)
-            label_position: QPointF
+            text = f"A{measurement.id}: {measurement.angle_degrees:.1f}°"
+            desired_center: QPointF
             if intersection is not None and _point_in_display_rect(
                 intersection,
                 display_rect,
             ):
                 self._draw_angle_arc(painter, intersection, source, target, alpha)
-                label_position = QPointF(intersection.x() + 22.0, intersection.y() - 8.0)
+                desired_center = QPointF(
+                    intersection.x() + 65.0,
+                    intersection.y() - 10.0,
+                )
             else:
-                label_position = QPointF(
+                desired_center = QPointF(
                     (source[1].x() + target[1].x()) / 2.0,
                     (source[1].y() + target[1].y()) / 2.0,
                 )
-            label_position = _clamp_angle_label_position(
-                label_position,
+            if measurement.label_position is not None:
+                desired_center = QPointF(
+                    display_rect.left
+                    + measurement.label_position[0] * display_rect.width,
+                    display_rect.top
+                    + measurement.label_position[1] * display_rect.height,
+                )
+            label_rect = _angle_label_rect(
+                painter,
+                desired_center,
+                text,
                 display_rect,
             )
+            self._graph_angle_label_rects[measurement.id] = label_rect
+            label_color = QColor(
+                self._graph_vector_colors.get(measurement.source_vector_id, "#ffffff")
+            )
+            label_color.setAlpha(alpha)
             self._draw_angle_label(
                 painter,
-                label_position,
-                f"A{measurement.id}: {measurement.angle_degrees:.1f}°",
+                label_rect,
+                text,
+                label_color,
                 alpha,
             )
+            if measurement.id == self._graph_armed_angle_label_id:
+                boundary_pen = QPen(QColor(255, 255, 255, alpha), 1)
+                boundary_pen.setCosmetic(True)
+                boundary_pen.setStyle(Qt.PenStyle.DashLine)
+                painter.setPen(boundary_pen)
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.drawRect(label_rect)
+
+    @staticmethod
+    def _draw_vector_extension_line(
+        painter: QPainter,
+        segment: tuple[QPointF, QPointF],
+        color: QColor,
+    ) -> None:
+        start, end = segment
+        delta_x = end.x() - start.x()
+        delta_y = end.y() - start.y()
+        length = float(np.hypot(delta_x, delta_y))
+        if length <= 0.0:
+            return
+        unit_x = delta_x / length
+        unit_y = delta_y / length
+        pen = QPen(color, 1)
+        pen.setCosmetic(True)
+        pen.setStyle(Qt.PenStyle.DashLine)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawLine(
+            QPointF(start.x() - unit_x * 10000.0, start.y() - unit_y * 10000.0),
+            QPointF(start.x() + unit_x * 10000.0, start.y() + unit_y * 10000.0),
+        )
 
     @staticmethod
     def _draw_angle_arc(
@@ -985,15 +1040,20 @@ class SliceViewerWidget(QWidget):
     @staticmethod
     def _draw_angle_label(
         painter: QPainter,
-        position: QPointF,
+        rect: QRectF,
         text: str,
+        color: QColor,
         alpha: int,
     ) -> None:
         for offset_x, offset_y in ((-1, 0), (1, 0), (0, -1), (0, 1)):
             painter.setPen(QColor(0, 0, 0, alpha))
-            painter.drawText(position + QPointF(offset_x, offset_y), text)
-        painter.setPen(QColor(255, 255, 255, alpha))
-        painter.drawText(position, text)
+            painter.drawText(
+                rect.translated(offset_x, offset_y),
+                Qt.AlignmentFlag.AlignCenter,
+                text,
+            )
+        painter.setPen(color)
+        painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, text)
 
     def _graph_in_plane_spacing(self) -> tuple[float, float]:
         if self._display_volume is None:
@@ -1363,6 +1423,23 @@ class SliceViewerWidget(QWidget):
     def _handle_mouse_press(self, mouse_event: QMouseEvent) -> None:
         self._last_drag_position = mouse_event.position()
         if mouse_event.button() == Qt.MouseButton.LeftButton:
+            if self._graph_armed_angle_label_id is not None:
+                rect = self._graph_angle_label_rects.get(
+                    self._graph_armed_angle_label_id
+                )
+                if rect is not None and rect.contains(mouse_event.position()):
+                    self._interaction_mode = "left_graph_angle_label_drag"
+                    self._graph_angle_label_drag_offset = (
+                        mouse_event.position() - rect.center()
+                    )
+                    return
+                self.cancel_graph_angle_label_move()
+            if (
+                self._graph_interaction_available()
+                and self._angle_label_hit(mouse_event.position()) is not None
+            ):
+                self._interaction_mode = "left_graph_angle_label_click"
+                return
             if (
                 self._graph_interaction_available()
                 and self._graph_active_tool == "curve_edge"
@@ -1455,6 +1532,10 @@ class SliceViewerWidget(QWidget):
                 self._interaction_mode = "right_zoom"
 
     def _handle_mouse_move(self, mouse_event: QMouseEvent) -> None:
+        if self._interaction_mode == "left_graph_angle_label_drag":
+            if mouse_event.buttons() & Qt.MouseButton.LeftButton:
+                self._move_armed_angle_label(mouse_event.position())
+            return
         if (
             self._graph_interaction_available()
             and (
@@ -1546,9 +1627,14 @@ class SliceViewerWidget(QWidget):
             "left_graph_curve_select",
             "left_graph_angle",
             "left_graph_select",
+            "left_graph_angle_label_drag",
+            "left_graph_angle_label_click",
         ):
             if self._interaction_mode == "left_graph_curve_drag":
                 self.graph_curve_drag_state_changed.emit(False)
+            if self._interaction_mode == "left_graph_angle_label_drag":
+                self._graph_armed_angle_label_id = None
+                self._update_scaled_pixmap()
             self._interaction_mode = None
         elif release_button == Qt.MouseButton.MiddleButton and self._interaction_mode == "middle_pan":
             self._interaction_mode = None
@@ -1574,6 +1660,63 @@ class SliceViewerWidget(QWidget):
         self._right_press_position = None
         self._active_patch_resize_handle = None
         self._update_hover_cursor(mouse_event.position())
+
+    def _handle_mouse_double_click(self, mouse_event: QMouseEvent) -> bool:
+        if (
+            mouse_event.button() != Qt.MouseButton.LeftButton
+            or not self._graph_interaction_available()
+        ):
+            return False
+        measurement_id = self._angle_label_hit(mouse_event.position())
+        if measurement_id is None:
+            self.cancel_graph_angle_label_move()
+            return False
+        self._graph_armed_angle_label_id = measurement_id
+        self._interaction_mode = None
+        self._update_scaled_pixmap()
+        return True
+
+    def _angle_label_hit(self, position: QPointF) -> int | None:
+        hits = [
+            measurement_id
+            for measurement_id, rect in self._graph_angle_label_rects.items()
+            if rect.adjusted(-2.0, -2.0, 2.0, 2.0).contains(position)
+        ]
+        return max(hits) if hits else None
+
+    def _move_armed_angle_label(self, position: QPointF) -> None:
+        measurement_id = self._graph_armed_angle_label_id
+        rect = self._graph_angle_label_rects.get(measurement_id or -1)
+        display_rect = self._display_rect()
+        if measurement_id is None or rect is None or display_rect is None:
+            return
+        desired_center = position - self._graph_angle_label_drag_offset
+        half_width = rect.width() / 2.0
+        half_height = rect.height() / 2.0
+        center_x = min(
+            max(desired_center.x(), display_rect.left + half_width),
+            display_rect.left + display_rect.width - half_width,
+        )
+        center_y = min(
+            max(desired_center.y(), display_rect.top + half_height),
+            display_rect.top + display_rect.height - half_height,
+        )
+        x_fraction = (center_x - display_rect.left) / display_rect.width
+        y_fraction = (center_y - display_rect.top) / display_rect.height
+        self.graph_angle_label_position_changed.emit(
+            self.orientation,
+            measurement_id,
+            float(x_fraction),
+            float(y_fraction),
+        )
+
+    def cancel_graph_angle_label_move(self) -> None:
+        if self._graph_armed_angle_label_id is None:
+            return
+        self._graph_armed_angle_label_id = None
+        if self._interaction_mode == "left_graph_angle_label_drag":
+            self._interaction_mode = None
+        self._update_scaled_pixmap()
 
     def _emit_graph_curve_control(self, label_position: QPointF) -> None:
         if self._graph_selected_edge is None:
@@ -2152,17 +2295,30 @@ def _point_in_display_rect(point: QPointF, display_rect: DisplayRect) -> bool:
     )
 
 
-def _clamp_angle_label_position(
-    point: QPointF,
+def _angle_label_rect(
+    painter: QPainter,
+    center: QPointF,
+    text: str,
     display_rect: DisplayRect,
-) -> QPointF:
-    return QPointF(
+) -> QRectF:
+    text_rect = painter.fontMetrics().boundingRect(text)
+    width = min(max(float(text_rect.width()) + 10.0, 20.0), display_rect.width)
+    height = min(max(float(text_rect.height()) + 6.0, 12.0), display_rect.height)
+    half_width = width / 2.0
+    half_height = height / 2.0
+    clamped_center = QPointF(
         min(
-            max(point.x(), display_rect.left + 4.0),
-            display_rect.left + display_rect.width - 105.0,
+            max(center.x(), display_rect.left + half_width),
+            display_rect.left + display_rect.width - half_width,
         ),
         min(
-            max(point.y(), display_rect.top + 14.0),
-            display_rect.top + display_rect.height - 4.0,
+            max(center.y(), display_rect.top + half_height),
+            display_rect.top + display_rect.height - half_height,
         ),
+    )
+    return QRectF(
+        clamped_center.x() - half_width,
+        clamped_center.y() - half_height,
+        width,
+        height,
     )

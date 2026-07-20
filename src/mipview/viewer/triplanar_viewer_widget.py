@@ -65,6 +65,7 @@ class TriPlanarViewerWidget(QWidget):
     graph_curve_drag_state_changed = Signal(bool)
     graph_curve_exit_requested = Signal()
     graph_angle_vector_selected = Signal(str, int)
+    graph_angle_label_position_changed = Signal(str, int, float, float)
     graph_element_selected = Signal(str, object)
 
     def __init__(
@@ -165,6 +166,9 @@ class TriPlanarViewerWidget(QWidget):
             )
             view.graph_angle_vector_selected.connect(
                 self.graph_angle_vector_selected.emit
+            )
+            view.graph_angle_label_position_changed.connect(
+                self.graph_angle_label_position_changed.emit
             )
             view.graph_element_selected.connect(self.graph_element_selected.emit)
         for widget in self._drop_event_sources:
@@ -445,6 +449,7 @@ class TriPlanarViewerWidget(QWidget):
                     pending_vector_source_node_id=None,
                     normal_line_edge=None,
                     extension_line_edge=None,
+                    vector_colors={},
                 )
                 continue
             layer = graph_state.projected_layer(
@@ -502,7 +507,16 @@ class TriPlanarViewerWidget(QWidget):
                     else None
                 ),
                 extension_line_thickness=graph_state.extension_line_thickness,
+                vector_colors={
+                    vector.id: graph_state.effective_vector_color(vector.id)
+                    for vector in graph_state.vectors.values()
+                    if vector.orientation == view.orientation
+                },
             )
+
+    def cancel_graph_angle_label_move(self) -> None:
+        for view in self._views:
+            view.cancel_graph_angle_label_move()
 
     def graph_projected_layer(
         self,

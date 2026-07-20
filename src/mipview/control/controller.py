@@ -307,6 +307,61 @@ class MipViewController:
             patch_window.graph_status(),
         )
 
+    def save_graph_state(
+        self,
+        session_id: str,
+        path: str,
+        overwrite: bool = False,
+    ) -> CommandResult:
+        patch_window = self._graph_patch_window(session_id)
+        if patch_window is None:
+            return self._graph_session_not_found(session_id)
+        if not str(path).strip():
+            return CommandResult(False, "Graph state path is required.")
+        try:
+            saved_path = patch_window.save_graph_state(
+                path,
+                overwrite=bool(overwrite),
+            )
+        except (OSError, ValueError) as exc:
+            return CommandResult(False, str(exc), {"session_id": session_id})
+        return CommandResult(
+            True,
+            "Graph state saved.",
+            {
+                "session_id": session_id,
+                "path": str(saved_path),
+                "counts": patch_window.graph_persistent_counts(),
+                "warnings": [],
+            },
+        )
+
+    def load_graph_state(
+        self,
+        session_id: str,
+        path: str,
+        replace: bool = False,
+    ) -> CommandResult:
+        patch_window = self._graph_patch_window(session_id)
+        if patch_window is None:
+            return self._graph_session_not_found(session_id)
+        if not str(path).strip():
+            return CommandResult(False, "Graph state path is required.")
+        try:
+            result = patch_window.load_graph_state(path, replace=bool(replace))
+        except (OSError, ValueError) as exc:
+            return CommandResult(False, str(exc), {"session_id": session_id})
+        return CommandResult(
+            True,
+            "Graph state loaded.",
+            {
+                "session_id": session_id,
+                "path": str(Path(path)),
+                "counts": dict(result.counts),
+                "warnings": list(result.warnings),
+            },
+        )
+
     def set_graph_active(self, session_id: str, enabled: bool) -> CommandResult:
         patch_window = self._graph_patch_window(session_id)
         if patch_window is None:
@@ -757,6 +812,34 @@ class MipViewController:
             {
                 "session_id": session_id,
                 "measurement_id": measurement.id,
+            },
+        )
+
+    def set_graph_angle_label_position(
+        self,
+        session_id: str,
+        measurement_id: int,
+        x_fraction: float,
+        y_fraction: float,
+    ) -> CommandResult:
+        patch_window = self._graph_patch_window(session_id)
+        if patch_window is None:
+            return self._graph_session_not_found(session_id)
+        try:
+            measurement = patch_window.set_graph_angle_label_position(
+                int(measurement_id),
+                float(x_fraction),
+                float(y_fraction),
+            )
+        except (TypeError, ValueError) as exc:
+            return CommandResult(False, str(exc), {"session_id": session_id})
+        return CommandResult(
+            True,
+            "Graph angle label position updated.",
+            {
+                "session_id": session_id,
+                "measurement_id": measurement.id,
+                "label_position": list(measurement.label_position or ()),
             },
         )
 

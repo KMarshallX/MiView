@@ -50,6 +50,13 @@ from mipview.graph import (
     GraphVector,
     ProjectionGraphState,
 )
+from mipview.graph.io import (
+    GraphFileContext,
+    GraphLoadResult,
+    graph_state_counts,
+    load_graph_state_file,
+    save_graph_state_file,
+)
 from mipview.graph.spatial import (
     extension_line_plane_endpoints,
     nearest_projected_edge_parameter,
@@ -285,6 +292,9 @@ class PatchViewerWindow(QMainWindow):
         self.slice_viewer.graph_angle_vector_selected.connect(
             self._on_graph_angle_vector_selected
         )
+        self.slice_viewer.graph_angle_label_position_changed.connect(
+            self._on_graph_angle_label_position_changed
+        )
         self.slice_viewer.graph_element_selected.connect(
             self._on_graph_element_selected
         )
@@ -327,6 +337,12 @@ class PatchViewerWindow(QMainWindow):
         self.graph_panel.cancel_requested.connect(self._cancel_graph_interaction)
         self.graph_panel.delete_angle_requested.connect(self.delete_graph_angle)
         self.graph_panel.clear_angles_requested.connect(self.clear_graph_angles)
+        self.graph_panel.save_state_requested.connect(
+            self._on_save_graph_state_requested
+        )
+        self.graph_panel.load_state_requested.connect(
+            self._on_load_graph_state_requested
+        )
         self._graph_cancel_shortcut = QShortcut(
             QKeySequence(QKeySequence.StandardKey.Cancel),
             self,
@@ -689,6 +705,91 @@ class PatchViewerWindow(QMainWindow):
             }
         summary["layers"] = layers
         return summary
+
+    def save_graph_state(
+        self,
+        path: str | Path,
+        *,
+        overwrite: bool = False,
+    ) -> Path:
+        return save_graph_state_file(
+            path,
+            self.graph_state,
+            self._graph_file_context(),
+            overwrite=overwrite,
+        )
+
+    def graph_persistent_counts(self) -> dict[str, int]:
+        return graph_state_counts(self.graph_state)
+
+    def load_graph_state(
+        self,
+        path: str | Path,
+        *,
+        replace: bool = False,
+    ) -> GraphLoadResult:
+        if self._has_persistent_graph_content() and not replace:
+            raise ValueError(
+                "The current graph is not empty. Enable replacement to load another "
+                "graph state."
+            )
+        result = load_graph_state_file(
+            path,
+            self._graph_file_context(),
+            self._loaded_graph_vector_geometry,
+        )
+        editing_enabled = self.graph_state.editing_enabled
+        active_orientation = self.graph_state.active_orientation
+        self.slice_viewer.cancel_graph_angle_label_move()
+        self.graph_state = result.state
+        self.graph_state.editing_enabled = editing_enabled
+        self.graph_state.active_orientation = active_orientation
+        self.slice_viewer.set_projection_graph_state(self.graph_state)
+        self.graph_panel.set_visible_checked(self.graph_state.visible)
+        self.graph_panel.set_opacity(self.graph_state.opacity)
+        self.graph_panel.set_node_size(self.graph_state.node_size)
+        self.graph_panel.set_edge_thickness(self.graph_state.edge_thickness)
+        self.graph_panel.set_editing_enabled(editing_enabled)
+        self._refresh_graph_panel_tool_state()
+        return result
+
+    def _graph_file_context(self) -> GraphFileContext:
+        unit_scale = spatial_unit_to_mm(self._patch_volume.header.get_xyzt_units()[0])
+        spacing = np.linalg.norm(
+            np.asarray(self._patch_volume.affine, dtype=np.float64)[:3, :3], axis=0
+        ) * unit_scale
+        return GraphFileContext(
+            source_image_path=self._source_image_path,
+            patch_shape=tuple(int(value) for value in self._patch_volume.shape[:3]),
+            patch_bounds=self._source_patch_bounds,
+            patch_affine=np.asarray(self._patch_volume.affine, dtype=np.float64),
+            voxel_spacing=tuple(float(value) for value in spacing),
+        )
+
+    def _loaded_graph_vector_geometry(
+        self,
+        state: ProjectionGraphState,
+        orientation: Orientation,
+    ) -> tuple[dict[int, tuple[float, float]], tuple[float, float]]:
+        oriented = build_oriented_volume(
+            self._patch_volume.data,
+            self._patch_volume.affine,
+        )
+        layer = state.projected_layer(orientation, oriented)
+        return (
+            {node.id: node.position() for node in layer.nodes.values()},
+            self._graph_in_plane_spacing(orientation),
+        )
+
+    def _has_persistent_graph_content(self) -> bool:
+        return bool(
+            self.graph_state.graph.nodes
+            or self.graph_state.graph.edges
+            or self.graph_state.vectors
+            or self.graph_state.angle_measurements
+            or self.graph_state.extension_line_edge is not None
+            or self.graph_state.normal_line_edge is not None
+        )
 
     def graph_node_payload(
         self,
@@ -1059,6 +1160,20 @@ class PatchViewerWindow(QMainWindow):
         self.slice_viewer.refresh_graph_overlay()
         self._refresh_graph_panel_tool_state()
         self.statusBar().showMessage(f"Deleted graph angle A{measurement.id}")
+        return measurement
+
+    def set_graph_angle_label_position(
+        self,
+        measurement_id: int,
+        x_fraction: float,
+        y_fraction: float,
+    ) -> AngleMeasurement:
+        measurement = self.graph_state.set_angle_label_position(
+            measurement_id,
+            x_fraction,
+            y_fraction,
+        )
+        self.slice_viewer.refresh_graph_overlay()
         return measurement
 
     def clear_graph_angles(self) -> int:
@@ -1742,6 +1857,7 @@ class PatchViewerWindow(QMainWindow):
         self.statusBar().showMessage("Graph vector creation canceled")
 
     def _cancel_graph_interaction(self) -> None:
+        self.slice_viewer.cancel_graph_angle_label_move()
         if self.graph_state.pending_edge_node_id is not None:
             self._cancel_pending_graph_edge()
             return
@@ -1757,6 +1873,30 @@ class PatchViewerWindow(QMainWindow):
         self.statusBar().showMessage(
             "Angle selection canceled" if tool == "calculate_angle" else "Curve tool exited"
         )
+
+    def _on_graph_angle_label_position_changed(
+        self,
+        orientation: str,
+        measurement_id: int,
+        x_fraction: float,
+        y_fraction: float,
+    ) -> None:
+        if orientation not in ("axial", "coronal", "sagittal"):
+            return
+        measurement = self.graph_state.angle_measurements.get(int(measurement_id))
+        if measurement is None:
+            return
+        source = self.graph_state.vectors.get(measurement.source_vector_id)
+        if source is None or source.orientation != orientation:
+            return
+        try:
+            self.set_graph_angle_label_position(
+                measurement.id,
+                x_fraction,
+                y_fraction,
+            )
+        except ValueError as exc:
+            self.statusBar().showMessage(str(exc))
 
     def _on_graph_curve_tool_requested(self, enabled: bool) -> None:
         if not enabled:
@@ -2051,6 +2191,64 @@ class PatchViewerWindow(QMainWindow):
 
         self.statusBar().showMessage(f"Patch saved: {saved_path}")
 
+    def _on_save_graph_state_requested(self) -> None:
+        selected_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save Graph State",
+            self._default_graph_state_filename(),
+            "MipView Graph State (*.mipgraph.json);;JSON Files (*.json);;All Files (*)",
+        )
+        if not selected_path:
+            self.statusBar().showMessage("Graph state save canceled")
+            return
+        try:
+            saved_path = self.save_graph_state(selected_path, overwrite=True)
+        except (OSError, ValueError) as exc:
+            QMessageBox.critical(self, "Save Graph State Failed", str(exc))
+            self.statusBar().showMessage("Graph state save failed")
+            return
+        self.statusBar().showMessage(f"Graph state saved: {saved_path}")
+
+    def _on_load_graph_state_requested(self) -> None:
+        selected_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Load Graph State",
+            str(Path(self._default_graph_state_filename()).parent),
+            "MipView Graph State (*.mipgraph.json);;JSON Files (*.json);;All Files (*)",
+        )
+        if not selected_path:
+            self.statusBar().showMessage("Graph state load canceled")
+            return
+        replace = False
+        if self._has_persistent_graph_content():
+            answer = QMessageBox.question(
+                self,
+                "Replace Current Graph?",
+                "Loading this file will replace the current graph state.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                self.statusBar().showMessage("Graph state load canceled")
+                return
+            replace = True
+        try:
+            result = self.load_graph_state(selected_path, replace=replace)
+        except (OSError, ValueError) as exc:
+            QMessageBox.critical(self, "Load Graph State Failed", str(exc))
+            self.statusBar().showMessage("Graph state load failed")
+            return
+        count_text = ", ".join(
+            f"{value} {name}" for name, value in result.counts.items()
+        )
+        if result.warnings:
+            QMessageBox.warning(
+                self,
+                "Graph State Loaded with Warning",
+                "\n".join(result.warnings),
+            )
+        self.statusBar().showMessage(f"Graph state loaded: {count_text}")
+
     def _on_save_seg_patch_clicked(self) -> None:
         overlay_patch = self._active_overlay_patch_volume()
         if overlay_patch is None:
@@ -2223,6 +2421,12 @@ class PatchViewerWindow(QMainWindow):
         if stem.endswith(".nii"):
             stem = stem[:-4]
         return str(Path.home() / f"{stem}_views.png")
+
+    def _default_graph_state_filename(self) -> str:
+        stem = Path(self._default_patch_filename()).stem
+        if stem.endswith(".nii"):
+            stem = stem[:-4]
+        return str(Path.home() / f"{stem}.mipgraph.json")
 
     def _default_screenshot_filename(self) -> str:
         stem = Path(self._default_patch_filename()).stem

@@ -271,6 +271,15 @@ class ProjectionGraphState:
         self.selected_vector_id = vector.id
         self.active_orientation = vector.orientation
         if self.angle_source_vector_id is None:
+            if any(
+                vector.id
+                in (measurement.source_vector_id, measurement.target_vector_id)
+                for measurement in self.angle_measurements.values()
+            ):
+                raise ValueError(
+                    f"Graph vector V{vector.id} already belongs to an angle pair. "
+                    "Delete the existing angle before pairing again."
+                )
             self.angle_source_vector_id = vector.id
             return None
         measurement = self.calculate_angle(
@@ -295,6 +304,25 @@ class ProjectionGraphState:
             raise ValueError("Angle source and target vectors must be different.")
         if source.orientation != target.orientation:
             raise ValueError("Angle source and target vectors must share one projection.")
+        paired_ids = {
+            vector_id
+            for measurement in self.angle_measurements.values()
+            for vector_id in (
+                measurement.source_vector_id,
+                measurement.target_vector_id,
+            )
+        }
+        already_paired = [
+            vector_id
+            for vector_id in (source.id, target.id)
+            if vector_id in paired_ids
+        ]
+        if already_paired:
+            labels = ", ".join(f"V{vector_id}" for vector_id in already_paired)
+            raise ValueError(
+                f"Graph vector(s) {labels} already belong to an angle pair. "
+                "Delete the existing angle before pairing again."
+            )
         angle = calculate_unsigned_angle_degrees(
             source,
             target,
@@ -311,6 +339,38 @@ class ProjectionGraphState:
         self._next_measurement_id += 1
         self.active_orientation = source.orientation
         return measurement
+
+    def set_angle_label_position(
+        self,
+        measurement_id: int,
+        x_fraction: float,
+        y_fraction: float,
+    ) -> AngleMeasurement:
+        measurement = self._ensure_measurement(measurement_id)
+        position = (float(x_fraction), float(y_fraction))
+        if not all(np.isfinite(value) and 0.0 <= value <= 1.0 for value in position):
+            raise ValueError(
+                "Angle label position fractions must be finite values between 0.0 and 1.0."
+            )
+        updated = AngleMeasurement(
+            id=measurement.id,
+            source_vector_id=measurement.source_vector_id,
+            target_vector_id=measurement.target_vector_id,
+            angle_degrees=measurement.angle_degrees,
+            label_position=position,
+        )
+        self.angle_measurements[updated.id] = updated
+        return updated
+
+    def effective_vector_color_index(self, vector_id: int) -> int:
+        vector = self._ensure_vector(vector_id)
+        for measurement in self.angle_measurements.values():
+            if measurement.target_vector_id == vector.id:
+                return self._ensure_vector(measurement.source_vector_id).color_index
+        return vector.color_index
+
+    def effective_vector_color(self, vector_id: int) -> str:
+        return VECTOR_COLOR_PRESET[self.effective_vector_color_index(vector_id)]
 
     def delete_angle(self, measurement_id: int) -> AngleMeasurement:
         normalized = int(measurement_id)
@@ -531,6 +591,14 @@ class ProjectionGraphState:
                     "source_vector_id": measurement.source_vector_id,
                     "target_vector_id": measurement.target_vector_id,
                     "angle_degrees": measurement.angle_degrees,
+                    "label_position": (
+                        None
+                        if measurement.label_position is None
+                        else list(measurement.label_position)
+                    ),
+                    "color": self.effective_vector_color(
+                        measurement.source_vector_id
+                    ),
                 }
                 for measurement in sorted(
                     self.angle_measurements.values(), key=lambda item: item.id
@@ -594,6 +662,7 @@ class ProjectionGraphState:
                     node_positions,
                     in_plane_spacing,
                 ),
+                label_position=measurement.label_position,
             )
 
     def _delete_measurements_for_vector(self, vector_id: int) -> None:
@@ -634,6 +703,13 @@ class ProjectionGraphState:
             raise ValueError(f"Graph vector V{normalized} does not exist.")
         return vector
 
+    def _ensure_measurement(self, measurement_id: int) -> AngleMeasurement:
+        normalized = int(measurement_id)
+        measurement = self.angle_measurements.get(normalized)
+        if measurement is None:
+            raise ValueError(f"Graph angle measurement A{normalized} does not exist.")
+        return measurement
+
     def _validate_straight_edge(self, edge: GraphEdge, line_name: str) -> None:
         if edge not in self.graph.edges:
             raise ValueError(
@@ -668,8 +744,7 @@ class ProjectionGraphState:
             "thickness": thickness,
         }
 
-    @staticmethod
-    def _vector_summary(vector: GraphVector) -> dict[str, object]:
+    def _vector_summary(self, vector: GraphVector) -> dict[str, object]:
         return {
             "id": vector.id,
             "orientation": vector.orientation,
@@ -686,5 +761,6 @@ class ProjectionGraphState:
             ),
             "reversed": vector.reversed,
             "color_index": vector.color_index,
-            "color": vector.color,
+            "original_color": vector.color,
+            "color": self.effective_vector_color(vector.id),
         }
