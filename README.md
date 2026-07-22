@@ -18,6 +18,8 @@ It is designed as a focused research tool for:
   persistent directed vectors, straight or curved edges, restored MIP/MinIP
   orientation settings, and physical-spacing-aware one-to-one angle measurements,
 - patch-window triplanar screenshot export at 1–200% output resolution,
+- independent patch-window translation along LR, AP, and SI with live projection
+  and aligned-overlay refresh,
 - controlled local IPC and `mipview-ctl` commands for viewer, patch, annotation, projection, and graph workflows.
 
 MipView is intentionally minimal. The goal is to build a small, reliable viewer before adding more advanced features.

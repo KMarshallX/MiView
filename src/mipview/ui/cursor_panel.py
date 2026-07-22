@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from mipview.ui.collapsible_group_box import CollapsibleGroupBox
 from mipview.viewer.physical_axes import physical_axis_direction_labels
 
 
@@ -45,26 +46,26 @@ class CursorInspectionPanel(QWidget):
         else:
             self.setFixedWidth(self.PANEL_WIDTH)
 
-        group = QGroupBox("Cursor Inspection", self)
-        form = QFormLayout(group)
+        self.cursor_group = QGroupBox("Cursor Inspection", self)
+        form = QFormLayout(self.cursor_group)
         if adaptable_width:
             form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
 
-        self.x_value = QLabel("-", group)
-        self.y_value = QLabel("-", group)
-        self.z_value = QLabel("-", group)
-        self.intensity_value = QLabel("-", group)
+        self.x_value = QLabel("-", self.cursor_group)
+        self.y_value = QLabel("-", self.cursor_group)
+        self.z_value = QLabel("-", self.cursor_group)
+        self.intensity_value = QLabel("-", self.cursor_group)
 
-        self.x_axis_label = QLabel("X:", group)
-        self.y_axis_label = QLabel("Y:", group)
-        self.z_axis_label = QLabel("Z:", group)
+        self.x_axis_label = QLabel("X:", self.cursor_group)
+        self.y_axis_label = QLabel("Y:", self.cursor_group)
+        self.z_axis_label = QLabel("Z:", self.cursor_group)
 
         form.addRow(self.x_axis_label, self.x_value)
         form.addRow(self.y_axis_label, self.y_value)
         form.addRow(self.z_axis_label, self.z_value)
         form.addRow("Intensity:", self.intensity_value)
 
-        self.patch_group = QGroupBox("Patch Selection", self)
+        self.patch_group = CollapsibleGroupBox("Patch Selection", self)
         patch_form = QFormLayout(self.patch_group)
         if adaptable_width:
             patch_form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
@@ -107,7 +108,7 @@ class CursorInspectionPanel(QWidget):
         patch_form.addRow(self.find_patch_box_button)
 
         layout = QVBoxLayout(self)
-        layout.addWidget(group)
+        layout.addWidget(self.cursor_group)
         layout.addWidget(self.patch_group)
         layout.addStretch(1)
         layout.setContentsMargins(8, 8, 8, 8)

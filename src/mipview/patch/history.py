@@ -112,6 +112,9 @@ class PatchHistoryManager:
     def nodes_by_step(self) -> list[PatchHistoryNode]:
         return sorted(self._nodes.values(), key=lambda node: node.step_index)
 
+    def has_operations(self) -> bool:
+        return len(self._nodes) > 1
+
     def node(self, node_id: str) -> PatchHistoryNode:
         node = self._nodes.get(node_id)
         if node is None:
