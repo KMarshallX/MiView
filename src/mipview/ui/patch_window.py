@@ -7,7 +7,7 @@ from typing import Literal
 from uuid import uuid4
 
 import numpy as np
-from PySide6.QtCore import QPoint, QSignalBlocker, Qt, Signal
+from PySide6.QtCore import QEvent, QPoint, QSignalBlocker, Qt, Signal
 from PySide6.QtGui import (
     QAction,
     QColor,
@@ -25,7 +25,6 @@ from PySide6.QtWidgets import (
     QComboBox,
     QFileDialog,
     QFormLayout,
-    QGroupBox,
     QHBoxLayout,
     QLabel,
     QLayout,
@@ -65,7 +64,7 @@ from mipview.graph.spatial import (
 from mipview.io.nifti_io import NiftiLoadResult
 from mipview.patch.history import PatchHistoryManager
 from mipview.patch.saver import build_patch_default_filename, save_patch_nifti
-from mipview.patch.selector import PatchBounds
+from mipview.patch.selector import PatchBounds, patch_bounds_center, patch_bounds_shape
 from mipview.segmentation.overlay import build_segmentation_overlay_rgba
 from mipview.state.contrast_state import ContrastState
 from mipview.tools import derive_volume, get_tool
@@ -75,12 +74,14 @@ from mipview.ui.contrast_helpers import (
     connect_contrast_controls,
     initialize_contrast_state,
 )
+from mipview.ui.collapsible_group_box import CollapsibleGroupBox
 from mipview.ui.contrast_control_bar import ContrastControlBar
 from mipview.ui.cursor_panel import CursorInspectionPanel
 from mipview.ui.annotation_panel import AnnotationPanel
 from mipview.ui.graph_panel import GraphPanel
 from mipview.ui.overlay_opacity_control_bar import OverlayOpacityControlBar
 from mipview.ui.patch_history_panel import PatchHistoryPanel
+from mipview.ui.patch_position_panel import PatchPositionPanel
 from mipview.ui.tool_actions import apply_tool_to_volume_with_metadata
 from mipview.ui.tools_menu import build_tools_submenu
 from mipview.ui.window_styling import (
@@ -110,6 +111,7 @@ class PatchViewerWindow(QMainWindow):
     overlay_segmentation_changed = Signal(object)
     unload_current_segmentation_requested = Signal()
     open_segmentation_configuration_requested = Signal()
+    patch_translation_requested = Signal(object, str, int, bool)
 
     VIEW_EXPORT_SCALE_FACTOR = 3
 
@@ -129,6 +131,7 @@ class PatchViewerWindow(QMainWindow):
         source_image_name: str = "image.nii.gz",
         source_image_path: Path | None = None,
         source_patch_bounds: PatchBounds | None = None,
+        source_image_shape: tuple[int, int, int] | None = None,
         patch_center: tuple[int, int, int] | None = None,
         patch_size: tuple[int, int, int] | None = None,
         projection_mask_layers: Sequence[
@@ -144,8 +147,17 @@ class PatchViewerWindow(QMainWindow):
         self.graph_session_id = uuid4().hex
         self._source_image_path = source_image_path
         self._source_patch_bounds = source_patch_bounds
-        self._patch_center = patch_center
-        self._patch_size = patch_size if patch_size is not None else patch_volume.shape
+        self._source_image_shape = source_image_shape
+        self._patch_center = (
+            patch_bounds_center(source_patch_bounds)
+            if source_patch_bounds is not None
+            else patch_center
+        )
+        self._patch_size = (
+            patch_bounds_shape(source_patch_bounds)
+            if source_patch_bounds is not None
+            else (patch_size if patch_size is not None else patch_volume.shape)
+        )
         self._patch_data = patch_volume.data
         self._patch_volume = patch_volume
         self._segmentation_patch_volume = segmentation_volume
@@ -209,8 +221,19 @@ class PatchViewerWindow(QMainWindow):
         self.mip_minip_panel = self._build_mip_minip_panel(self)
         self.patch_save_panel = self._build_save_panel(self)
         self.patch_history_panel = PatchHistoryPanel(self)
+        self.patch_position_panel = PatchPositionPanel(self)
+        self.patch_position_panel.set_source_geometry(
+            self._source_patch_bounds,
+            self._source_image_shape,
+        )
         self.patch_history_panel.restore_requested.connect(
             self._on_restore_patch_history_node_requested
+        )
+        self.patch_position_panel.movement_requested.connect(
+            self._on_patch_position_movement_requested
+        )
+        self.patch_position_panel.movement_finished.connect(
+            self._on_patch_position_movement_finished
         )
         self._right_panels: list[QWidget] = []
         self._right_control_container = QWidget(self)
@@ -222,11 +245,12 @@ class PatchViewerWindow(QMainWindow):
         )
         self._right_control_stack_layout.addWidget(self.cursor_panel)
         self._right_control_stack_layout.addStretch(1)
+        self.add_right_control_panel(self.patch_position_panel, horizontal_margin=8)
         self.add_right_control_panel(self.annotation_panel)
         self.add_right_control_panel(self.graph_panel)
-        self.add_right_control_panel(self.mip_minip_panel)
-        self.add_right_control_panel(self.patch_save_panel)
-        self.add_right_control_panel(self.patch_history_panel)
+        self.add_right_control_panel(self.mip_minip_panel, horizontal_margin=8)
+        self.add_right_control_panel(self.patch_save_panel, horizontal_margin=8)
+        self.add_right_control_panel(self.patch_history_panel, horizontal_margin=8)
 
         self._viewer_scroll_area = QScrollArea(self)
         self._viewer_scroll_area.setWidgetResizable(True)
@@ -453,14 +477,33 @@ class PatchViewerWindow(QMainWindow):
         auto_contrast_action.triggered.connect(self._on_auto_contrast)
         tools_menu.addAction(auto_contrast_action)
 
-    def add_right_control_panel(self, panel: QWidget) -> None:
+    def add_right_control_panel(
+        self,
+        panel: QWidget,
+        *,
+        horizontal_margin: int = 0,
+    ) -> None:
         """Insert a tool/config panel below cursor inspection in the right stack."""
         insert_at = max(self._right_control_stack_layout.count() - 1, 0)
-        self._right_control_stack_layout.insertWidget(insert_at, panel)
+        stack_widget = panel
+        if horizontal_margin > 0:
+            stack_widget = QWidget(self._right_control_container)
+            wrapper_layout = QVBoxLayout(stack_widget)
+            wrapper_layout.setContentsMargins(
+                horizontal_margin,
+                0,
+                horizontal_margin,
+                0,
+            )
+            wrapper_layout.setSpacing(0)
+            wrapper_layout.addWidget(panel)
+        self._right_control_stack_layout.insertWidget(insert_at, stack_widget)
         self._right_panels.append(panel)
 
-    def _build_mip_minip_panel(self, parent: QWidget | None = None) -> QGroupBox:
-        panel = QGroupBox("MIP / MinIP", parent)
+    def _build_mip_minip_panel(
+        self, parent: QWidget | None = None
+    ) -> CollapsibleGroupBox:
+        panel = CollapsibleGroupBox("MIP / MinIP", parent)
         form = QFormLayout(panel)
         form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
 
@@ -512,8 +555,10 @@ class PatchViewerWindow(QMainWindow):
         form.addRow("Direction:", direction_row)
         return panel
 
-    def _build_save_panel(self, parent: QWidget | None = None) -> QGroupBox:
-        panel = QGroupBox("Patch Save", parent)
+    def _build_save_panel(
+        self, parent: QWidget | None = None
+    ) -> CollapsibleGroupBox:
+        panel = CollapsibleGroupBox("Patch Save", parent)
         layout = QVBoxLayout(panel)
         self.save_views_button = QPushButton("Save MIP/MinIP Image...", panel)
         self.save_views_button.clicked.connect(self._on_save_views_clicked)
@@ -2755,8 +2800,171 @@ class PatchViewerWindow(QMainWindow):
     def source_patch_bounds(self) -> PatchBounds | None:
         return self._source_patch_bounds
 
+    def source_image_shape(self) -> tuple[int, int, int] | None:
+        return self._source_image_shape
+
     def patch_volume(self) -> NiftiLoadResult:
         return self._patch_volume
+
+    def has_discardable_local_work(self) -> bool:
+        return (
+            self._patch_history.has_operations()
+            or self._has_persistent_graph_content()
+        )
+
+    def apply_translated_source_patch(
+        self,
+        patch_volume: NiftiLoadResult,
+        *,
+        bounds: PatchBounds,
+        source_shape: tuple[int, int, int],
+        direction: str,
+        actual_voxels: int,
+        segmentation_volume: NiftiLoadResult | None,
+        annotation_mask: AnnotationMask | None,
+        projection_mask_layers: Sequence[tuple[str, str, NiftiLoadResult]],
+        active_segmentation_kind: str | None,
+        annotation_editing_enabled: bool,
+        discard_local_work: bool,
+    ) -> dict[str, bool]:
+        """Atomically replace this window with a translated source patch."""
+        if active_segmentation_kind not in {None, "file", "annotation"}:
+            raise ValueError(
+                "Active segmentation kind must be file, annotation, or None."
+            )
+        expected_shape = patch_bounds_shape(bounds)
+        self._validate_translated_patch_shape(
+            "Image",
+            patch_volume.shape,
+            expected_shape,
+        )
+        if segmentation_volume is not None:
+            self._validate_translated_patch_shape(
+                "Segmentation",
+                segmentation_volume.shape,
+                expected_shape,
+            )
+        if annotation_mask is not None:
+            self._validate_translated_patch_shape(
+                "Annotation",
+                annotation_mask.shape,
+                expected_shape,
+            )
+        for _segmentation_id, display_name, mask_volume in projection_mask_layers:
+            self._validate_translated_patch_shape(
+                f"Projection mask '{display_name}'",
+                mask_volume.shape,
+                expected_shape,
+            )
+
+        history_reset = self._patch_history.has_operations()
+        graph_reset = self._has_persistent_graph_content()
+        if (history_reset or graph_reset) and not discard_local_work:
+            raise ValueError(
+                "Patch movement would reset local processing history or graph "
+                "annotations. Save the local work and confirm reset first."
+            )
+
+        zoom_factor = self.slice_viewer.zoom_state.zoom_factor()
+        self.setUpdatesEnabled(False)
+        try:
+            if graph_reset:
+                self.graph_state.clear_graph()
+            self._source_patch_bounds = bounds
+            self._source_image_shape = tuple(int(value) for value in source_shape)
+            self._patch_center = patch_bounds_center(bounds)
+            self._patch_size = expected_shape
+            self._patch_volume = patch_volume
+            self._patch_data = patch_volume.data
+            self._patch_history.reset(patch_volume.data)
+            self._replace_patch_viewer_volume(patch_volume)
+            self.update_segmentation_overlay(
+                segmentation_volume,
+                opacity=self._segmentation_opacity,
+                active_segmentation_kind=active_segmentation_kind,
+            )
+            self.update_annotation_overlay(
+                annotation_mask,
+                opacity=self._annotation_opacity,
+                visible=self._annotation_visible,
+                active_label=self._annotation_active_label,
+                editing_enabled=annotation_editing_enabled,
+                brush_radius=self.annotation_panel.current_brush_radius(),
+                brush_mode=self.annotation_panel.current_brush_mode(),
+            )
+            self.update_projection_mask_layers(projection_mask_layers)
+            self.slice_viewer.zoom_state.set_zoom_factor(zoom_factor)
+            self.slice_viewer.refresh_graph_overlay()
+            self._refresh_graph_panel_tool_state()
+            self._refresh_patch_history_panel()
+            self.patch_position_panel.record_applied_movement(
+                direction,
+                actual_voxels,
+            )
+            self.patch_position_panel.set_source_geometry(bounds, source_shape)
+            self.statusBar().showMessage(
+                f"Moved patch {actual_voxels} voxel(s) toward {direction}"
+            )
+        finally:
+            self.setUpdatesEnabled(True)
+            self.update()
+
+        return {
+            "history_reset": history_reset,
+            "graph_reset": graph_reset,
+        }
+
+    def translation_failed(self, message: str) -> None:
+        self.patch_position_panel.cancel_movement()
+        self.statusBar().showMessage(message)
+
+    @staticmethod
+    def _validate_translated_patch_shape(
+        name: str,
+        shape: tuple[int, ...],
+        expected_shape: tuple[int, int, int],
+    ) -> None:
+        normalized_shape = tuple(int(value) for value in shape)
+        if normalized_shape != expected_shape:
+            raise ValueError(
+                f"{name} translated patch shape {normalized_shape} does not match "
+                f"bounds shape {expected_shape}."
+            )
+
+    def _on_patch_position_movement_requested(self, direction: str) -> None:
+        discard_local_work = False
+        if self.has_discardable_local_work():
+            response = QMessageBox.question(
+                self,
+                "Move Patch and Reset Local Work?",
+                (
+                    "Moving the patch reloads source voxels and resets Patch "
+                    "History and patch-local graph annotations. Save any local "
+                    "work before continuing.\n\nContinue and reset local work?"
+                ),
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel,
+            )
+            if response != QMessageBox.StandardButton.Yes:
+                self.patch_position_panel.cancel_movement()
+                self.statusBar().showMessage("Patch movement canceled")
+                return
+            discard_local_work = True
+        self.patch_translation_requested.emit(
+            self,
+            direction,
+            1,
+            discard_local_work,
+        )
+
+    def _on_patch_position_movement_finished(
+        self,
+        direction: str,
+        voxels: int,
+    ) -> None:
+        self.statusBar().showMessage(
+            f"Moved patch {voxels} voxel(s) toward {direction}"
+        )
 
     def update_segmentation_overlay(
         self,
@@ -3101,6 +3309,15 @@ class PatchViewerWindow(QMainWindow):
             patch_size_xyz=patch_size,
             patch_selection_enabled=patch_enabled,
         )
+
+    def changeEvent(self, event: QEvent) -> None:
+        super().changeEvent(event)
+        if (
+            event.type() == QEvent.Type.ActivationChange
+            and hasattr(self, "patch_position_panel")
+            and not self.isActiveWindow()
+        ):
+            self.patch_position_panel.stop_movement()
 
     def resizeEvent(self, event: QResizeEvent) -> None:
         super().resizeEvent(event)

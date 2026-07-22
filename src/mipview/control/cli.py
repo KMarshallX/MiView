@@ -206,6 +206,33 @@ def _build_parser() -> argparse.ArgumentParser:
         default=100,
         help="Output resolution from 1 to 200 percent (default: 100).",
     )
+    patch_translate = patch_subparsers.add_parser(
+        "translate",
+        help="Move an open patch window in an anatomical direction.",
+        description=(
+            "Translate an open patch window within its source image while "
+            "preserving its dimensions."
+        ),
+        formatter_class=_HelpFormatter,
+    )
+    patch_translate.add_argument("session_id", metavar="SESSION_ID")
+    patch_translate.add_argument(
+        "direction",
+        metavar="DIRECTION",
+        choices=("L", "R", "A", "P", "S", "I"),
+        type=str.upper,
+    )
+    patch_translate.add_argument(
+        "--voxels",
+        type=int,
+        default=1,
+        help="Positive number of voxels to move (default: 1).",
+    )
+    patch_translate.add_argument(
+        "--discard-local-work",
+        action="store_true",
+        help="Allow translation to reset patch history and graph annotations.",
+    )
 
     projection_parser = subparsers.add_parser(
         "projection",
@@ -576,6 +603,17 @@ def _command_from_args(args: argparse.Namespace) -> tuple[str, dict[str, Any], A
                     "session_id": args.session_id,
                     "path": args.path,
                     "resolution_percent": args.resolution_percent,
+                },
+                None,
+            )
+        if args.patch_command == "translate":
+            return (
+                "patch.translate",
+                {
+                    "session_id": args.session_id,
+                    "direction": args.direction,
+                    "voxels": args.voxels,
+                    "discard_local_work": bool(args.discard_local_work),
                 },
                 None,
             )

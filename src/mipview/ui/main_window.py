@@ -32,7 +32,13 @@ from mipview.annotation import (
 from mipview.io.nifti_io import NiftiLoadResult, load_nifti
 from mipview.graph.io import GraphLoadResult, read_graph_restore_metadata
 from mipview.patch.extractor import extract_patch
-from mipview.patch.selector import PatchBounds
+from mipview.patch.selector import (
+    PatchBounds,
+    anatomical_direction_delta,
+    patch_bounds_center,
+    patch_bounds_shape,
+    translate_patch_bounds,
+)
 from mipview.segmentation.models import LoadedSegmentation
 from mipview.segmentation.validation import validate_segmentation_compatibility
 from mipview.state.app_state import AppState
@@ -490,6 +496,9 @@ class MainWindow(QMainWindow):
             ),
             source_image_path=self.state.loaded_file_path,
             source_patch_bounds=bounds,
+            source_image_shape=tuple(
+                int(value) for value in self.state.volume.shape[:3]
+            ),
             patch_center=center,
             patch_size=patch_size,
         )
@@ -529,6 +538,9 @@ class MainWindow(QMainWindow):
         patch_window.open_segmentation_configuration_requested.connect(
             self._on_open_segmentation_configuration
         )
+        patch_window.patch_translation_requested.connect(
+            self._on_patch_translation_requested
+        )
         self._sync_patch_window_segmentation_menu_state(patch_window)
         return patch_window
 
@@ -540,6 +552,173 @@ class MainWindow(QMainWindow):
             if patch_window in self._patch_windows
             else None
         )
+
+    def translate_patch_window(
+        self,
+        patch_window: PatchViewerWindow,
+        direction: str,
+        voxels: int = 1,
+        *,
+        discard_local_work: bool = False,
+    ) -> dict[str, object]:
+        if self.state.volume is None:
+            raise ValueError("The source image is no longer loaded.")
+        if patch_window not in self._patch_windows:
+            raise ValueError("The requested patch window is not open.")
+        if patch_window.source_image_path() != self.state.loaded_file_path:
+            raise ValueError(
+                "The patch window's source image is not the currently loaded image."
+            )
+        bounds = patch_window.source_patch_bounds()
+        if bounds is None:
+            raise ValueError("The patch window has no source-image bounds.")
+        if patch_window.has_discardable_local_work() and not discard_local_work:
+            raise ValueError(
+                "Patch movement would reset local processing history or graph "
+                "annotations. Save the local work and set discard_local_work=true."
+            )
+
+        normalized_direction = str(direction).strip().upper()
+        requested_voxels = int(voxels)
+        requested_delta = anatomical_direction_delta(
+            normalized_direction,
+            requested_voxels,
+        )
+        source_shape = tuple(int(value) for value in self.state.volume.shape[:3])
+        translated_bounds, actual_delta = translate_patch_bounds(
+            bounds,
+            requested_delta,
+            source_shape,
+        )
+        actual_voxels = max(abs(value) for value in actual_delta)
+        moving_axis = next(
+            axis for axis, component in enumerate(requested_delta) if component != 0
+        )
+        translated_starts = (
+            translated_bounds.x_start,
+            translated_bounds.y_start,
+            translated_bounds.z_start,
+        )
+        translated_ends = (
+            translated_bounds.x_end,
+            translated_bounds.y_end,
+            translated_bounds.z_end,
+        )
+        boundary_reached = (
+            actual_voxels < requested_voxels
+            or (
+                requested_delta[moving_axis] < 0
+                and translated_starts[moving_axis] == 0
+            )
+            or (
+                requested_delta[moving_axis] > 0
+                and translated_ends[moving_axis] == source_shape[moving_axis]
+            )
+        )
+        if actual_voxels == 0:
+            patch_window.patch_position_panel.set_source_geometry(bounds, source_shape)
+            patch_window.patch_position_panel.stop_movement()
+            return self._patch_translation_result(
+                patch_window,
+                normalized_direction,
+                requested_voxels,
+                actual_voxels,
+                actual_delta,
+                boundary_reached=True,
+                history_reset=False,
+                graph_reset=False,
+            )
+
+        patch_volume = extract_patch(self.state.volume, translated_bounds)
+        active_segmentation = self._active_segmentation()
+        segmentation_volume = (
+            extract_patch(active_segmentation.volume, translated_bounds)
+            if active_segmentation is not None and active_segmentation.kind == "file"
+            else None
+        )
+        annotation_mask = self._extract_active_annotation_patch(translated_bounds)
+        projection_mask_layers = self._projection_mask_layers_for_bounds(
+            translated_bounds
+        )
+        reset_state = patch_window.apply_translated_source_patch(
+            patch_volume,
+            bounds=translated_bounds,
+            source_shape=source_shape,
+            direction=normalized_direction,
+            actual_voxels=actual_voxels,
+            segmentation_volume=segmentation_volume,
+            annotation_mask=annotation_mask,
+            projection_mask_layers=projection_mask_layers,
+            active_segmentation_kind=(
+                None if active_segmentation is None else active_segmentation.kind
+            ),
+            annotation_editing_enabled=(
+                self.state.annotation.editing_enabled and annotation_mask is not None
+            ),
+            discard_local_work=discard_local_work,
+        )
+        return self._patch_translation_result(
+            patch_window,
+            normalized_direction,
+            requested_voxels,
+            actual_voxels,
+            actual_delta,
+            boundary_reached=boundary_reached,
+            history_reset=reset_state["history_reset"],
+            graph_reset=reset_state["graph_reset"],
+        )
+
+    def _on_patch_translation_requested(
+        self,
+        patch_window: PatchViewerWindow,
+        direction: str,
+        voxels: int,
+        discard_local_work: bool,
+    ) -> None:
+        try:
+            self.translate_patch_window(
+                patch_window,
+                direction,
+                voxels,
+                discard_local_work=discard_local_work,
+            )
+        except (TypeError, ValueError) as exc:
+            patch_window.translation_failed(str(exc))
+
+    @staticmethod
+    def _patch_translation_result(
+        patch_window: PatchViewerWindow,
+        direction: str,
+        requested_voxels: int,
+        actual_voxels: int,
+        actual_delta: tuple[int, int, int],
+        *,
+        boundary_reached: bool,
+        history_reset: bool,
+        graph_reset: bool,
+    ) -> dict[str, object]:
+        bounds = patch_window.source_patch_bounds()
+        return {
+            "session_id": patch_window.graph_session_id,
+            "direction": direction,
+            "requested_voxels": requested_voxels,
+            "actual_voxels": actual_voxels,
+            "actual_delta": list(actual_delta),
+            "bounds": (
+                None
+                if bounds is None
+                else {
+                    "x": [bounds.x_start, bounds.x_end],
+                    "y": [bounds.y_start, bounds.y_end],
+                    "z": [bounds.z_start, bounds.z_end],
+                }
+            ),
+            "center": None if bounds is None else list(patch_bounds_center(bounds)),
+            "shape": None if bounds is None else list(patch_bounds_shape(bounds)),
+            "boundary_reached": boundary_reached,
+            "history_reset": history_reset,
+            "graph_reset": graph_reset,
+        }
 
     def _on_patch_selection_changed(self, bounds: object) -> None:
         self.state.selected_patch_bounds = bounds if isinstance(bounds, PatchBounds) else None

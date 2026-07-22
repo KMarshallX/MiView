@@ -49,6 +49,7 @@ class CommandRegistry:
         self.register("patch.size", self.controller.set_patch_size)
         self.register("patch.center", self.controller.set_patch_center)
         self.register("patch.select", self.controller.select_patch)
+        self.register("patch.translate", self.controller.translate_patch_window)
         self.register("patch.export_raw", self.controller.export_raw_patch)
         self.register("patch.save", self.controller.save_patch)
         self.register("patch.screenshot", self.controller.capture_patch_screenshot)

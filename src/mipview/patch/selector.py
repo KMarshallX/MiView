@@ -13,6 +13,15 @@ from mipview.viewer.slice_geometry import (
 
 DEFAULT_PATCH_SIZE = (64, 64, 10)
 
+ANATOMICAL_DIRECTION_DELTAS = {
+    "L": (-1, 0, 0),
+    "R": (1, 0, 0),
+    "A": (0, -1, 0),
+    "P": (0, 1, 0),
+    "S": (0, 0, -1),
+    "I": (0, 0, 1),
+}
+
 
 @dataclass(frozen=True)
 class PatchBounds:
@@ -62,10 +71,27 @@ class PatchSelector:
         self._center = None
 
     def set_volume_shape(self, shape: tuple[int, int, int]) -> None:
-        self._volume_shape = shape
+        if len(shape) != 3 or any(int(length) <= 0 for length in shape):
+            raise ValueError(f"Expected a positive 3D volume shape, got {shape}.")
+        self._volume_shape = tuple(int(length) for length in shape)
+        if self._center is not None:
+            self._center = _clamp_patch_center(
+                self._center,
+                self._size,
+                self._volume_shape,
+            )
 
     def set_center(self, center: tuple[int, int, int]) -> None:
-        self._center = center
+        normalized_center = tuple(int(index) for index in center)
+        self._center = (
+            normalized_center
+            if self._volume_shape is None
+            else _clamp_patch_center(
+                normalized_center,
+                self._size,
+                self._volume_shape,
+            )
+        )
 
     def center(self) -> tuple[int, int, int] | None:
         return self._center
@@ -96,6 +122,12 @@ class PatchSelector:
 
         current[axis] = clamped_size
         self._size = tuple(current)
+        if self._center is not None and self._volume_shape is not None:
+            self._center = _clamp_patch_center(
+                self._center,
+                self._size,
+                self._volume_shape,
+            )
         return True
 
     def current_bounds(self) -> PatchBounds | None:
@@ -120,6 +152,79 @@ def compute_patch_bounds(
         z_start=z_start,
         z_end=z_end,
     )
+
+
+def translate_patch_bounds(
+    bounds: PatchBounds,
+    delta_xyz: tuple[int, int, int],
+    volume_shape: tuple[int, int, int],
+) -> tuple[PatchBounds, tuple[int, int, int]]:
+    """Translate fixed-size bounds inside a volume and return the applied delta."""
+    if len(volume_shape) != 3 or any(int(length) <= 0 for length in volume_shape):
+        raise ValueError(f"Expected a positive 3D volume shape, got {volume_shape}.")
+
+    starts = (bounds.x_start, bounds.y_start, bounds.z_start)
+    ends = (bounds.x_end, bounds.y_end, bounds.z_end)
+    new_starts: list[int] = []
+    actual_delta: list[int] = []
+    for axis, (start, end, requested_delta, axis_length) in enumerate(
+        zip(starts, ends, delta_xyz, volume_shape, strict=True)
+    ):
+        extent = int(end) - int(start)
+        if extent <= 0 or start < 0 or end > axis_length:
+            raise ValueError(
+                f"Patch bounds are invalid on axis {axis}: "
+                f"[{start}, {end}) for length {axis_length}."
+            )
+        maximum_start = int(axis_length) - extent
+        translated_start = min(
+            max(int(start) + int(requested_delta), 0),
+            maximum_start,
+        )
+        new_starts.append(translated_start)
+        actual_delta.append(translated_start - int(start))
+
+    extents = tuple(end - start for start, end in zip(starts, ends, strict=True))
+    translated = PatchBounds(
+        x_start=new_starts[0],
+        x_end=new_starts[0] + extents[0],
+        y_start=new_starts[1],
+        y_end=new_starts[1] + extents[1],
+        z_start=new_starts[2],
+        z_end=new_starts[2] + extents[2],
+    )
+    return translated, tuple(actual_delta)
+
+
+def patch_bounds_center(bounds: PatchBounds) -> tuple[int, int, int]:
+    """Return the center convention used by fixed-size patch selection."""
+    return (
+        bounds.x_start + ((bounds.x_end - bounds.x_start) // 2),
+        bounds.y_start + ((bounds.y_end - bounds.y_start) // 2),
+        bounds.z_start + ((bounds.z_end - bounds.z_start) // 2),
+    )
+
+
+def patch_bounds_shape(bounds: PatchBounds) -> tuple[int, int, int]:
+    return (
+        bounds.x_end - bounds.x_start,
+        bounds.y_end - bounds.y_start,
+        bounds.z_end - bounds.z_start,
+    )
+
+
+def anatomical_direction_delta(
+    direction: str,
+    voxels: int = 1,
+) -> tuple[int, int, int]:
+    normalized_direction = str(direction).strip().upper()
+    if normalized_direction not in ANATOMICAL_DIRECTION_DELTAS:
+        raise ValueError("Patch direction must be L, R, A, P, S, or I.")
+    normalized_voxels = int(voxels)
+    if normalized_voxels <= 0:
+        raise ValueError("Patch translation voxels must be positive.")
+    unit_delta = ANATOMICAL_DIRECTION_DELTAS[normalized_direction]
+    return tuple(component * normalized_voxels for component in unit_delta)
 
 
 def source_bounds_to_display_bounds(
@@ -250,10 +355,31 @@ def _bounds_corners(bounds: PatchBounds) -> list[tuple[int, int, int]]:
 
 
 def _axis_bounds(center: int, size: int, axis_length: int) -> tuple[int, int]:
-    requested_size = _clamp_patch_size(size)
-    start = center - (requested_size // 2)
-    end = start + requested_size
-    return max(start, 0), min(end, axis_length)
+    if axis_length <= 0:
+        raise ValueError(f"Patch axis length must be positive, got {axis_length}.")
+    effective_size = min(_clamp_patch_size(size), int(axis_length))
+    requested_start = int(center) - (effective_size // 2)
+    start = min(max(requested_start, 0), int(axis_length) - effective_size)
+    return start, start + effective_size
+
+
+def _clamp_patch_center(
+    center: tuple[int, int, int],
+    size: tuple[int, int, int],
+    volume_shape: tuple[int, int, int],
+) -> tuple[int, int, int]:
+    clamped: list[int] = []
+    for center_index, requested_size, axis_length in zip(
+        center,
+        size,
+        volume_shape,
+        strict=True,
+    ):
+        effective_size = min(_clamp_patch_size(requested_size), int(axis_length))
+        lower = effective_size // 2
+        upper = int(axis_length) - (effective_size - lower)
+        clamped.append(min(max(int(center_index), lower), upper))
+    return tuple(clamped)
 
 
 def _clamp_patch_size(size: int) -> int:

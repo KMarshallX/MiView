@@ -6,7 +6,6 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QFormLayout,
-    QGroupBox,
     QHBoxLayout,
     QPushButton,
     QSizePolicy,
@@ -15,6 +14,8 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+from mipview.ui.collapsible_group_box import CollapsibleGroupBox
 
 
 class AnnotationPanel(QWidget):
@@ -53,22 +54,22 @@ class AnnotationPanel(QWidget):
         self._annotation_editing_enabled = False
         self._show_file_actions = bool(show_file_actions)
 
-        group = QGroupBox("Annotation", self)
-        form = QFormLayout(group)
+        self.group = CollapsibleGroupBox("Annotation", self)
+        form = QFormLayout(self.group)
         if adaptable_width:
             form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
 
-        self.create_button = QPushButton("Create", group)
+        self.create_button = QPushButton("Create", self.group)
         self.create_button.clicked.connect(self.create_requested.emit)
-        self.load_button = QPushButton("Load", group)
+        self.load_button = QPushButton("Load", self.group)
         self.load_button.clicked.connect(self.load_requested.emit)
-        self.save_button = QPushButton("Save", group)
+        self.save_button = QPushButton("Save", self.group)
         self.save_button.clicked.connect(self.save_requested.emit)
         if not self._show_file_actions:
             self.load_button.setVisible(False)
             self.save_button.setVisible(False)
 
-        action_row = QWidget(group)
+        action_row = QWidget(self.group)
         action_layout = (
             QVBoxLayout(action_row) if adaptable_width else QHBoxLayout(action_row)
         )
@@ -77,27 +78,27 @@ class AnnotationPanel(QWidget):
         if self._show_file_actions:
             action_layout.addWidget(self.load_button)
 
-        self.visible_checkbox = QCheckBox("Visible", group)
+        self.visible_checkbox = QCheckBox("Visible", self.group)
         self.visible_checkbox.setChecked(True)
         self.visible_checkbox.toggled.connect(self.visibility_changed.emit)
 
-        self.opacity_slider = QSlider(Qt.Orientation.Horizontal, group)
+        self.opacity_slider = QSlider(Qt.Orientation.Horizontal, self.group)
         self.opacity_slider.setRange(0, 100)
         self.opacity_slider.setValue(50)
         self.opacity_slider.valueChanged.connect(self._on_opacity_changed)
 
-        self.active_label_spinbox = QSpinBox(group)
+        self.active_label_spinbox = QSpinBox(self.group)
         self.active_label_spinbox.setRange(1, 65535)
         self.active_label_spinbox.setValue(1)
         self.active_label_spinbox.valueChanged.connect(self.active_label_changed.emit)
 
-        self.brush_radius_spinbox = QSpinBox(group)
+        self.brush_radius_spinbox = QSpinBox(self.group)
         self.brush_radius_spinbox.setRange(0, 99)
         self.brush_radius_spinbox.setValue(1)
         self.brush_radius_spinbox.setSuffix(" vox")
         self.brush_radius_spinbox.valueChanged.connect(self.brush_radius_changed.emit)
 
-        mode_row = QWidget(group)
+        mode_row = QWidget(self.group)
         mode_layout = (
             QVBoxLayout(mode_row) if adaptable_width else QHBoxLayout(mode_row)
         )
@@ -127,14 +128,14 @@ class AnnotationPanel(QWidget):
         mode_layout.addWidget(self.cursor_button)
         mode_layout.addWidget(self.erase_button)
 
-        self.export_combobox = QComboBox(group)
+        self.export_combobox = QComboBox(self.group)
         self.export_combobox.addItem("NIFTI file", self.EXPORT_NIFTI)
         self.export_combobox.addItem("JSON metadata", self.EXPORT_JSON)
         self.export_combobox.addItem("Both", self.EXPORT_BOTH)
         if not self._show_file_actions:
             self.export_combobox.setVisible(False)
 
-        self.undo_button = QPushButton("Undo", group)
+        self.undo_button = QPushButton("Undo", self.group)
         self.undo_button.setEnabled(False)
         self.undo_button.clicked.connect(self.undo_requested.emit)
 
@@ -150,7 +151,7 @@ class AnnotationPanel(QWidget):
         form.addRow(self.undo_button)
 
         layout = QVBoxLayout(self)
-        layout.addWidget(group)
+        layout.addWidget(self.group)
         layout.setContentsMargins(8, 0, 8, 8)
 
         self.set_image_loaded(False)
@@ -231,6 +232,16 @@ class AnnotationPanel(QWidget):
         if export_type in {self.EXPORT_JSON, self.EXPORT_BOTH}:
             return str(export_type)
         return self.EXPORT_NIFTI
+
+    def current_brush_radius(self) -> int:
+        return self.brush_radius_spinbox.value()
+
+    def current_brush_mode(self) -> str:
+        if self.erase_button.isChecked():
+            return "erase"
+        if self.cursor_button.isChecked():
+            return "cursor"
+        return "paint"
 
     def _on_opacity_changed(self, value: int) -> None:
         self.opacity_changed.emit(value / 100.0)

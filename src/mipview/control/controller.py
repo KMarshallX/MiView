@@ -174,6 +174,39 @@ class MipViewController:
             },
         )
 
+    def translate_patch_window(
+        self,
+        session_id: str,
+        direction: str,
+        voxels: int = 1,
+        discard_local_work: bool = False,
+    ) -> CommandResult:
+        patch_window = self._graph_patch_window(session_id)
+        if patch_window is None:
+            return CommandResult(
+                False,
+                f"Patch window session was not found: {session_id}",
+                {"session_id": str(session_id)},
+            )
+        translate = getattr(self.main_window, "translate_patch_window", None)
+        if not callable(translate):
+            return CommandResult(False, "Patch-window translation is unavailable.")
+        try:
+            data = translate(
+                patch_window,
+                direction,
+                int(voxels),
+                discard_local_work=bool(discard_local_work),
+            )
+        except (TypeError, ValueError) as exc:
+            return CommandResult(False, str(exc), {"session_id": str(session_id)})
+        message = (
+            "Patch is already at the requested boundary."
+            if data["actual_voxels"] == 0
+            else "Patch window translated."
+        )
+        return CommandResult(True, message, data)
+
     def save_patch(self, path: str) -> CommandResult:
         selected_patch = self.main_window.state.selected_patch_data
         if selected_patch is None:

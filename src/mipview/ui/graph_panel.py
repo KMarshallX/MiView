@@ -4,7 +4,6 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
     QFormLayout,
-    QGroupBox,
     QHBoxLayout,
     QLabel,
     QListWidget,
@@ -14,6 +13,8 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+from mipview.ui.collapsible_group_box import CollapsibleGroupBox
 
 
 class GraphPanel(QWidget):
@@ -51,38 +52,38 @@ class GraphPanel(QWidget):
         else:
             self.setFixedWidth(self.PANEL_WIDTH)
 
-        group = QGroupBox("Graph", self)
-        form = QFormLayout(group)
+        self.group = CollapsibleGroupBox("Graph", self)
+        form = QFormLayout(self.group)
         if adaptable_width:
             form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
 
-        self.activation_button = QPushButton("Activate", group)
+        self.activation_button = QPushButton("Activate", self.group)
         self.activation_button.clicked.connect(self.activation_requested.emit)
 
-        self.visible_checkbox = QCheckBox("Visible", group)
+        self.visible_checkbox = QCheckBox("Visible", self.group)
         self.visible_checkbox.setChecked(True)
         self.visible_checkbox.toggled.connect(self.visibility_changed.emit)
 
-        self.opacity_slider = QSlider(Qt.Orientation.Horizontal, group)
+        self.opacity_slider = QSlider(Qt.Orientation.Horizontal, self.group)
         self.opacity_slider.setRange(0, 100)
         self.opacity_slider.setValue(100)
         self.opacity_slider.valueChanged.connect(
             lambda value: self.opacity_changed.emit(value / 100.0)
         )
 
-        self.node_size_slider = QSlider(Qt.Orientation.Horizontal, group)
+        self.node_size_slider = QSlider(Qt.Orientation.Horizontal, self.group)
         self.node_size_slider.setRange(1, 10)
         self.node_size_slider.setValue(4)
         self.node_size_slider.valueChanged.connect(self.node_size_changed.emit)
 
-        self.edge_thickness_slider = QSlider(Qt.Orientation.Horizontal, group)
+        self.edge_thickness_slider = QSlider(Qt.Orientation.Horizontal, self.group)
         self.edge_thickness_slider.setRange(1, 10)
         self.edge_thickness_slider.setValue(2)
         self.edge_thickness_slider.valueChanged.connect(
             self.edge_thickness_changed.emit
         )
 
-        tool_row = QWidget(group)
+        tool_row = QWidget(self.group)
         tool_layout = (
             QVBoxLayout(tool_row) if adaptable_width else QHBoxLayout(tool_row)
         )
@@ -98,10 +99,10 @@ class GraphPanel(QWidget):
         )
         tool_layout.addWidget(self.straighten_edge_button)
 
-        self.clear_graph_button = QPushButton("Clear All Nodes & Edges", group)
+        self.clear_graph_button = QPushButton("Clear All Nodes & Edges", self.group)
         self.clear_graph_button.clicked.connect(self.clear_graph_requested.emit)
 
-        file_row = QWidget(group)
+        file_row = QWidget(self.group)
         file_layout = (
             QVBoxLayout(file_row) if adaptable_width else QHBoxLayout(file_row)
         )
@@ -114,12 +115,12 @@ class GraphPanel(QWidget):
         self.load_state_button.clicked.connect(self.load_state_requested.emit)
         file_layout.addWidget(self.load_state_button)
 
-        self.calculate_angle_button = QPushButton("Calculate Angle", group)
+        self.calculate_angle_button = QPushButton("Calculate Angle", self.group)
         self.calculate_angle_button.setCheckable(True)
         self.calculate_angle_button.toggled.connect(
             self.calculate_angle_requested.emit
         )
-        angle_action_row = QWidget(group)
+        angle_action_row = QWidget(self.group)
         angle_action_layout = (
             QVBoxLayout(angle_action_row)
             if adaptable_width
@@ -136,10 +137,10 @@ class GraphPanel(QWidget):
         self.clear_angles_button = QPushButton("Clear All", angle_action_row)
         self.clear_angles_button.clicked.connect(self.clear_angles_requested.emit)
         angle_action_layout.addWidget(self.clear_angles_button)
-        self.angle_step_label = QLabel("Select Calculate Angle to begin", group)
+        self.angle_step_label = QLabel("Select Calculate Angle to begin", self.group)
         self.angle_step_label.setWordWrap(True)
-        self.angle_source_label = QLabel("Source: —", group)
-        self.angle_measurement_list = QListWidget(group)
+        self.angle_source_label = QLabel("Source: —", self.group)
+        self.angle_measurement_list = QListWidget(self.group)
         self.angle_measurement_list.setMaximumHeight(96)
         self.angle_measurement_list.itemSelectionChanged.connect(
             self._refresh_angle_buttons
@@ -160,7 +161,7 @@ class GraphPanel(QWidget):
         form.addRow(file_row)
 
         layout = QVBoxLayout(self)
-        layout.addWidget(group)
+        layout.addWidget(self.group)
         layout.setContentsMargins(8, 0, 8, 8)
 
         self.set_projection_available(False)

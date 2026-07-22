@@ -20,6 +20,7 @@ Most state-changing commands require a NIfTI image to already be loaded in the r
 - [`patch.size`](#patchsize)
 - [`patch.center`](#patchcenter)
 - [`patch.select`](#patchselect)
+- [`patch.translate`](#patchtranslate)
 - [`patch.export_raw`](#patchexport_raw)
 - [`patch.save`](#patchsave)
 - [`patch.screenshot`](#patchscreenshot)
@@ -371,6 +372,26 @@ mipview-ctl patch screenshot SESSION_ID ./triplanar.png --resolution-percent 150
 The matching direct command is `patch.screenshot` with `session_id`, `path`, and
 `resolution_percent`. Resolution must be from 1 through 200 and defaults to 100.
 PNG and JPEG are supported; JPEG uses fixed encoding quality 95.
+
+### `patch.translate`
+
+Move one open patch window within its source image while preserving its shape.
+Directions use canonical RPI anatomical axes. Translation refreshes the image,
+segmentation, annotation, projection masks, and active MIP/MinIP views without
+moving the main-window patch selector or other patch windows.
+
+```bash
+mipview-ctl patch translate SESSION_ID R
+mipview-ctl patch translate SESSION_ID S --voxels 5
+mipview-ctl patch translate SESSION_ID P --discard-local-work
+```
+
+The direct command is `patch.translate` with `session_id`, `direction`, optional
+positive `voxels` (default `1`), and optional `discard_local_work` (default
+`false`). Directions are `L`, `R`, `A`, `P`, `S`, and `I`. If processing history
+or graph annotations exist, the command fails unless `discard_local_work` is
+true. Results include requested and actual displacement, bounds, center, shape,
+boundary status, and reset status.
 
 ### `projection.mode`
 
