@@ -1,7 +1,13 @@
 from __future__ import annotations
 
 from PySide6.QtCore import QElapsedTimer, QEvent, QObject, QTimer, Qt, Signal
-from PySide6.QtWidgets import QFormLayout, QHBoxLayout, QToolButton, QWidget
+from PySide6.QtWidgets import (
+    QCheckBox,
+    QFormLayout,
+    QHBoxLayout,
+    QToolButton,
+    QWidget,
+)
 
 from mipview.patch.selector import PatchBounds
 from mipview.ui.collapsible_group_box import CollapsibleGroupBox
@@ -28,6 +34,7 @@ class PatchPositionPanel(CollapsibleGroupBox):
 
     movement_requested = Signal(str)
     movement_finished = Signal(str, int)
+    display_location_changed = Signal(bool)
 
     INITIAL_REPEAT_DELAY_MS = 400
     ACCELERATION_STAGE_MS = 750
@@ -61,6 +68,12 @@ class PatchPositionPanel(CollapsibleGroupBox):
                 self._make_button(positive_direction, Qt.ArrowType.RightArrow)
             )
             form.addRow(label, row)
+
+        self.display_location_checkbox = QCheckBox(self)
+        self.display_location_checkbox.toggled.connect(
+            self.display_location_changed.emit
+        )
+        form.addRow("Display Patch Location:", self.display_location_checkbox)
 
         self._refresh_button_availability()
 

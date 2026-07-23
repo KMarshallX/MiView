@@ -45,6 +45,16 @@ class CommandRegistry:
         self.register("viewer.status", self.controller.get_status)
         self.register("viewer.screenshot", self.controller.capture_screenshot)
         self.register("viewer.export_state", self.controller.export_viewer_state)
+        self.register("render3d.status", self.controller.get_render3d_status)
+        self.register("render3d.activate", self.controller.set_render3d_active)
+        self.register("render3d.select", self.controller.select_render3d_source)
+        self.register("render3d.update", self.controller.update_render3d)
+        self.register("render3d.set_display", self.controller.set_render3d_display)
+        self.register("render3d.reset_camera", self.controller.reset_render3d_camera)
+        self.register(
+            "patch.display_location",
+            self.controller.set_patch_location_display,
+        )
         self.register("cursor.move", self.controller.move_cursor)
         self.register("patch.size", self.controller.set_patch_size)
         self.register("patch.center", self.controller.set_patch_center)

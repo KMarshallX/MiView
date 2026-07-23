@@ -196,7 +196,7 @@ def _build_parser() -> argparse.ArgumentParser:
     patch_save.add_argument("path", metavar="PATH", help="Output NIfTI path.")
     patch_screenshot = patch_subparsers.add_parser(
         "screenshot",
-        help="Save an open patch window's triplanar viewer.",
+        help="Save an open patch window's 2×2 viewer.",
     )
     patch_screenshot.add_argument("session_id", metavar="SESSION_ID")
     patch_screenshot.add_argument("path", metavar="PATH")
@@ -233,6 +233,43 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Allow translation to reset patch history and graph annotations.",
     )
+    patch_location = patch_subparsers.add_parser(
+        "display-location",
+        help="Show or hide a patch window's full-source 3D locator.",
+    )
+    patch_location.add_argument("session_id", metavar="SESSION_ID")
+    patch_location.add_argument("visibility", choices=("show", "hide"))
+
+    render_parser = subparsers.add_parser(
+        "render3d",
+        help="Control the manually refreshed 3D NIfTI viewer.",
+        formatter_class=_HelpFormatter,
+    )
+    render_subparsers = render_parser.add_subparsers(
+        dest="render3d_command",
+        required=True,
+    )
+    for command in ("status", "activate", "dismiss", "update", "reset-camera"):
+        command_parser = render_subparsers.add_parser(command)
+        command_parser.add_argument(
+            "--session-id",
+            default=None,
+            help="Optional patch-window session; omit for the main window.",
+        )
+    render_select = render_subparsers.add_parser("select")
+    render_select.add_argument("source_id")
+    render_select.add_argument("--session-id", default=None)
+    render_display = render_subparsers.add_parser("display")
+    render_display.add_argument("--session-id", default=None)
+    render_display.add_argument(
+        "--visible",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+    )
+    render_display.add_argument("--opacity", type=float, default=None)
+    render_display.add_argument("--colour", type=int, nargs=3, default=None)
+    render_display.add_argument("--mode", default=None)
+    render_display.add_argument("--threshold", type=float, default=None)
 
     projection_parser = subparsers.add_parser(
         "projection",
@@ -614,6 +651,52 @@ def _command_from_args(args: argparse.Namespace) -> tuple[str, dict[str, Any], A
                     "direction": args.direction,
                     "voxels": args.voxels,
                     "discard_local_work": bool(args.discard_local_work),
+                },
+                None,
+            )
+        if args.patch_command == "display-location":
+            return (
+                "patch.display_location",
+                {
+                    "session_id": args.session_id,
+                    "visible": args.visibility == "show",
+                },
+                None,
+            )
+
+    if args.group == "render3d":
+        common = {"session_id": args.session_id}
+        if args.render3d_command == "status":
+            return "render3d.status", common, None
+        if args.render3d_command in {"activate", "dismiss"}:
+            return (
+                "render3d.activate",
+                {
+                    **common,
+                    "active": args.render3d_command == "activate",
+                },
+                None,
+            )
+        if args.render3d_command == "select":
+            return (
+                "render3d.select",
+                {**common, "source_id": args.source_id},
+                None,
+            )
+        if args.render3d_command == "update":
+            return "render3d.update", common, None
+        if args.render3d_command == "reset-camera":
+            return "render3d.reset_camera", common, None
+        if args.render3d_command == "display":
+            return (
+                "render3d.set_display",
+                {
+                    **common,
+                    "visible": args.visible,
+                    "opacity": args.opacity,
+                    "colour": args.colour,
+                    "render_mode": args.mode,
+                    "threshold": args.threshold,
                 },
                 None,
             )

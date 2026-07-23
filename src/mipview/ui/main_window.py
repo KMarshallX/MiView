@@ -4,7 +4,14 @@ from pathlib import Path
 from uuid import uuid4
 
 from PySide6.QtCore import QEvent, QObject, QPoint, QTimer, Qt
-from PySide6.QtGui import QAction, QDragEnterEvent, QDragMoveEvent, QDropEvent, QResizeEvent
+from PySide6.QtGui import (
+    QAction,
+    QActionGroup,
+    QDragEnterEvent,
+    QDragMoveEvent,
+    QDropEvent,
+    QResizeEvent,
+)
 from PySide6.QtWidgets import (
     QApplication,
     QFileDialog,
@@ -62,11 +69,20 @@ from mipview.ui.patch_window import PatchViewerWindow
 from mipview.ui.segmentation_config_window import SegmentationConfigWindow
 from mipview.ui.tool_actions import apply_tool_to_volume
 from mipview.ui.tools_menu import build_tools_submenu
+from mipview.ui.volume_3d_panel import Volume3DPanel
 from mipview.ui.window_styling import (
     ResponsiveFontScaler,
     apply_window_content_frame,
 )
-from mipview.viewer.triplanar_viewer_widget import TriPlanarViewerWidget
+from mipview.viewer.triplanar_viewer_widget import (
+    VIEW_MODE_3D,
+    VIEW_MODE_AXIAL,
+    VIEW_MODE_CORONAL,
+    VIEW_MODE_ORTHOGONAL_3D,
+    VIEW_MODE_SAGITTAL,
+    TriPlanarViewerWidget,
+)
+from mipview.viewer.render_3d_state import Render3DSource
 
 ANNOTATION_LOAD_FILTER = (
     "Annotation Files (*.nii *.nii.gz *.json);;"
@@ -94,12 +110,16 @@ class MainWindow(QMainWindow):
         self.slice_viewer = TriPlanarViewerWidget(maximum_zoom=25.0)
         self.cursor_panel = CursorInspectionPanel(adaptable_width=True)
         self.annotation_panel = AnnotationPanel(adaptable_width=True)
+        self.volume_3d_panel = Volume3DPanel(self)
+        self.slice_viewer.volume_3d_view.connect_panel(self.volume_3d_panel)
         self.contrast_control_bar = ContrastControlBar(self)
         self.overlay_opacity_control_bar = OverlayOpacityControlBar(
             self,
             opacity=self.state.segmentation_opacity,
         )
         self.cursor_overlay_action: QAction | None = None
+        self.view_mode_actions: dict[str, QAction] = {}
+        self.view_mode_action_group: QActionGroup | None = None
         self.ruler_action: QAction | None = None
         self._cursor_overlay_checked_before_patch = True
         self.patch_toggle_action: QAction | None = None
@@ -200,6 +220,7 @@ class MainWindow(QMainWindow):
         right_layout.setSpacing(0)
         right_layout.addWidget(self.cursor_panel)
         right_layout.addWidget(self.annotation_panel)
+        right_layout.addWidget(self.volume_3d_panel)
         right_layout.addStretch(1)
 
         right_scroll_area = QScrollArea(self)
@@ -262,6 +283,9 @@ class MainWindow(QMainWindow):
         exit_action.triggered.connect(self.close)
         file_menu.addAction(exit_action)
 
+        self._add_view_mode_actions(view_menu)
+        view_menu.addSeparator()
+
         self.cursor_overlay_action = QAction("Show &Cursor Overlay", self)
         self.cursor_overlay_action.setCheckable(True)
         self.cursor_overlay_action.setChecked(True)
@@ -310,6 +334,38 @@ class MainWindow(QMainWindow):
             self._on_open_segmentation_configuration
         )
         segmentation_menu.addAction(self.open_segmentation_config_action)
+
+    def _add_view_mode_actions(self, view_menu: object) -> None:
+        action_group = QActionGroup(self)
+        action_group.setExclusive(True)
+        self.view_mode_action_group = action_group
+        labels = (
+            ("Axial View", VIEW_MODE_AXIAL),
+            ("Sagittal View", VIEW_MODE_SAGITTAL),
+            ("Coronal View", VIEW_MODE_CORONAL),
+            ("3D Render", VIEW_MODE_3D),
+            ("Orthogonal and 3D", VIEW_MODE_ORTHOGONAL_3D),
+        )
+        for label, mode in labels:
+            action = QAction(label, self)
+            action.setCheckable(True)
+            action.setChecked(mode == self.slice_viewer.view_mode())
+            action.triggered.connect(
+                lambda _checked=False, selected_mode=mode: (
+                    self.slice_viewer.set_view_mode(selected_mode)
+                )
+            )
+            action_group.addAction(action)
+            view_menu.addAction(action)
+            self.view_mode_actions[mode] = action
+        self.slice_viewer.view_mode_changed.connect(
+            self._on_view_mode_changed
+        )
+
+    def _on_view_mode_changed(self, mode: str) -> None:
+        action = self.view_mode_actions.get(mode)
+        if action is not None:
+            action.setChecked(True)
 
     def resizeEvent(self, event: QResizeEvent) -> None:
         super().resizeEvent(event)
@@ -368,6 +424,7 @@ class MainWindow(QMainWindow):
         self.cursor_panel.set_cursor_values(None, None, None, None)
         self.cursor_panel.set_axis_directions(None)
         self._refresh_patch_selection_ui()
+        self._sync_volume_3d_sources()
         self.statusBar().showMessage("Ready")
 
     def _update_cursor_position(
@@ -499,6 +556,7 @@ class MainWindow(QMainWindow):
             source_image_shape=tuple(
                 int(value) for value in self.state.volume.shape[:3]
             ),
+            source_volume=self.state.volume,
             patch_center=center,
             patch_size=patch_size,
         )
@@ -723,6 +781,12 @@ class MainWindow(QMainWindow):
     def _on_patch_selection_changed(self, bounds: object) -> None:
         self.state.selected_patch_bounds = bounds if isinstance(bounds, PatchBounds) else None
         self.cursor_panel.set_patch_size_xyz(self.slice_viewer.patch_size_xyz())
+        volume = self.state.volume
+        self.slice_viewer.volume_3d_view.set_patch_box(
+            self.state.selected_patch_bounds,
+            None if volume is None else volume.affine,
+            visible=self.state.selected_patch_bounds is not None,
+        )
 
     def _on_patch_size_changed(self, width_lr: int, height_ap: int, depth_si: int) -> None:
         self.slice_viewer.set_patch_size_xyz((width_lr, height_ap, depth_si))
@@ -1611,6 +1675,33 @@ class MainWindow(QMainWindow):
         )
         self._update_patch_windows_projection_masks_for_current_image()
         self._sync_patch_windows_segmentation_menu_state()
+        self._sync_volume_3d_sources()
+
+    def _sync_volume_3d_sources(self) -> None:
+        sources: list[Render3DSource] = []
+        if self.state.volume is not None:
+            sources.append(
+                Render3DSource(
+                    id="image",
+                    display_name=(
+                        self.state.loaded_file_path.name
+                        if self.state.loaded_file_path is not None
+                        else "Loaded image"
+                    ),
+                    volume=self.state.volume,
+                    kind="image",
+                )
+            )
+        sources.extend(
+            Render3DSource(
+                id=segmentation.id,
+                display_name=segmentation.display_name,
+                volume=segmentation.volume,
+                kind="segmentation",
+            )
+            for segmentation in self.state.loaded_segmentations
+        )
+        self.slice_viewer.volume_3d_view.set_sources(sources)
 
     def _clear_segmentation_session(self) -> None:
         self.state.segmentation_image_path = None
@@ -1852,6 +1943,7 @@ class MainWindow(QMainWindow):
         self.state.selected_patch_data = None
         self._clear_annotation_session()
         cleared_count = self._reset_segmentation_session_for_loaded_image(image_path)
+        self._sync_volume_3d_sources()
         self._initialize_contrast_for_loaded_volume()
         self._refresh_patch_selection_ui()
 

@@ -14,6 +14,7 @@ from mipview.ui.main_window import MainWindow
 
 
 def main() -> int:
+    _initialize_vispy_backend()
     app = QApplication(sys.argv)
     previous_sigint_handler = signal.getsignal(signal.SIGINT)
     signal.signal(signal.SIGINT, _handle_sigint)
@@ -65,6 +66,18 @@ def _smoke_test_enabled() -> bool:
         "yes",
         "on",
     }
+
+
+def _initialize_vispy_backend() -> None:
+    """Select the existing PySide6 event loop before any 3D canvas is created."""
+    try:
+        from vispy import app as vispy_app
+
+        vispy_app.use_app("pyside6")
+    except Exception as exc:
+        # The GUI remains usable in triplanar-only mode; activation reports the
+        # actionable renderer error inside the 3D Volume toolbox.
+        print(f"Warning: VisPy backend initialization failed: {exc}", file=sys.stderr)
 
 
 if __name__ == "__main__":

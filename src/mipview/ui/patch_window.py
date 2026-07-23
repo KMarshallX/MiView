@@ -10,6 +10,7 @@ import numpy as np
 from PySide6.QtCore import QEvent, QPoint, QSignalBlocker, Qt, Signal
 from PySide6.QtGui import (
     QAction,
+    QActionGroup,
     QColor,
     QFont,
     QGuiApplication,
@@ -84,6 +85,7 @@ from mipview.ui.patch_history_panel import PatchHistoryPanel
 from mipview.ui.patch_position_panel import PatchPositionPanel
 from mipview.ui.tool_actions import apply_tool_to_volume_with_metadata
 from mipview.ui.tools_menu import build_tools_submenu
+from mipview.ui.volume_3d_panel import Volume3DPanel
 from mipview.ui.window_styling import (
     ResponsiveFontScaler,
     apply_window_content_frame,
@@ -93,7 +95,15 @@ from mipview.viewer.oriented_volume import build_oriented_volume
 from mipview.viewer.ruler import display_voxel_spacing_mm, spatial_unit_to_mm
 from mipview.viewer.slice_geometry import project_oriented_volume
 from mipview.viewer.slice_geometry import Orientation, plane_axes_for_orientation
-from mipview.viewer.triplanar_viewer_widget import TriPlanarViewerWidget
+from mipview.viewer.triplanar_viewer_widget import (
+    VIEW_MODE_3D,
+    VIEW_MODE_AXIAL,
+    VIEW_MODE_CORONAL,
+    VIEW_MODE_ORTHOGONAL_3D,
+    VIEW_MODE_SAGITTAL,
+    TriPlanarViewerWidget,
+)
+from mipview.viewer.render_3d_state import Render3DSource
 
 
 class PatchViewerWindow(QMainWindow):
@@ -132,6 +142,7 @@ class PatchViewerWindow(QMainWindow):
         source_image_path: Path | None = None,
         source_patch_bounds: PatchBounds | None = None,
         source_image_shape: tuple[int, int, int] | None = None,
+        source_volume: NiftiLoadResult | None = None,
         patch_center: tuple[int, int, int] | None = None,
         patch_size: tuple[int, int, int] | None = None,
         projection_mask_layers: Sequence[
@@ -148,6 +159,12 @@ class PatchViewerWindow(QMainWindow):
         self._source_image_path = source_image_path
         self._source_patch_bounds = source_patch_bounds
         self._source_image_shape = source_image_shape
+        self._source_volume = source_volume
+        self._source_affine = _recover_source_affine(
+            patch_volume,
+            source_patch_bounds,
+            source_volume,
+        )
         self._patch_center = (
             patch_bounds_center(source_patch_bounds)
             if source_patch_bounds is not None
@@ -172,6 +189,7 @@ class PatchViewerWindow(QMainWindow):
             elif annotation_mask is not None:
                 self._active_segmentation_kind = "annotation"
         self._projection_mask_layers: dict[str, NiftiLoadResult] = {}
+        self._projection_mask_names: dict[str, str] = {}
         self._annotation_patch_mask = annotation_mask
         self._segmentation_opacity = min(
             max(float(segmentation_opacity), 0.0),
@@ -235,6 +253,15 @@ class PatchViewerWindow(QMainWindow):
         self.patch_position_panel.movement_finished.connect(
             self._on_patch_position_movement_finished
         )
+        self.patch_position_panel.display_location_changed.connect(
+            self._on_display_patch_location_changed
+        )
+        self.volume_3d_panel = Volume3DPanel(self)
+        self.slice_viewer.volume_3d_view.connect_panel(self.volume_3d_panel)
+        self.slice_viewer.volume_3d_view.set_locator_source_extent(
+            self._source_image_shape,
+            self._source_affine,
+        )
         self._right_panels: list[QWidget] = []
         self._right_control_container = QWidget(self)
         self._right_control_stack_layout = QVBoxLayout(self._right_control_container)
@@ -246,6 +273,7 @@ class PatchViewerWindow(QMainWindow):
         self._right_control_stack_layout.addWidget(self.cursor_panel)
         self._right_control_stack_layout.addStretch(1)
         self.add_right_control_panel(self.patch_position_panel, horizontal_margin=8)
+        self.add_right_control_panel(self.volume_3d_panel, horizontal_margin=8)
         self.add_right_control_panel(self.annotation_panel)
         self.add_right_control_panel(self.graph_panel)
         self.add_right_control_panel(self.mip_minip_panel, horizontal_margin=8)
@@ -433,6 +461,32 @@ class PatchViewerWindow(QMainWindow):
 
     def _setup_menu(self) -> None:
         view_menu = self.menuBar().addMenu("&View")
+        self.view_mode_actions: dict[str, QAction] = {}
+        self.view_mode_action_group = QActionGroup(self)
+        self.view_mode_action_group.setExclusive(True)
+        for label, mode in (
+            ("Axial View", VIEW_MODE_AXIAL),
+            ("Sagittal View", VIEW_MODE_SAGITTAL),
+            ("Coronal View", VIEW_MODE_CORONAL),
+            ("3D Render", VIEW_MODE_3D),
+            ("Orthogonal and 3D", VIEW_MODE_ORTHOGONAL_3D),
+        ):
+            action = QAction(label, self)
+            action.setCheckable(True)
+            action.setChecked(mode == self.slice_viewer.view_mode())
+            action.triggered.connect(
+                lambda _checked=False, selected_mode=mode: (
+                    self.slice_viewer.set_view_mode(selected_mode)
+                )
+            )
+            self.view_mode_action_group.addAction(action)
+            view_menu.addAction(action)
+            self.view_mode_actions[mode] = action
+        self.slice_viewer.view_mode_changed.connect(
+            self._on_view_mode_changed
+        )
+        view_menu.addSeparator()
+
         self.cursor_overlay_action = QAction("Show &Cursor Overlay", self)
         self.cursor_overlay_action.setCheckable(True)
         self.cursor_overlay_action.setChecked(True)
@@ -476,6 +530,11 @@ class PatchViewerWindow(QMainWindow):
         auto_contrast_action = QAction("&Auto Contrast", self)
         auto_contrast_action.triggered.connect(self._on_auto_contrast)
         tools_menu.addAction(auto_contrast_action)
+
+    def _on_view_mode_changed(self, mode: str) -> None:
+        action = self.view_mode_actions.get(mode)
+        if action is not None:
+            action.setChecked(True)
 
     def add_right_control_panel(
         self,
@@ -2400,7 +2459,7 @@ class PatchViewerWindow(QMainWindow):
     def _on_export_viewer_screenshot_clicked(self) -> None:
         selected_path, selected_filter = QFileDialog.getSaveFileName(
             self,
-            "Export Patch Triplanar Viewer",
+            "Export Patch Viewer",
             self._default_screenshot_filename(),
             "PNG Image (*.png);;JPEG Image (*.jpg *.jpeg);;All Files (*)",
         )
@@ -2893,6 +2952,11 @@ class PatchViewerWindow(QMainWindow):
                 brush_mode=self.annotation_panel.current_brush_mode(),
             )
             self.update_projection_mask_layers(projection_mask_layers)
+            if self.patch_position_panel.display_location_checkbox.isChecked():
+                self._on_display_patch_location_changed(True)
+            self.slice_viewer.volume_3d_view.mark_selected_dirty(
+                "Patch moved; click Update to render its new contents."
+            )
             self.slice_viewer.zoom_state.set_zoom_factor(zoom_factor)
             self.slice_viewer.refresh_graph_overlay()
             self._refresh_graph_panel_tool_state()
@@ -3008,6 +3072,10 @@ class PatchViewerWindow(QMainWindow):
             segmentation_id: volume
             for segmentation_id, _display_name, volume in layers
         }
+        self._projection_mask_names = {
+            segmentation_id: display_name
+            for segmentation_id, display_name, _volume in layers
+        }
 
         was_blocked = self.projection_mask_combo.blockSignals(True)
         self.projection_mask_combo.clear()
@@ -3020,6 +3088,48 @@ class PatchViewerWindow(QMainWindow):
         self.projection_mask_combo.setCurrentIndex(selected_index)
         self.projection_mask_combo.blockSignals(was_blocked)
         self._on_projection_mask_changed(selected_index)
+        self._sync_volume_3d_sources()
+
+    def _sync_volume_3d_sources(self) -> None:
+        sources = [
+            Render3DSource(
+                id="image",
+                display_name=self._source_image_name,
+                volume=self._patch_volume,
+                kind="image",
+            )
+        ]
+        sources.extend(
+            Render3DSource(
+                id=segmentation_id,
+                display_name=self._projection_mask_names.get(
+                    segmentation_id,
+                    segmentation_id,
+                ),
+                volume=volume,
+                kind="segmentation",
+            )
+            for segmentation_id, volume in self._projection_mask_layers.items()
+        )
+        self.slice_viewer.volume_3d_view.set_sources(sources)
+
+    def _on_display_patch_location_changed(self, visible: bool) -> None:
+        self.slice_viewer.volume_3d_view.set_locator_context(
+            self._source_volume,
+            visible=visible,
+        )
+        source_affine = (
+            self._source_affine
+        )
+        self.slice_viewer.volume_3d_view.set_patch_box(
+            self._source_patch_bounds,
+            source_affine,
+            visible=visible and self._source_patch_bounds is not None,
+        )
+        if visible and self._source_volume is None:
+            self.volume_3d_panel.set_status(
+                "Source image unavailable; patch locator context cannot be displayed."
+            )
 
     def selected_projection_mask_id(self) -> str | None:
         segmentation_id = self.projection_mask_combo.currentData()
@@ -3326,6 +3436,23 @@ class PatchViewerWindow(QMainWindow):
             self._update_screenshot_output_dimensions(
                 self.screenshot_resolution_spinbox.value()
             )
+
+
+def _recover_source_affine(
+    patch_volume: NiftiLoadResult,
+    bounds: PatchBounds | None,
+    source_volume: NiftiLoadResult | None,
+) -> np.ndarray:
+    if source_volume is not None:
+        return np.asarray(source_volume.affine, dtype=np.float64).copy()
+    affine = np.asarray(patch_volume.affine, dtype=np.float64).copy()
+    if bounds is not None:
+        starts = np.array(
+            [bounds.x_start, bounds.y_start, bounds.z_start],
+            dtype=np.float64,
+        )
+        affine[:3, 3] -= affine[:3, :3] @ starts
+    return affine
 
 
 def _json_number(value: float) -> int | float:

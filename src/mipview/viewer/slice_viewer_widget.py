@@ -157,7 +157,9 @@ class SliceViewerWidget(QWidget):
 
         self.image_label = QLabel("No volume loaded", self)
         self.image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.image_label.setMinimumSize(220, 220)
+        # Keep enough horizontal room for annotations while allowing the
+        # 2×2 viewer's horizontal splitter to meaningfully resize both rows.
+        self.image_label.setMinimumSize(220, 96)
         self.image_label.setStyleSheet("background-color: #1a1a1a; color: #d0d0d0;")
         self.image_label.setMouseTracking(True)
         self.image_label.installEventFilter(self)
