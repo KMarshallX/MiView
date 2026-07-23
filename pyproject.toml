@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mipview"
-version = "0.5.4"
+version = "0.5.5"
 description = "A lightweight Linux-first NIfTI viewer for patch-based inspection workflows."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -16,7 +16,8 @@ dependencies = [
   "PySide6>=6.6",
   "nibabel>=5.2",
   "numpy>=1.26",
-  "scikit-image>=0.23"
+  "scikit-image>=0.23",
+  "vispy>=0.16"
 ]
 
 [project.optional-dependencies]
