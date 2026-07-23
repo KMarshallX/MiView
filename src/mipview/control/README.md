@@ -362,7 +362,7 @@ mipview-ctl patch save ./patch.nii.gz
 
 ### `patch.screenshot`
 
-Save only an open patch window's triplanar viewer, including its current zoom,
+Save only an open patch window's 2×2 viewer, including its current zoom,
 pan, projections, overlays, vectors, and angle legends. Controls are excluded.
 
 ```bash
@@ -465,6 +465,37 @@ Example:
 mipview-ctl projection save axial ./patch_axial_minip.png
 mipview-ctl projection save axial ./patch_axial_minip.png --annotation-preview
 ```
+
+### 3D render commands
+
+The main-window 3D viewer is targeted when `--session-id` is omitted. Pass an
+open patch-window session ID to target its independent 3D viewer. Rendering is
+manual: selecting or changing an expensive setting marks the layer for update,
+and `render3d update` starts background preparation.
+
+```bash
+mipview-ctl render3d status
+mipview-ctl render3d activate
+mipview-ctl render3d select image
+mipview-ctl render3d display --opacity 0.6 --mode MIP
+mipview-ctl render3d update
+mipview-ctl render3d reset-camera
+mipview-ctl render3d dismiss
+
+mipview-ctl render3d status --session-id SESSION_ID
+mipview-ctl patch display-location SESSION_ID show
+```
+
+`render3d display` accepts `--visible` / `--no-visible`, `--opacity`,
+`--colour R G B`, `--mode`, and `--threshold`. Exactly one selected NIfTI file
+is rendered at a time. Dismissing the view releases its VisPy canvas and GPU
+resources. `render3d.status` reports the selected and rendered source IDs,
+busy/update-required state, prepared shape, downsampling stride, locator state,
+and the last renderer error.
+
+The equivalent direct commands are `render3d.status`, `render3d.activate`,
+`render3d.select`, `render3d.update`, `render3d.set_display`,
+`render3d.reset_camera`, and `patch.display_location`.
 
 ### Graph commands
 

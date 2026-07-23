@@ -6,8 +6,8 @@ import os
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, QObject, Qt, Signal
-from PySide6.QtGui import QDragEnterEvent, QDragMoveEvent, QDropEvent
-from PySide6.QtWidgets import QGridLayout, QWidget
+from PySide6.QtGui import QColor, QDragEnterEvent, QDragMoveEvent, QDropEvent, QPainter
+from PySide6.QtWidgets import QSplitter, QSplitterHandle, QVBoxLayout, QWidget
 
 from mipview.annotation.annotation_mask import AnnotationMask
 from mipview.annotation.brush import erase_disk, paint_disk
@@ -44,8 +44,96 @@ from mipview.viewer.slice_geometry import (
     project_oriented_volume,
 )
 from mipview.viewer.slice_viewer_widget import SliceViewerWidget
+from mipview.viewer.volume_3d_widget import Volume3DWidget
 
 LOGGER = logging.getLogger(__name__)
+
+VIEW_MODE_AXIAL = "axial"
+VIEW_MODE_SAGITTAL = "sagittal"
+VIEW_MODE_CORONAL = "coronal"
+VIEW_MODE_3D = "3d"
+VIEW_MODE_ORTHOGONAL_3D = "orthogonal_3d"
+VIEW_MODES = (
+    VIEW_MODE_AXIAL,
+    VIEW_MODE_SAGITTAL,
+    VIEW_MODE_CORONAL,
+    VIEW_MODE_3D,
+    VIEW_MODE_ORTHOGONAL_3D,
+)
+
+
+class _DottedSplitterHandle(QSplitterHandle):
+    """Large dotted grip with a generous invisible drag target."""
+
+    DOT_COUNT = 11
+    DOT_DIAMETER = 5.0
+    DOT_SPACING = 8.0
+
+    def __init__(
+        self,
+        orientation: Qt.Orientation,
+        parent: QSplitter,
+    ) -> None:
+        super().__init__(orientation, parent)
+        self._pressed = False
+        self.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
+
+    def paintEvent(self, event: object) -> None:
+        _ = event
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        if self._pressed:
+            colour = QColor("#7044a5")
+        elif self.underMouse():
+            colour = QColor("#9566c9")
+        else:
+            colour = QColor("#777f88")
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(colour)
+
+        horizontal_grip = self.orientation() == Qt.Orientation.Vertical
+        available_length = self.width() if horizontal_grip else self.height()
+        dot_count = min(
+            self.DOT_COUNT,
+            max(1, int((available_length - self.DOT_DIAMETER) // self.DOT_SPACING) + 1),
+        )
+        total_length = (
+            self.DOT_DIAMETER + max(dot_count - 1, 0) * self.DOT_SPACING
+        )
+        start = (available_length - total_length) / 2.0
+        cross_center = self.height() / 2.0 if horizontal_grip else self.width() / 2.0
+        radius = self.DOT_DIAMETER / 2.0
+        for index in range(dot_count):
+            position = start + radius + index * self.DOT_SPACING
+            if horizontal_grip:
+                painter.drawEllipse(
+                    position - radius,
+                    cross_center - radius,
+                    self.DOT_DIAMETER,
+                    self.DOT_DIAMETER,
+                )
+            else:
+                painter.drawEllipse(
+                    cross_center - radius,
+                    position - radius,
+                    self.DOT_DIAMETER,
+                    self.DOT_DIAMETER,
+                )
+
+    def mousePressEvent(self, event: object) -> None:
+        self._pressed = True
+        self.update()
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event: object) -> None:
+        self._pressed = False
+        self.update()
+        super().mouseReleaseEvent(event)
+
+
+class _DottedSplitter(QSplitter):
+    def createHandle(self) -> QSplitterHandle:
+        return _DottedSplitterHandle(self.orientation(), self)
 
 
 class TriPlanarViewerWidget(QWidget):
@@ -71,6 +159,7 @@ class TriPlanarViewerWidget(QWidget):
     graph_angle_vector_selected = Signal(str, int)
     graph_angle_label_position_changed = Signal(str, int, float, float)
     graph_element_selected = Signal(str, object)
+    view_mode_changed = Signal(str)
 
     def __init__(
         self,
@@ -121,6 +210,9 @@ class TriPlanarViewerWidget(QWidget):
         self.axial_view = SliceViewerWidget("axial", self)
         self.coronal_view = SliceViewerWidget("coronal", self)
         self.sagittal_view = SliceViewerWidget("sagittal", self)
+        self.volume_3d_view = Volume3DWidget(self)
+        self._view_mode = VIEW_MODE_ORTHOGONAL_3D
+        self._splitter_sizes: dict[str, tuple[list[int], ...]] = {}
         self._views = (
             self.axial_view,
             self.coronal_view,
@@ -179,16 +271,130 @@ class TriPlanarViewerWidget(QWidget):
             widget.installEventFilter(self)
         self.cursor_state.cursor_changed.connect(self._on_cursor_changed)
         self.zoom_state.zoom_changed.connect(self._on_zoom_changed)
+        self.volume_3d_view.active_changed.connect(
+            self._on_volume_3d_active_changed
+        )
 
-        layout = QGridLayout(self)
-        layout.addWidget(self.axial_view, 0, 0)
-        layout.addWidget(self.coronal_view, 0, 1)
-        layout.addWidget(self.sagittal_view, 0, 2)
-        layout.setColumnStretch(0, 1)
-        layout.setColumnStretch(1, 1)
-        layout.setColumnStretch(2, 1)
+        self._top_splitter = _DottedSplitter(Qt.Orientation.Horizontal, self)
+        self._bottom_splitter = _DottedSplitter(Qt.Orientation.Horizontal, self)
+        self._viewer_splitter = _DottedSplitter(Qt.Orientation.Vertical, self)
+        for splitter in (
+            self._top_splitter,
+            self._bottom_splitter,
+            self._viewer_splitter,
+        ):
+            splitter.setChildrenCollapsible(False)
+            splitter.setHandleWidth(10)
+            splitter.setOpaqueResize(True)
+        self._viewer_splitter.addWidget(self._top_splitter)
+        self._viewer_splitter.addWidget(self._bottom_splitter)
+        slice_footer_height = (
+            self.axial_view.slice_slider.sizeHint().height()
+            + self.axial_view.slice_label.sizeHint().height()
+            + self.axial_view.layout().spacing()
+        )
+        self.volume_3d_view.set_footer_height(slice_footer_height)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(self._viewer_splitter)
         layout.setContentsMargins(12, 12, 12, 12)
-        layout.setSpacing(8)
+        layout.setSpacing(0)
+        self._apply_view_layout()
+
+    def view_mode(self) -> str:
+        return self._view_mode
+
+    def set_view_mode(self, mode: str) -> None:
+        normalized = str(mode).strip().lower()
+        if normalized not in VIEW_MODES:
+            raise ValueError(
+                f"Unknown viewer mode {mode!r}; expected one of {', '.join(VIEW_MODES)}."
+            )
+        if normalized == self._view_mode:
+            if normalized == VIEW_MODE_3D and not self.volume_3d_view.state.active:
+                self.volume_3d_view.set_active(True)
+            else:
+                self._apply_view_layout()
+            return
+
+        self._remember_splitter_sizes()
+        self._view_mode = normalized
+        if normalized == VIEW_MODE_3D and not self.volume_3d_view.state.active:
+            self.volume_3d_view.set_active(True)
+            if not self.volume_3d_view.state.active:
+                self._view_mode = VIEW_MODE_ORTHOGONAL_3D
+        self._apply_view_layout()
+        self.view_mode_changed.emit(self._view_mode)
+
+    def _on_volume_3d_active_changed(self, active: bool) -> None:
+        # The signal is emitted after the active flag changes, while the
+        # splitters still describe the layout from before that change.
+        self._remember_splitter_sizes(volume_active=not active)
+        previous_mode = self._view_mode
+        if active and self._view_mode in {
+            VIEW_MODE_AXIAL,
+            VIEW_MODE_SAGITTAL,
+            VIEW_MODE_CORONAL,
+        }:
+            self._view_mode = VIEW_MODE_ORTHOGONAL_3D
+        elif not active and self._view_mode == VIEW_MODE_3D:
+            self._view_mode = VIEW_MODE_ORTHOGONAL_3D
+        self._apply_view_layout()
+        if self._view_mode != previous_mode:
+            self.view_mode_changed.emit(self._view_mode)
+
+    def _apply_view_layout(self) -> None:
+        for widget in (*self._views, self.volume_3d_view):
+            widget.setVisible(False)
+
+        self._top_splitter.setVisible(True)
+        self._bottom_splitter.setVisible(False)
+
+        if self._view_mode == VIEW_MODE_ORTHOGONAL_3D:
+            self._top_splitter.insertWidget(0, self.axial_view)
+            self._top_splitter.insertWidget(1, self.coronal_view)
+            self._bottom_splitter.insertWidget(0, self.sagittal_view)
+            self._bottom_splitter.insertWidget(1, self.volume_3d_view)
+            self.axial_view.setVisible(True)
+            self.coronal_view.setVisible(True)
+            self.sagittal_view.setVisible(True)
+            self.volume_3d_view.setVisible(True)
+            self._bottom_splitter.setVisible(True)
+            root, top, bottom = self._splitter_sizes.get(
+                "orthogonal_3d",
+                ([1, 1], [1, 1], [1, 1]),
+            )
+            self._viewer_splitter.setSizes(root)
+            self._top_splitter.setSizes(top)
+            self._bottom_splitter.setSizes(bottom)
+        else:
+            selected_widget = {
+                VIEW_MODE_AXIAL: self.axial_view,
+                VIEW_MODE_SAGITTAL: self.sagittal_view,
+                VIEW_MODE_CORONAL: self.coronal_view,
+                VIEW_MODE_3D: self.volume_3d_view,
+            }[self._view_mode]
+            self._top_splitter.insertWidget(0, selected_widget)
+            selected_widget.setVisible(True)
+
+        self._update_shared_base_scale()
+
+    def _remember_splitter_sizes(
+        self,
+        *,
+        volume_active: bool | None = None,
+    ) -> None:
+        if self._view_mode != VIEW_MODE_ORTHOGONAL_3D:
+            return
+        _ = volume_active
+        if not self._bottom_splitter.isHidden():
+            candidate = (
+                self._viewer_splitter.sizes(),
+                self._top_splitter.sizes(),
+                self._bottom_splitter.sizes(),
+            )
+            if all(sum(sizes) > 0 for sizes in candidate):
+                self._splitter_sizes["orthogonal_3d"] = candidate
 
     def load_volume(self, volume: NiftiLoadResult) -> None:
         if volume.data.ndim != 3:
@@ -250,6 +456,7 @@ class TriPlanarViewerWidget(QWidget):
             self._update_patch_overlays()
 
     def unload_volume(self) -> None:
+        self.volume_3d_view.dismiss()
         self._display_volume = None
         self._segmentation_display_volume = None
         self._projection_mask_display_volume = None

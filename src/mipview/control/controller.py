@@ -21,6 +21,10 @@ from mipview.patch.saver import save_patch_nifti
 from mipview.patch.selector import PatchBounds
 from mipview.viewer.intensity import normalize_slice_to_uint8
 from mipview.viewer.oriented_volume import build_oriented_volume
+from mipview.viewer.render_3d_state import (
+    RAW_RENDER_MODES,
+    SEGMENTATION_RENDER_MODES,
+)
 from mipview.viewer.slice_geometry import Orientation
 from mipview.viewer.slice_geometry import project_oriented_volume
 
@@ -53,6 +57,7 @@ class MipViewController:
                 "annotation_editing_enabled": bool(state.annotation.editing_enabled),
                 "num_segmentations": len(state.loaded_segmentations),
                 "num_graph_sessions": len(self.main_window.graph_session_summaries()),
+                "render3d": self.main_window.slice_viewer.volume_3d_view.status(),
             },
         )
 
@@ -99,11 +104,146 @@ class MipViewController:
                 "brush_mode": annotation.brush_mode,
             },
             "graph_sessions": self.main_window.graph_session_summaries(),
+            "render3d": slice_viewer.volume_3d_view.status(),
         }
         if volume is not None:
             data["affine"] = np.asarray(volume.affine, dtype=float).tolist()
 
         return CommandResult(True, "Viewer state exported.", data)
+
+    def get_render3d_status(self, session_id: str | None = None) -> CommandResult:
+        target = self._render3d_target(session_id)
+        if isinstance(target, CommandResult):
+            return target
+        return CommandResult(True, "3D render status exported.", target.status())
+
+    def set_render3d_active(
+        self,
+        active: bool,
+        session_id: str | None = None,
+    ) -> CommandResult:
+        target = self._render3d_target(session_id)
+        if isinstance(target, CommandResult):
+            return target
+        target.set_active(bool(active))
+        status = target.status()
+        if bool(active) and not status["active"]:
+            return CommandResult(
+                False,
+                str(status["last_error"] or "3D rendering could not be activated."),
+                status,
+            )
+        return CommandResult(
+            True,
+            "3D view activated." if active else "3D resources released.",
+            status,
+        )
+
+    def select_render3d_source(
+        self,
+        source_id: str,
+        session_id: str | None = None,
+    ) -> CommandResult:
+        target = self._render3d_target(session_id)
+        if isinstance(target, CommandResult):
+            return target
+        normalized = str(source_id)
+        if normalized not in target.state.sources:
+            return CommandResult(
+                False,
+                f"3D layer does not exist: {normalized}",
+            )
+        target.select_source(normalized)
+        return CommandResult(True, "3D layer selected.", target.status())
+
+    def update_render3d(
+        self,
+        session_id: str | None = None,
+    ) -> CommandResult:
+        target = self._render3d_target(session_id)
+        if isinstance(target, CommandResult):
+            return target
+        if target.state.selected_source() is None:
+            return CommandResult(False, "No NIfTI layer is available for 3D rendering.")
+        target.update_selected_render()
+        status = target.status()
+        if status["last_error"] is not None and not status["busy"]:
+            return CommandResult(False, str(status["last_error"]), status)
+        return CommandResult(True, "3D render update started.", status)
+
+    def set_render3d_display(
+        self,
+        *,
+        session_id: str | None = None,
+        visible: bool | None = None,
+        opacity: float | None = None,
+        colour: list[int] | tuple[int, int, int] | None = None,
+        render_mode: str | None = None,
+        threshold: float | None = None,
+    ) -> CommandResult:
+        target = self._render3d_target(session_id)
+        if isinstance(target, CommandResult):
+            return target
+        if target.state.selected_source() is None:
+            return CommandResult(False, "No 3D layer is selected.")
+        if opacity is not None and not 0.0 <= float(opacity) <= 1.0:
+            return CommandResult(False, "3D opacity must be between 0.0 and 1.0.")
+        if colour is not None and (
+            len(colour) != 3 or any(not 0 <= int(value) <= 255 for value in colour)
+        ):
+            return CommandResult(False, "3D colour must contain three values in 0..255.")
+        if render_mode is not None:
+            source = target.state.selected_source()
+            allowed_modes = (
+                RAW_RENDER_MODES
+                if source is not None and source.kind == "image"
+                else SEGMENTATION_RENDER_MODES
+            )
+            if render_mode not in allowed_modes:
+                return CommandResult(
+                    False,
+                    f"3D render mode must be one of: {', '.join(allowed_modes)}.",
+                )
+        if visible is not None:
+            target.set_selected_visibility(visible)
+        if opacity is not None:
+            target.set_selected_opacity(opacity)
+        if colour is not None:
+            target.set_selected_colour(tuple(int(value) for value in colour))
+        if render_mode is not None:
+            target.set_selected_render_mode(str(render_mode))
+        if threshold is not None:
+            target.set_selected_threshold(float(threshold))
+        return CommandResult(True, "3D display settings updated.", target.status())
+
+    def reset_render3d_camera(
+        self,
+        session_id: str | None = None,
+    ) -> CommandResult:
+        target = self._render3d_target(session_id)
+        if isinstance(target, CommandResult):
+            return target
+        if not target.state.active:
+            return CommandResult(False, "Activate the 3D view before resetting its camera.")
+        target.reset_camera()
+        return CommandResult(True, "3D camera reset.", target.status())
+
+    def set_patch_location_display(
+        self,
+        session_id: str,
+        visible: bool,
+    ) -> CommandResult:
+        patch_window = self._graph_patch_window(session_id)
+        if patch_window is None:
+            return CommandResult(False, f"Patch window not found: {session_id}")
+        patch_window.patch_position_panel.display_location_checkbox.setChecked(
+            bool(visible)
+        )
+        return CommandResult(
+            True,
+            "Patch location display updated.",
+            patch_window.slice_viewer.volume_3d_view.status(),
+        )
 
     def move_cursor(self, x: int, y: int, z: int) -> CommandResult:
         shape_result = self._loaded_shape()
@@ -935,7 +1075,7 @@ class MipViewController:
             )
         return CommandResult(
             True,
-            "Patch triplanar screenshot saved.",
+            "Patch viewer screenshot saved.",
             {
                 "session_id": session_id,
                 "path": str(saved_path),
@@ -1078,6 +1218,17 @@ class MipViewController:
 
     def _graph_patch_window(self, session_id: str) -> Any | None:
         return self.main_window.graph_patch_window(str(session_id))
+
+    def _render3d_target(
+        self,
+        session_id: str | None,
+    ) -> Any | CommandResult:
+        if session_id is None:
+            return self.main_window.slice_viewer.volume_3d_view
+        patch_window = self._graph_patch_window(str(session_id))
+        if patch_window is None:
+            return CommandResult(False, f"Patch window not found: {session_id}")
+        return patch_window.slice_viewer.volume_3d_view
 
     @staticmethod
     def _graph_session_not_found(session_id: str) -> CommandResult:

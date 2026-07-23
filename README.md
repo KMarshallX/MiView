@@ -17,9 +17,13 @@ It is designed as a focused research tool for:
 - projection-graph editing with local state save/load, drag-and-drop patch restoration,
   persistent directed vectors, straight or curved edges, restored MIP/MinIP
   orientation settings, and physical-spacing-aware one-to-one angle measurements,
-- patch-window triplanar screenshot export at 1–200% output resolution,
+- patch-window 2×2 viewer screenshot export at 1–200% output resolution,
 - independent patch-window translation along LR, AP, and SI with live projection
   and aligned-overlay refresh,
+- manually refreshed, memory-bounded 3D rendering of one raw image,
+  segmentation, or binary-mask layer at a time,
+- affine-aware 3D patch boxes in the main viewer and an optional full-source
+  locator in patch windows,
 - controlled local IPC and `mipview-ctl` commands for viewer, patch, annotation, projection, and graph workflows.
 
 MipView is intentionally minimal. The goal is to build a small, reliable viewer before adding more advanced features.
@@ -157,7 +161,9 @@ In practice, the main runtime flow is:
 1. `python -m mipview` enters through `mipview/__main__.py`.
 2. `main.py` creates the Qt application and main window.
 3. `ui/main_window.py` coordinates loading, viewer updates, patch actions, segmentation and annotation state, and tool execution; patch-window Graph mode is coordinated by `ui/patch_window.py`.
-4. `viewer/` modules render slices and projections and manage tri-planar, zoom, pan, annotation, and graph interactions.
+4. `viewer/` modules render slices, projections, and the optional VisPy 3D
+   scene, and manage tri-planar, zoom, pan, annotation, graph, and patch-locator
+   interactions.
 5. `graph/` keeps graph identity, curve geometry, persistent vectors, measurement calculations, and interaction state outside the Qt panel code.
 6. `control/` exposes structured local IPC commands through the command registry, controller, and `mipview-ctl` CLI.
 7. `state/`, `io/`, `patch/`, `segmentation/`, `annotation/`, and `tools/` provide the remaining supporting logic.
