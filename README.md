@@ -96,6 +96,13 @@ pip install -r requirements.txt
 
 This `requirements.txt` mirrors the runtime dependencies used by the app and is intended for Docker-style installs. In installed/container environments, the intended launch command remains `mipview`.
 
+The optional 3D viewer uses VisPy with its PySide6 backend and PyOpenGL for
+raw-volume texture uploads. A working OpenGL implementation is also required.
+If 3D rendering is unavailable, the orthogonal viewers remain usable and the
+**3D Volume** toolbox reports an actionable error.
+Camera framing uses affine-scaled world bounds so raw textures and foreground
+meshes open at the same physical scale and default viewing angle.
+
 CI note:
 
 - GitHub Actions validates three install paths (`setup.sh`, `pip install -e .`, and `pip install -r requirements.txt`) and runs a headless startup smoke test for each.
