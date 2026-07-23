@@ -338,8 +338,55 @@ class Volume3DWidget(QWidget):
 
     def reset_camera(self) -> None:
         if self._view is not None:
-            self._view.camera.set_range()
+            camera = self._view.camera
+            camera.azimuth = 30.0
+            camera.elevation = 30.0
+            camera.roll = 0.0
+            limits = self._camera_world_limits()
+            if limits is None:
+                camera.set_range()
+            else:
+                camera.set_range(
+                    x=limits[0],
+                    y=limits[1],
+                    z=limits[2],
+                    margin=0.08,
+                )
             self._request_canvas_update()
+
+    def _camera_world_limits(
+        self,
+    ) -> tuple[
+        tuple[float, float],
+        tuple[float, float],
+        tuple[float, float],
+    ] | None:
+        if self._locator_visible:
+            if self._locator_volume is not None:
+                return _volume_world_limits(
+                    tuple(int(value) for value in self._locator_volume.shape),
+                    self._locator_volume.affine,
+                )
+            if (
+                self._locator_source_shape is not None
+                and self._locator_source_affine is not None
+            ):
+                return _volume_world_limits(
+                    self._locator_source_shape,
+                    self._locator_source_affine,
+                )
+
+        prepared = self._prepared
+        if prepared is None:
+            return None
+        if prepared.texture_affine is not None:
+            return _volume_world_limits(
+                prepared.prepared_shape,
+                prepared.texture_affine,
+            )
+        if prepared.vertices is not None and prepared.vertices.size:
+            return _point_world_limits(prepared.vertices)
+        return None
 
     def set_patch_box(
         self,
@@ -509,6 +556,7 @@ class Volume3DWidget(QWidget):
 
         rgba = _rgba(settings.colour, settings.opacity)
         if prepared.kind == "image":
+            _require_pyopengl_3d_textures()
             method = {
                 "MIP": "mip",
                 "MinIP": "minip",
@@ -729,6 +777,45 @@ def _rgba(
         colour[2] / 255.0,
         min(max(float(opacity), 0.0), 1.0),
     )
+
+
+def _volume_world_limits(
+    shape: tuple[int, int, int],
+    affine: np.ndarray,
+) -> tuple[
+    tuple[float, float],
+    tuple[float, float],
+    tuple[float, float],
+]:
+    return _point_world_limits(source_box_world_segments(shape, affine))
+
+
+def _point_world_limits(
+    points: np.ndarray,
+) -> tuple[
+    tuple[float, float],
+    tuple[float, float],
+    tuple[float, float],
+]:
+    coordinates = np.asarray(points, dtype=np.float64).reshape(-1, 3)
+    minimum = np.min(coordinates, axis=0)
+    maximum = np.max(coordinates, axis=0)
+    return tuple(
+        (float(minimum[axis]), float(maximum[axis]))
+        for axis in range(3)
+    )
+
+
+def _require_pyopengl_3d_textures() -> None:
+    """Fail before VisPy's deferred draw when 3D texture support is absent."""
+    try:
+        import OpenGL.GL  # noqa: F401
+    except ImportError as exc:
+        raise RuntimeError(
+            "PyOpenGL is required for raw-image 3D rendering. "
+            "Reinstall MipView dependencies or run "
+            "`python -m pip install PyOpenGL` in the active environment."
+        ) from exc
 
 
 def _volume_colormap(

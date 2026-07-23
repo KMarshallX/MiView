@@ -3,3 +3,4 @@ nibabel>=5.2
 numpy>=1.26
 scikit-image>=0.23
 vispy>=0.16
+PyOpenGL>=3.1.7
