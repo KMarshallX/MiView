@@ -17,6 +17,9 @@ It is designed as a focused research tool for:
 - projection-graph editing with local state save/load, drag-and-drop patch restoration,
   persistent directed vectors, straight or curved edges, restored MIP/MinIP
   orientation settings, and physical-spacing-aware one-to-one angle measurements,
+- import-only GraphML vessel skeletons as read-only 3D file layers, with
+  patch-clipped MIP/MinIP projections, red source nodes, green edges, and blue
+  synthetic patch-boundary intersections,
 - patch-window 2×2 viewer screenshot export at 1–200% output resolution,
 - independent patch-window translation along LR, AP, and SI with live projection
   and aligned-overlay refresh,
@@ -147,6 +150,10 @@ The current codebase is organized around a small top-level `mipview` package:
     │   ├── spatial.py
     │   ├── state.py
     │   └── vector.py
+    ├── vessel_graph/
+    │   ├── io.py
+    │   ├── model.py
+    │   └── spatial.py
     ├── io/
     │   └── nifti_io.py
     ├── patch/
@@ -171,6 +178,8 @@ In practice, the main runtime flow is:
 4. `viewer/` modules render slices, projections, and the optional VisPy 3D
    scene, and manage tri-planar, zoom, pan, annotation, graph, and patch-locator
    interactions.
-5. `graph/` keeps graph identity, curve geometry, persistent vectors, measurement calculations, and interaction state outside the Qt panel code.
+5. `graph/` owns editable 2D MIP/MinIP `.mipgraph.json` state;
+   `vessel_graph/` independently owns import-only 3D `.graphml` data, spatial
+   validation, patch clipping, and projections.
 6. `control/` exposes structured local IPC commands through the command registry, controller, and `mipview-ctl` CLI.
 7. `state/`, `io/`, `patch/`, `segmentation/`, `annotation/`, and `tools/` provide the remaining supporting logic.

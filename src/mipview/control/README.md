@@ -26,6 +26,7 @@ Most state-changing commands require a NIfTI image to already be loaded in the r
 - [`patch.screenshot`](#patchscreenshot)
 - [`projection.mode`](#projectionmode)
 - [`projection.save`](#projectionsave)
+- [`graph3d.*`](#graphml-vessel-graph-commands)
 - [`graph.*`](#graph-commands)
 - [`annotation.create`](#annotationcreate)
 - [`annotation.paint_stroke`](#annotationpaint_stroke)
@@ -501,6 +502,41 @@ The equivalent direct commands are `render3d.status`, `render3d.activate`,
 `render3d.select`, `render3d.update`, `render3d.set_display`,
 `render3d.reset_camera`, and `patch.display_location`.
 
+### GraphML vessel-graph commands
+
+The `graph3d.*` namespace controls import-only GraphML vessel graphs and is
+separate from the editable `graph.*` JSON projection-graph namespace. A source
+NIfTI must be loaded before `graph3d load`. Loading is main-session scoped and
+new and existing patch windows receive the layer list.
+
+```bash
+mipview-ctl graph3d load ./vessels.graphml
+mipview-ctl graph3d status
+mipview-ctl graph3d select LAYER_ID
+mipview-ctl graph3d display LAYER_ID --visible --opacity 0.65
+mipview-ctl graph3d status --session-id SESSION_ID
+mipview-ctl graph3d select LAYER_ID --session-id SESSION_ID
+mipview-ctl graph3d display LAYER_ID --session-id SESSION_ID --visible
+mipview-ctl graph3d unload LAYER_ID
+```
+
+`graph3d display` also accepts `--node-size` and `--edge-thickness`. For a patch
+session, `--visible` controls GraphML projection and `--opacity` controls the
+shared 2D created/projected graph opacity. Node size and edge thickness are
+shared by those 2D layers and the patch's GraphML 3D source. Use
+`render3d display --session-id SESSION_ID --opacity VALUE` for 3D-only opacity.
+Only one GraphML projection layer is visible in a patch at a time. Enabling it
+exits graph creation and hides the editable JSON graph without deleting either
+layer. Disabling it does not automatically restore the created graph. The
+matching direct commands are `graph3d.status`, `graph3d.load`,
+`graph3d.unload`, `graph3d.select`, and `graph3d.set_display`.
+
+GraphML is read-only. Red markers are original nodes, green lines are vessel
+edges, and blue markers are synthetic patch-boundary intersections. The `r`
+attribute is reported as retained analytical metadata but does not affect
+rendering. Spatially mismatched files remain loaded in warning mode, with patch
+projection disabled.
+
 ### Graph commands
 
 Graph commands target an open patch window by the session ID reported in
@@ -508,8 +544,9 @@ Graph commands target an open patch window by the session ID reported in
 three projections and stored in patch-local source voxel space. `add-node` uses
 oriented 2D projection indices and resolves depth from the current finite
 MIP/MinIP extremum; `add-voxel-node` accepts explicit patch-local `(x, y, z)`
-coordinates. Node/edge editing commands require Graph mode; clearing the complete
-graph remains available whenever the session contains graph elements.
+coordinates. Node/edge editing commands require graph creation to be enabled;
+disabling creation leaves the created graph visible and read-only. Clearing the
+complete graph remains available whenever the session contains graph elements.
 
 ```bash
 mipview-ctl graph status SESSION_ID
