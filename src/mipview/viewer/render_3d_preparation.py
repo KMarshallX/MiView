@@ -9,6 +9,7 @@ from skimage.measure import marching_cubes
 
 from mipview.io.nifti_io import NiftiLoadResult
 from mipview.patch.selector import PatchBounds
+from mipview.vessel_graph.model import VesselGraphRenderGeometry
 
 
 MAX_VOLUME_DIMENSION = 256
@@ -29,6 +30,59 @@ class PreparedRender3D:
     stride: tuple[int, int, int]
     source_range: tuple[float, float]
     mask_applied: bool = False
+    graph_edge_segments: np.ndarray | None = None
+    graph_node_positions: np.ndarray | None = None
+    graph_intercept_positions: np.ndarray | None = None
+
+
+def prepare_vessel_graph_render(
+    geometry: VesselGraphRenderGeometry,
+) -> PreparedRender3D:
+    """Prepare bounded batched line-and-marker arrays for a vessel graph."""
+    segments: list[np.ndarray] = []
+    for polyline in geometry.polylines_world:
+        path = np.asarray(polyline, dtype=np.float32)
+        if path.ndim != 2 or path.shape[1] != 3:
+            raise ValueError("Vessel graph polylines must be Nx3 world coordinates.")
+        if path.shape[0] >= 2:
+            segments.append(
+                np.stack((path[:-1], path[1:]), axis=1).reshape(-1, 3)
+            )
+    edge_segments = (
+        np.concatenate(segments, axis=0)
+        if segments
+        else np.empty((0, 3), dtype=np.float32)
+    )
+    nodes = np.asarray(geometry.node_world_positions, dtype=np.float32)
+    intercepts = np.asarray(geometry.intercept_world_positions, dtype=np.float32)
+    if nodes.ndim != 2 or nodes.shape[1:] != (3,):
+        raise ValueError("Vessel graph node positions must be Nx3.")
+    if intercepts.ndim != 2 or intercepts.shape[1:] != (3,):
+        raise ValueError("Vessel graph intercept positions must be Nx3.")
+    if not (
+        np.all(np.isfinite(edge_segments))
+        and np.all(np.isfinite(nodes))
+        and np.all(np.isfinite(intercepts))
+    ):
+        raise ValueError("Vessel graph render geometry must be finite.")
+    return PreparedRender3D(
+        kind="vessel_graph",
+        render_mode="Skeleton",
+        data=None,
+        vertices=None,
+        faces=None,
+        texture_affine=None,
+        prepared_shape=(
+            int(nodes.shape[0]),
+            int(edge_segments.shape[0] // 2),
+            int(intercepts.shape[0]),
+        ),
+        stride=(1, 1, 1),
+        source_range=(0.0, 0.0),
+        graph_edge_segments=edge_segments,
+        graph_node_positions=nodes,
+        graph_intercept_positions=intercepts,
+    )
 
 
 def prepare_render(

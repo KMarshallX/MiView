@@ -18,8 +18,14 @@ from mipview.graph.spatial import (
     resolve_projection_voxel,
     update_control_point_from_projection,
 )
+from mipview.vessel_graph.model import (
+    ClippedVesselGraph,
+    VesselGraphDisplaySettings,
+)
+from mipview.vessel_graph.spatial import project_clipped_vessel_graph
 from mipview.ui.drop_loading import (
     first_supported_local_drop_path,
+    is_supported_graphml_path,
     is_supported_graph_state_path,
 )
 from mipview.state.cursor_state import CursorState
@@ -151,6 +157,7 @@ class TriPlanarViewerWidget(QWidget):
     annotation_changed = Signal(object)
     annotation_undo_availability_changed = Signal(bool)
     nifti_file_dropped = Signal(object)
+    graphml_file_dropped = Signal(object)
     graph_state_file_dropped = Signal(object)
     projection_state_changed = Signal(str, object)
     graph_context_requested = Signal(str, object, object, object)
@@ -189,6 +196,8 @@ class TriPlanarViewerWidget(QWidget):
         self._annotation_brush_mode: str = "paint"
         self._annotation_undo_stack = AnnotationUndoStack()
         self._projection_graph_state: ProjectionGraphState | None = None
+        self._vessel_graph_geometry: ClippedVesselGraph | None = None
+        self._vessel_graph_settings = VesselGraphDisplaySettings()
         self._contrast_window: tuple[float, float] | None = None
         patch_debug_value = os.getenv("MIPVIEW_PATCH_DEBUG")
         if patch_debug_value is None:
@@ -451,6 +460,7 @@ class TriPlanarViewerWidget(QWidget):
         self.patch_selector.set_center(initial_center)
         self.cursor_state.set_cursor_position(initial_center)
         self._update_projection_overrides()
+        self.refresh_vessel_graph_overlay()
 
     def replace_volume(
         self,
@@ -490,6 +500,7 @@ class TriPlanarViewerWidget(QWidget):
         self._annotation_mask = None
         self._annotation_display_volume = None
         self._annotation_editing_enabled = False
+        self._vessel_graph_geometry = None
         self._active_view = None
         self.cursor_state.clear()
         self.zoom_state.set_zoom_factor(1.0)
@@ -512,6 +523,13 @@ class TriPlanarViewerWidget(QWidget):
                 None,
             )
             view.set_projection_slice(None)
+            view.set_vessel_graph_overlay(
+                None,
+                visible=False,
+                opacity=0.0,
+                node_size=1,
+                edge_thickness=1,
+            )
         self.patch_selection_changed.emit(None)
 
     def current_cursor_position(self) -> tuple[int, int, int] | None:
@@ -630,6 +648,7 @@ class TriPlanarViewerWidget(QWidget):
             return
         self._projection_enabled[orientation] = enabled
         self._update_projection_overrides()
+        self.refresh_vessel_graph_overlay()
         self.projection_state_changed.emit(
             self._projection_mode,
             self.enabled_projection_orientations(),
@@ -675,6 +694,43 @@ class TriPlanarViewerWidget(QWidget):
         self._projection_graph_state = graph_state
         self._sync_graph_plane_shapes()
         self.refresh_graph_overlay()
+
+    def set_vessel_graph_projection(
+        self,
+        geometry: ClippedVesselGraph | None,
+        settings: VesselGraphDisplaySettings | None = None,
+    ) -> None:
+        self._vessel_graph_geometry = geometry
+        if settings is not None:
+            self._vessel_graph_settings = settings
+        self.refresh_vessel_graph_overlay()
+
+    def refresh_vessel_graph_overlay(self) -> None:
+        for view in self._views:
+            if (
+                self._vessel_graph_geometry is None
+                or self._display_volume is None
+                or not self.projection_enabled(view.orientation)
+            ):
+                view.set_vessel_graph_overlay(
+                    None,
+                    visible=False,
+                    opacity=0.0,
+                    node_size=1,
+                    edge_thickness=1,
+                )
+                continue
+            view.set_vessel_graph_overlay(
+                project_clipped_vessel_graph(
+                    self._vessel_graph_geometry,
+                    self._display_volume,
+                    view.orientation,
+                ),
+                visible=self._vessel_graph_settings.visible,
+                opacity=self._vessel_graph_settings.opacity,
+                node_size=self._vessel_graph_settings.node_size,
+                edge_thickness=self._vessel_graph_settings.edge_thickness,
+            )
 
     def refresh_graph_overlay(self) -> None:
         graph_state = self._projection_graph_state
@@ -1388,6 +1444,8 @@ class TriPlanarViewerWidget(QWidget):
     def _emit_dropped_path(self, dropped_path: Path) -> None:
         if is_supported_graph_state_path(dropped_path):
             self.graph_state_file_dropped.emit(dropped_path)
+        elif is_supported_graphml_path(dropped_path):
+            self.graphml_file_dropped.emit(dropped_path)
         else:
             self.nifti_file_dropped.emit(dropped_path)
 

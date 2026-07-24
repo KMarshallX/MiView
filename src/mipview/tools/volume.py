@@ -29,4 +29,16 @@ def derive_volume(source: NiftiLoadResult, data: np.ndarray) -> NiftiLoadResult:
         header=header,
         shape=tuple(int(dim) for dim in derived_data.shape),
         dtype=derived_data.dtype,
+        original_shape=source.original_shape,
+        original_affine=(
+            None
+            if source.original_affine is None
+            else np.asarray(source.original_affine).copy()
+        ),
+        original_axcodes=source.original_axcodes,
+        original_to_loaded_voxel_affine=(
+            None
+            if source.original_to_loaded_voxel_affine is None
+            else np.asarray(source.original_to_loaded_voxel_affine).copy()
+        ),
     )

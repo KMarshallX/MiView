@@ -17,6 +17,10 @@ class NiftiLoadResult:
     header: nib.nifti1.Nifti1Header | nib.nifti2.Nifti2Header
     shape: tuple[int, ...]
     dtype: np.dtype
+    original_shape: tuple[int, ...] | None = None
+    original_affine: np.ndarray | None = None
+    original_axcodes: tuple[str | None, ...] | None = None
+    original_to_loaded_voxel_affine: np.ndarray | None = None
 
 
 def load_nifti(path: str | Path) -> NiftiLoadResult:
@@ -46,12 +50,14 @@ def load_nifti(path: str | Path) -> NiftiLoadResult:
     source_to_canonical = nib.orientations.ornt_transform(
         source_orientation, canonical_orientation
     )
+    canonical_to_source_voxel_affine = nib.orientations.inv_ornt_aff(
+        source_to_canonical,
+        source_data.shape[:3],
+    )
     data = np.asanyarray(
         nib.orientations.apply_orientation(source_data, source_to_canonical)
     )
-    affine = source_affine @ nib.orientations.inv_ornt_aff(
-        source_to_canonical, source_data.shape[:3]
-    )
+    affine = source_affine @ canonical_to_source_voxel_affine
     header = image.header.copy()
     header.set_data_shape(data.shape)
     _, qform_code = header.get_qform(coded=True)
@@ -67,4 +73,10 @@ def load_nifti(path: str | Path) -> NiftiLoadResult:
         header=header,
         shape=shape,
         dtype=dtype,
+        original_shape=tuple(int(value) for value in source_data.shape),
+        original_affine=source_affine.copy(),
+        original_axcodes=tuple(nib.aff2axcodes(source_affine)),
+        original_to_loaded_voxel_affine=np.linalg.inv(
+            canonical_to_source_voxel_affine
+        ),
     )

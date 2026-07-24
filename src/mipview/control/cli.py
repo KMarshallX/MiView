@@ -284,6 +284,40 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     render_display.add_argument("--threshold", type=float, default=None)
 
+    graph3d_parser = subparsers.add_parser(
+        "graph3d",
+        help="Load and display read-only 3D GraphML vessel graphs.",
+        description=(
+            "GraphML commands are separate from the editable patch projection-graph "
+            "commands. Omit --session-id for main-window settings."
+        ),
+        formatter_class=_HelpFormatter,
+    )
+    graph3d_subparsers = graph3d_parser.add_subparsers(
+        dest="graph3d_command",
+        required=True,
+    )
+    graph3d_status = graph3d_subparsers.add_parser("status")
+    graph3d_status.add_argument("--session-id", default=None)
+    graph3d_load = graph3d_subparsers.add_parser("load")
+    graph3d_load.add_argument("path", metavar="GRAPHML_PATH")
+    graph3d_unload = graph3d_subparsers.add_parser("unload")
+    graph3d_unload.add_argument("layer_id", metavar="LAYER_ID")
+    graph3d_select = graph3d_subparsers.add_parser("select")
+    graph3d_select.add_argument("layer_id", metavar="LAYER_ID")
+    graph3d_select.add_argument("--session-id", default=None)
+    graph3d_display = graph3d_subparsers.add_parser("display")
+    graph3d_display.add_argument("layer_id", metavar="LAYER_ID")
+    graph3d_display.add_argument("--session-id", default=None)
+    graph3d_display.add_argument(
+        "--visible",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+    )
+    graph3d_display.add_argument("--opacity", type=float, default=None)
+    graph3d_display.add_argument("--node-size", type=int, default=None)
+    graph3d_display.add_argument("--edge-thickness", type=int, default=None)
+
     projection_parser = subparsers.add_parser(
         "projection",
         help="Set MIP/MinIP mode and save patch projections.",
@@ -368,9 +402,15 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Replace an existing non-empty graph.",
     )
-    graph_activate = graph_subparsers.add_parser("activate", help="Activate Graph mode.")
+    graph_activate = graph_subparsers.add_parser(
+        "activate",
+        help="Enable creating the 2D graph.",
+    )
     graph_activate.add_argument("session_id", metavar="SESSION_ID")
-    graph_exit = graph_subparsers.add_parser("exit", help="Exit Graph mode.")
+    graph_exit = graph_subparsers.add_parser(
+        "exit",
+        help="Disable creation while leaving the created graph visible.",
+    )
     graph_exit.add_argument("session_id", metavar="SESSION_ID")
     graph_display = graph_subparsers.add_parser(
         "display",
@@ -714,6 +754,40 @@ def _command_from_args(args: argparse.Namespace) -> tuple[str, dict[str, Any], A
             return (
                 "render3d.set_display",
                 display_args,
+                None,
+            )
+
+    if args.group == "graph3d":
+        if args.graph3d_command == "status":
+            return (
+                "graph3d.status",
+                {"session_id": args.session_id},
+                None,
+            )
+        if args.graph3d_command == "load":
+            return "graph3d.load", {"path": args.path}, None
+        if args.graph3d_command == "unload":
+            return "graph3d.unload", {"layer_id": args.layer_id}, None
+        if args.graph3d_command == "select":
+            return (
+                "graph3d.select",
+                {
+                    "layer_id": args.layer_id,
+                    "session_id": args.session_id,
+                },
+                None,
+            )
+        if args.graph3d_command == "display":
+            return (
+                "graph3d.set_display",
+                {
+                    "layer_id": args.layer_id,
+                    "session_id": args.session_id,
+                    "visible": args.visible,
+                    "opacity": args.opacity,
+                    "node_size": args.node_size,
+                    "edge_thickness": args.edge_thickness,
+                },
                 None,
             )
 

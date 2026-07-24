@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
-    QCheckBox,
+    QComboBox,
     QFormLayout,
     QHBoxLayout,
     QLabel,
@@ -19,7 +19,8 @@ from mipview.ui.collapsible_group_box import CollapsibleGroupBox
 
 class GraphPanel(QWidget):
     activation_requested = Signal()
-    visibility_changed = Signal(bool)
+    projection_layer_changed = Signal(object)
+    projection_toggle_requested = Signal()
     opacity_changed = Signal(float)
     node_size_changed = Signal(int)
     edge_thickness_changed = Signal(int)
@@ -52,17 +53,37 @@ class GraphPanel(QWidget):
         else:
             self.setFixedWidth(self.PANEL_WIDTH)
 
-        self.group = CollapsibleGroupBox("Graph", self)
+        self.group = CollapsibleGroupBox(
+            "2D Graph (only available on MIP/MinIP)",
+            self,
+        )
         form = QFormLayout(self.group)
         if adaptable_width:
             form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
 
-        self.activation_button = QPushButton("Activate", self.group)
+        self.activation_button = QPushButton(
+            "Enable Creating Graph",
+            self.group,
+        )
         self.activation_button.clicked.connect(self.activation_requested.emit)
 
-        self.visible_checkbox = QCheckBox("Visible", self.group)
-        self.visible_checkbox.setChecked(True)
-        self.visible_checkbox.toggled.connect(self.visibility_changed.emit)
+        self.projected_graph_combo = QComboBox(self.group)
+        self.projected_graph_combo.addItem("---", None)
+        self.projected_graph_combo.currentIndexChanged.connect(
+            lambda _index: self.projection_layer_changed.emit(
+                self.projected_graph_combo.currentData()
+            )
+        )
+        self.projection_toggle_button = QPushButton(
+            "Enable Projecting 3D Graph",
+            self.group,
+        )
+        self.projection_toggle_button.clicked.connect(
+            self.projection_toggle_requested.emit
+        )
+        self.projection_status_label = QLabel("", self.group)
+        self.projection_status_label.setWordWrap(True)
+        self.projection_status_label.setVisible(False)
 
         self.opacity_slider = QSlider(Qt.Orientation.Horizontal, self.group)
         self.opacity_slider.setRange(0, 100)
@@ -108,10 +129,16 @@ class GraphPanel(QWidget):
         )
         file_layout.setContentsMargins(0, 0, 0, 0)
         file_layout.setSpacing(6)
-        self.save_state_button = QPushButton("Save Graph State…", file_row)
+        self.save_state_button = QPushButton(
+            "Save Created Graph State…",
+            file_row,
+        )
         self.save_state_button.clicked.connect(self.save_state_requested.emit)
         file_layout.addWidget(self.save_state_button)
-        self.load_state_button = QPushButton("Load Graph State…", file_row)
+        self.load_state_button = QPushButton(
+            "Load Created Graph State…",
+            file_row,
+        )
         self.load_state_button.clicked.connect(self.load_state_requested.emit)
         file_layout.addWidget(self.load_state_button)
 
@@ -147,7 +174,9 @@ class GraphPanel(QWidget):
         )
 
         form.addRow(self.activation_button)
-        form.addRow(self.visible_checkbox)
+        form.addRow("3D Graph:", self.projected_graph_combo)
+        form.addRow(self.projection_toggle_button)
+        form.addRow(self.projection_status_label)
         form.addRow("Opacity:", self.opacity_slider)
         form.addRow("Node Size:", self.node_size_slider)
         form.addRow("Edge Thickness:", self.edge_thickness_slider)
@@ -179,7 +208,11 @@ class GraphPanel(QWidget):
         self.activation_button.setEnabled(bool(available))
 
     def set_editing_enabled(self, enabled: bool) -> None:
-        self.activation_button.setText("Exit" if enabled else "Activate")
+        self.activation_button.setText(
+            "Disable Creating Graph"
+            if enabled
+            else "Enable Creating Graph"
+        )
         self.curve_edge_button.setEnabled(bool(enabled))
         self.calculate_angle_button.setEnabled(bool(enabled))
         if not enabled:
@@ -189,10 +222,41 @@ class GraphPanel(QWidget):
             self.calculate_angle_button.setChecked(False)
             self.calculate_angle_button.blockSignals(was_blocked)
 
-    def set_visible_checked(self, visible: bool) -> None:
-        was_blocked = self.visible_checkbox.blockSignals(True)
-        self.visible_checkbox.setChecked(bool(visible))
-        self.visible_checkbox.blockSignals(was_blocked)
+    def set_projected_graph_layers(
+        self,
+        layers: tuple[tuple[str, str], ...],
+        selected_layer_id: str | None,
+    ) -> None:
+        was_blocked = self.projected_graph_combo.blockSignals(True)
+        self.projected_graph_combo.clear()
+        self.projected_graph_combo.addItem("---", None)
+        selected_index = 0
+        for layer_id, display_name in layers:
+            self.projected_graph_combo.addItem(display_name, layer_id)
+            if layer_id == selected_layer_id:
+                selected_index = self.projected_graph_combo.count() - 1
+        self.projected_graph_combo.setCurrentIndex(selected_index)
+        self.projected_graph_combo.blockSignals(was_blocked)
+
+    def set_projected_graph_state(
+        self,
+        *,
+        enabled: bool,
+        available: bool,
+        status: str = "",
+        warning: bool = False,
+    ) -> None:
+        self.projection_toggle_button.setText(
+            "Disable Projecting 3D Graph"
+            if enabled
+            else "Enable Projecting 3D Graph"
+        )
+        self.projection_toggle_button.setEnabled(bool(available or enabled))
+        self.projection_status_label.setText(status)
+        self.projection_status_label.setVisible(bool(status))
+        self.projection_status_label.setStyleSheet(
+            "color: #ffb74d;" if warning else ""
+        )
 
     def set_opacity(self, opacity: float) -> None:
         value = int(round(min(max(float(opacity), 0.0), 1.0) * 100.0))

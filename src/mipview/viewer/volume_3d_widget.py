@@ -44,14 +44,21 @@ from mipview.viewer.render_3d_preparation import (
     patch_box_extension_world_segments,
     patch_box_world_segments,
     prepare_render,
+    prepare_vessel_graph_render,
     source_box_world_segments,
 )
 from mipview.viewer.render_3d_state import (
     RAW_RENDER_MODES,
     SEGMENTATION_RENDER_MODES,
+    VESSEL_GRAPH_RENDER_MODES,
     Render3DSource,
     Render3DState,
     render_mode_supports_mask,
+)
+from mipview.vessel_graph.model import (
+    PROJECTED_INTERCEPT_COLOR,
+    VESSEL_EDGE_COLOR,
+    VESSEL_NODE_COLOR,
 )
 
 
@@ -80,17 +87,24 @@ class _PreparationWorker(QRunnable):
     @Slot()
     def run(self) -> None:
         try:
-            prepared = prepare_render(
-                self.source.volume,
-                kind=self.source.kind,
-                render_mode=self.render_mode,
-                threshold=self.threshold,
-                mask_volume=(
-                    None
-                    if self.mask_source is None
-                    else self.mask_source.volume
-                ),
-            )
+            if self.source.kind == "vessel_graph":
+                if self.source.vessel_graph is None:
+                    raise ValueError("Vessel graph render geometry is unavailable.")
+                prepared = prepare_vessel_graph_render(self.source.vessel_graph)
+            else:
+                if self.source.volume is None:
+                    raise ValueError("NIfTI render volume is unavailable.")
+                prepared = prepare_render(
+                    self.source.volume,
+                    kind=self.source.kind,
+                    render_mode=self.render_mode,
+                    threshold=self.threshold,
+                    mask_volume=(
+                        None
+                        if self.mask_source is None
+                        else self.mask_source.volume
+                    ),
+                )
         except Exception as exc:
             self.signals.failed.emit(self.token, str(exc))
             return
@@ -336,6 +350,7 @@ class Volume3DWidget(QWidget):
         self._canvas: Any | None = None
         self._view: Any | None = None
         self._active_visual: Any | None = None
+        self._active_graph_visuals: dict[str, Any] = {}
         self._prepared: PreparedRender3D | None = None
         self._patch_visual: Any | None = None
         self._patch_extension_visual: Any | None = None
@@ -387,8 +402,13 @@ class Volume3DWidget(QWidget):
         self._panel = panel
         panel.activation_requested.connect(self.set_active)
         panel.source_changed.connect(self.select_source)
-        panel.visibility_changed.connect(self.set_selected_visibility)
         panel.opacity_changed.connect(self.set_selected_opacity)
+        panel.vessel_graph_node_size_changed.connect(
+            self.set_selected_node_size
+        )
+        panel.vessel_graph_edge_thickness_changed.connect(
+            self.set_selected_edge_thickness
+        )
         panel.colour_changed.connect(self.set_selected_colour)
         panel.render_mode_changed.connect(self.set_selected_render_mode)
         panel.mask_changed.connect(self.set_selected_mask_source)
@@ -434,7 +454,11 @@ class Volume3DWidget(QWidget):
         source_data_changed = (
             previous_source is not None
             and replacement_source is not None
-            and previous_source.volume is not replacement_source.volume
+            and (
+                previous_source.volume is not replacement_source.volume
+                or previous_source.vessel_graph
+                is not replacement_source.vessel_graph
+            )
         )
         mask_data_changed = (
             previous_mask_source is not None
@@ -600,12 +624,38 @@ class Volume3DWidget(QWidget):
         self._apply_active_style()
         self._emit_state()
 
+    def set_selected_node_size(self, node_size: int) -> None:
+        settings = self.state.selected_settings()
+        if settings is None:
+            return
+        settings.set_node_size(node_size)
+        self._apply_active_style()
+        self._sync_panel_settings()
+        self._emit_state()
+
+    def set_selected_edge_thickness(self, edge_thickness: int) -> None:
+        settings = self.state.selected_settings()
+        if settings is None:
+            return
+        settings.set_edge_thickness(edge_thickness)
+        self._apply_active_style()
+        self._sync_panel_settings()
+        self._emit_state()
+
     def set_selected_render_mode(self, render_mode: str) -> None:
         source = self.state.selected_source()
         settings = self.state.selected_settings()
         if source is None or settings is None:
             return
-        allowed = RAW_RENDER_MODES if source.kind == "image" else SEGMENTATION_RENDER_MODES
+        allowed = (
+            RAW_RENDER_MODES
+            if source.kind == "image"
+            else (
+                SEGMENTATION_RENDER_MODES
+                if source.kind == "segmentation"
+                else VESSEL_GRAPH_RENDER_MODES
+            )
+        )
         if render_mode not in allowed:
             return
         if settings.render_mode != render_mode:
@@ -727,6 +777,17 @@ class Volume3DWidget(QWidget):
             )
         if prepared.vertices is not None and prepared.vertices.size:
             return _point_world_limits(prepared.vertices)
+        graph_points = [
+            points
+            for points in (
+                prepared.graph_edge_segments,
+                prepared.graph_node_positions,
+                prepared.graph_intercept_positions,
+            )
+            if points is not None and points.size
+        ]
+        if graph_points:
+            return _point_world_limits(np.concatenate(graph_points, axis=0))
         return None
 
     def set_patch_box(
@@ -995,6 +1056,7 @@ class Volume3DWidget(QWidget):
         if self._active_visual is not None:
             self._active_visual.parent = None
         self._active_visual = None
+        self._active_graph_visuals = {}
         self._prepared = None
 
     def _create_visual(self, prepared: PreparedRender3D, settings: Any) -> Any:
@@ -1004,7 +1066,45 @@ class Volume3DWidget(QWidget):
         from vispy.visuals.transforms import MatrixTransform
 
         rgba = _rgba(settings.colour, settings.opacity)
-        if prepared.kind == "image":
+        if prepared.kind == "vessel_graph":
+            parent = scene.Node(parent=self._view.scene)
+            if (
+                prepared.graph_edge_segments is not None
+                and prepared.graph_edge_segments.size
+            ):
+                self._active_graph_visuals["edges"] = scene.visuals.Line(
+                    pos=prepared.graph_edge_segments,
+                    connect="segments",
+                    color=_rgba(VESSEL_EDGE_COLOR, settings.opacity),
+                    width=float(settings.edge_thickness),
+                    parent=parent,
+                )
+            if (
+                prepared.graph_node_positions is not None
+                and prepared.graph_node_positions.size
+            ):
+                nodes = scene.visuals.Markers(parent=parent)
+                nodes.set_data(
+                    prepared.graph_node_positions,
+                    face_color=_rgba(VESSEL_NODE_COLOR, settings.opacity),
+                    edge_width=0,
+                    size=float(settings.node_size * 2),
+                )
+                self._active_graph_visuals["nodes"] = nodes
+            if (
+                prepared.graph_intercept_positions is not None
+                and prepared.graph_intercept_positions.size
+            ):
+                intercepts = scene.visuals.Markers(parent=parent)
+                intercepts.set_data(
+                    prepared.graph_intercept_positions,
+                    face_color=_rgba(PROJECTED_INTERCEPT_COLOR, settings.opacity),
+                    edge_width=0,
+                    size=float(settings.node_size * 2),
+                )
+                self._active_graph_visuals["intercepts"] = intercepts
+            visual = parent
+        elif prepared.kind == "image":
             _require_pyopengl_3d_textures()
             method = {
                 "MIP": "mip",
@@ -1075,7 +1175,35 @@ class Volume3DWidget(QWidget):
         if settings is None:
             return
         rgba = _rgba(settings.colour, settings.opacity)
-        if self._prepared.kind == "image":
+        if self._prepared.kind == "vessel_graph":
+            edges = self._active_graph_visuals.get("edges")
+            if edges is not None:
+                edges.set_data(
+                    pos=self._prepared.graph_edge_segments,
+                    connect="segments",
+                    color=_rgba(VESSEL_EDGE_COLOR, settings.opacity),
+                    width=float(settings.edge_thickness),
+                )
+            nodes = self._active_graph_visuals.get("nodes")
+            if nodes is not None:
+                nodes.set_data(
+                    self._prepared.graph_node_positions,
+                    face_color=_rgba(VESSEL_NODE_COLOR, settings.opacity),
+                    edge_width=0,
+                    size=float(settings.node_size * 2),
+                )
+            intercepts = self._active_graph_visuals.get("intercepts")
+            if intercepts is not None:
+                intercepts.set_data(
+                    self._prepared.graph_intercept_positions,
+                    face_color=_rgba(
+                        PROJECTED_INTERCEPT_COLOR,
+                        settings.opacity,
+                    ),
+                    edge_width=0,
+                    size=float(settings.node_size * 2),
+                )
+        elif self._prepared.kind == "image":
             cutoff = _normalized_threshold(
                 settings.threshold,
                 self._prepared.source_range,
@@ -1405,12 +1533,22 @@ class Volume3DWidget(QWidget):
         source = self.state.selected_source()
         settings = self.state.selected_settings()
         if source is None or settings is None:
+            self._panel.set_source_kind(None)
             self._panel.set_modes((), "")
             self._panel.set_masks((), None)
             self._panel.set_status("Load an image before rendering.")
             self._panel.set_render_controls_enabled(False)
             return
-        modes = RAW_RENDER_MODES if source.kind == "image" else SEGMENTATION_RENDER_MODES
+        modes = (
+            RAW_RENDER_MODES
+            if source.kind == "image"
+            else (
+                SEGMENTATION_RENDER_MODES
+                if source.kind == "segmentation"
+                else VESSEL_GRAPH_RENDER_MODES
+            )
+        )
+        self._panel.set_source_kind(source.kind)
         self._panel.set_modes(modes, settings.render_mode)
         self._panel.set_masks(
             [

@@ -24,6 +24,7 @@ from mipview.viewer.oriented_volume import build_oriented_volume
 from mipview.viewer.render_3d_state import (
     RAW_RENDER_MODES,
     SEGMENTATION_RENDER_MODES,
+    VESSEL_GRAPH_RENDER_MODES,
 )
 from mipview.viewer.slice_geometry import Orientation
 from mipview.viewer.slice_geometry import project_oriented_volume
@@ -58,6 +59,7 @@ class MipViewController:
                 "annotation_editing_enabled": bool(state.annotation.editing_enabled),
                 "num_segmentations": len(state.loaded_segmentations),
                 "num_graph_sessions": len(self.main_window.graph_session_summaries()),
+                "num_graphml_layers": len(state.loaded_vessel_graphs),
                 "orientation_indicator_mode": (
                     self.main_window.slice_viewer.orientation_indicator_mode()
                 ),
@@ -111,6 +113,7 @@ class MipViewController:
                 "brush_mode": annotation.brush_mode,
             },
             "graph_sessions": self.main_window.graph_session_summaries(),
+            "vessel_graphs": self.main_window.vessel_graph_status(),
             "render3d": slice_viewer.volume_3d_view.status(),
         }
         if volume is not None:
@@ -205,7 +208,11 @@ class MipViewController:
             allowed_modes = (
                 RAW_RENDER_MODES
                 if source is not None and source.kind == "image"
-                else SEGMENTATION_RENDER_MODES
+                else (
+                    SEGMENTATION_RENDER_MODES
+                    if source is not None and source.kind == "segmentation"
+                    else VESSEL_GRAPH_RENDER_MODES
+                )
             )
             if render_mode not in allowed_modes:
                 return CommandResult(
@@ -264,6 +271,149 @@ class MipViewController:
             return CommandResult(False, "Activate the 3D view before resetting its camera.")
         target.reset_camera()
         return CommandResult(True, "3D camera reset.", target.status())
+
+    def get_vessel_graph_status(
+        self,
+        session_id: str | None = None,
+    ) -> CommandResult:
+        if session_id is None:
+            return CommandResult(
+                True,
+                "GraphML layer status exported.",
+                self.main_window.vessel_graph_status(),
+            )
+        patch_window = self._graph_patch_window(session_id)
+        if patch_window is None:
+            return CommandResult(False, f"Patch window not found: {session_id}")
+        return CommandResult(
+            True,
+            "Patch GraphML layer status exported.",
+            patch_window.vessel_graph_status(),
+        )
+
+    def load_vessel_graph(self, path: str) -> CommandResult:
+        try:
+            layer, already_loaded = self.main_window.load_vessel_graph(Path(path))
+        except (FileNotFoundError, OSError, ValueError) as exc:
+            return CommandResult(False, str(exc))
+        return CommandResult(
+            True,
+            (
+                "GraphML layer already loaded."
+                if already_loaded
+                else "GraphML layer loaded."
+            ),
+            layer.status(),
+        )
+
+    def unload_vessel_graph(self, layer_id: str) -> CommandResult:
+        try:
+            removed = self.main_window.unload_vessel_graph(str(layer_id))
+        except ValueError as exc:
+            return CommandResult(False, str(exc))
+        return CommandResult(
+            True,
+            "GraphML layer unloaded.",
+            removed.status(),
+        )
+
+    def select_vessel_graph(
+        self,
+        layer_id: str,
+        session_id: str | None = None,
+    ) -> CommandResult:
+        normalized_id = str(layer_id)
+        if session_id is None:
+            if not any(
+                layer.id == normalized_id
+                for layer in self.main_window.state.loaded_vessel_graphs
+            ):
+                return CommandResult(
+                    False,
+                    f"GraphML layer does not exist: {normalized_id}",
+                )
+            self.main_window._on_vessel_graph_layer_changed(normalized_id)
+            return self.get_vessel_graph_status()
+        patch_window = self._graph_patch_window(session_id)
+        if patch_window is None:
+            return CommandResult(False, f"Patch window not found: {session_id}")
+        try:
+            patch_window.select_vessel_graph_layer(normalized_id)
+        except ValueError as exc:
+            return CommandResult(False, str(exc))
+        return CommandResult(
+            True,
+            "Patch GraphML layer selected.",
+            patch_window.vessel_graph_status(),
+        )
+
+    def set_vessel_graph_display(
+        self,
+        layer_id: str,
+        *,
+        session_id: str | None = None,
+        visible: bool | None = None,
+        opacity: float | None = None,
+        node_size: int | None = None,
+        edge_thickness: int | None = None,
+    ) -> CommandResult:
+        if opacity is not None and not 0.0 <= float(opacity) <= 1.0:
+            return CommandResult(False, "GraphML opacity must be between 0.0 and 1.0.")
+        if node_size is not None and not 1 <= int(node_size) <= 10:
+            return CommandResult(False, "GraphML node size must be between 1 and 10.")
+        if edge_thickness is not None and not 1 <= int(edge_thickness) <= 10:
+            return CommandResult(
+                False,
+                "GraphML edge thickness must be between 1 and 10.",
+            )
+        normalized_id = str(layer_id)
+        if session_id is not None:
+            patch_window = self._graph_patch_window(session_id)
+            if patch_window is None:
+                return CommandResult(False, f"Patch window not found: {session_id}")
+            try:
+                patch_window.set_vessel_graph_display(
+                    normalized_id,
+                    visible=visible,
+                    opacity=opacity,
+                    node_size=node_size,
+                    edge_thickness=edge_thickness,
+                )
+            except ValueError as exc:
+                return CommandResult(False, str(exc))
+            return CommandResult(
+                True,
+                "Patch GraphML display updated.",
+                patch_window.vessel_graph_status(),
+            )
+
+        layer = next(
+            (
+                candidate
+                for candidate in self.main_window.state.loaded_vessel_graphs
+                if candidate.id == normalized_id
+            ),
+            None,
+        )
+        if layer is None:
+            return CommandResult(
+                False,
+                f"GraphML layer does not exist: {normalized_id}",
+            )
+        if visible is not None:
+            layer.settings.visible = bool(visible)
+        if opacity is not None:
+            layer.settings.set_opacity(opacity)
+        if node_size is not None:
+            layer.settings.set_node_size(node_size)
+        if edge_thickness is not None:
+            layer.settings.set_edge_thickness(edge_thickness)
+        self.main_window._on_vessel_graph_layer_changed(layer.id)
+        return CommandResult(
+            True,
+            "GraphML display updated.",
+            layer.status(),
+        )
 
     def set_patch_location_display(
         self,
@@ -606,7 +756,11 @@ class MipViewController:
             return CommandResult(False, str(exc), {"session_id": session_id})
         return CommandResult(
             True,
-            "Graph mode activated." if enabled else "Graph mode exited.",
+            (
+                "Graph creation enabled."
+                if enabled
+                else "Graph creation disabled; created graph remains visible."
+            ),
             patch_window.graph_status(),
         )
 
