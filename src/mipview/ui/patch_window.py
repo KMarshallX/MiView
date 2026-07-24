@@ -92,6 +92,11 @@ from mipview.ui.window_styling import (
 )
 from mipview.viewer.intensity import normalize_slice_to_uint8, window_slice_to_uint8
 from mipview.viewer.oriented_volume import build_oriented_volume
+from mipview.viewer.orientation_indicator import (
+    ORIENTATION_INDICATOR_LABELS,
+    ORIENTATION_INDICATOR_OFF,
+    ORIENTATION_INDICATOR_WIDGET,
+)
 from mipview.viewer.ruler import display_voxel_spacing_mm, spatial_unit_to_mm
 from mipview.viewer.slice_geometry import project_oriented_volume
 from mipview.viewer.slice_geometry import Orientation, plane_axes_for_orientation
@@ -99,11 +104,19 @@ from mipview.viewer.triplanar_viewer_widget import (
     VIEW_MODE_3D,
     VIEW_MODE_AXIAL,
     VIEW_MODE_CORONAL,
+    VIEW_MODE_ORTHOGONAL,
     VIEW_MODE_ORTHOGONAL_3D,
     VIEW_MODE_SAGITTAL,
     TriPlanarViewerWidget,
 )
 from mipview.viewer.render_3d_state import Render3DSource
+from mipview.vessel_graph import (
+    ClippedVesselGraph,
+    VesselGraphDisplaySettings,
+    VesselGraphLayer,
+    VesselGraphRenderGeometry,
+    clip_vessel_graph_to_patch,
+)
 
 
 class PatchViewerWindow(QMainWindow):
@@ -148,6 +161,7 @@ class PatchViewerWindow(QMainWindow):
         projection_mask_layers: Sequence[
             tuple[str, str, NiftiLoadResult]
         ] | None = None,
+        vessel_graph_layers: Sequence[VesselGraphLayer] | None = None,
         active_segmentation_kind: str | None = None,
     ) -> None:
         super().__init__(parent)
@@ -199,6 +213,11 @@ class PatchViewerWindow(QMainWindow):
         self._annotation_visible = bool(annotation_visible)
         self._annotation_active_label = max(int(annotation_active_label), 0)
         self.graph_state = ProjectionGraphState()
+        self._vessel_graph_layers: dict[str, VesselGraphLayer] = {}
+        self._vessel_graph_settings: dict[str, VesselGraphDisplaySettings] = {}
+        self._clipped_vessel_graphs: dict[str, ClippedVesselGraph] = {}
+        self._active_vessel_graph_id: str | None = None
+        self._syncing_patch_vessel_3d = False
         self._graph_projection_mode = "MIP"
         self._patch_history = PatchHistoryManager(
             patch_volume.data,
@@ -370,7 +389,12 @@ class PatchViewerWindow(QMainWindow):
         self.graph_panel.activation_requested.connect(
             self._on_graph_activation_requested
         )
-        self.graph_panel.visibility_changed.connect(self._on_graph_visibility_changed)
+        self.graph_panel.projection_layer_changed.connect(
+            self._on_vessel_graph_layer_changed
+        )
+        self.graph_panel.projection_toggle_requested.connect(
+            self._on_vessel_graph_projection_toggle_requested
+        )
         self.graph_panel.opacity_changed.connect(self._on_graph_opacity_changed)
         self.graph_panel.node_size_changed.connect(self._on_graph_node_size_changed)
         self.graph_panel.edge_thickness_changed.connect(
@@ -395,6 +419,9 @@ class PatchViewerWindow(QMainWindow):
         self.graph_panel.load_state_requested.connect(
             self._on_load_graph_state_requested
         )
+        self.slice_viewer.volume_3d_view.state_changed.connect(
+            self._on_patch_render3d_state_changed
+        )
         self._graph_cancel_shortcut = QShortcut(
             QKeySequence(QKeySequence.StandardKey.Cancel),
             self,
@@ -407,6 +434,7 @@ class PatchViewerWindow(QMainWindow):
             self._on_auto_contrast,
         )
         self.slice_viewer.load_volume(patch_volume)
+        self.update_vessel_graph_layers(vessel_graph_layers or ())
         self.update_projection_mask_layers(projection_mask_layers or ())
         self.slice_viewer.set_projection_graph_state(self.graph_state)
         if segmentation_volume is not None:
@@ -469,6 +497,7 @@ class PatchViewerWindow(QMainWindow):
             ("Sagittal View", VIEW_MODE_SAGITTAL),
             ("Coronal View", VIEW_MODE_CORONAL),
             ("3D Render", VIEW_MODE_3D),
+            ("Orthogonal", VIEW_MODE_ORTHOGONAL),
             ("Orthogonal and 3D", VIEW_MODE_ORTHOGONAL_3D),
         ):
             action = QAction(label, self)
@@ -494,6 +523,42 @@ class PatchViewerWindow(QMainWindow):
             self.slice_viewer.set_cursor_overlay_visible
         )
         view_menu.addAction(self.cursor_overlay_action)
+        view_menu.addSeparator()
+
+        self.orientation_indicator_actions: dict[str, QAction] = {}
+        self.orientation_indicator_action_group = QActionGroup(self)
+        self.orientation_indicator_action_group.setExclusive(True)
+        for label, mode in (
+            ("Display orientation labels", ORIENTATION_INDICATOR_LABELS),
+            ("Display orientation widget", ORIENTATION_INDICATOR_WIDGET),
+            ("Turn off Orientation Indicator", ORIENTATION_INDICATOR_OFF),
+        ):
+            action = QAction(label, self)
+            action.setCheckable(True)
+            action.setChecked(
+                mode == self.slice_viewer.orientation_indicator_mode()
+            )
+            action.triggered.connect(
+                lambda _checked=False, selected_mode=mode: (
+                    self.slice_viewer.set_orientation_indicator_mode(
+                        selected_mode
+                    )
+                )
+            )
+            self.orientation_indicator_action_group.addAction(action)
+            view_menu.addAction(action)
+            self.orientation_indicator_actions[mode] = action
+        view_menu.addSeparator()
+        self.patch_extension_lines_action = QAction(
+            "Turn on/off patch indicator extension lines",
+            self,
+        )
+        self.patch_extension_lines_action.setCheckable(True)
+        self.patch_extension_lines_action.setChecked(True)
+        self.patch_extension_lines_action.toggled.connect(
+            self.slice_viewer.volume_3d_view.set_patch_extension_lines_visible
+        )
+        view_menu.addAction(self.patch_extension_lines_action)
 
         self.segmentation_menu = self.menuBar().addMenu("&Segmentation")
         self.unload_current_segmentation_action = QAction(
@@ -610,7 +675,7 @@ class PatchViewerWindow(QMainWindow):
 
         form.addRow("Mode:", self.projection_mode_combo)
         form.addRow("Mask:", self.projection_mask_combo)
-        form.addRow("MIP the segmentation:", self.projection_segmentation_checkbox)
+        form.addRow("MIP The Overlay:", self.projection_segmentation_checkbox)
         form.addRow("Direction:", direction_row)
         return panel
 
@@ -810,6 +875,77 @@ class PatchViewerWindow(QMainWindow):
         summary["layers"] = layers
         return summary
 
+    def vessel_graph_status(self) -> dict[str, object]:
+        return {
+            "session_id": self.graph_session_id,
+            "active_layer_id": self._active_vessel_graph_id,
+            "layers": [
+                {
+                    **layer.status(),
+                    "patch_settings": {
+                        "visible": self._vessel_graph_settings[layer.id].visible,
+                        "opacity": self._vessel_graph_settings[layer.id].opacity,
+                        "node_size": self._vessel_graph_settings[layer.id].node_size,
+                        "edge_thickness": (
+                            self._vessel_graph_settings[layer.id].edge_thickness
+                        ),
+                    },
+                    "patch_path_count": (
+                        0
+                        if layer.id not in self._clipped_vessel_graphs
+                        else len(
+                            self._clipped_vessel_graphs[
+                                layer.id
+                            ].polylines_world
+                        )
+                    ),
+                }
+                for layer in self._vessel_graph_layers.values()
+            ],
+        }
+
+    def select_vessel_graph_layer(self, layer_id: str) -> None:
+        if layer_id not in self._vessel_graph_layers:
+            raise ValueError(f"GraphML layer does not exist: {layer_id}")
+        self._active_vessel_graph_id = layer_id
+        self._refresh_vessel_graph_panel()
+        self._refresh_vessel_graph_projection()
+
+    def set_vessel_graph_display(
+        self,
+        layer_id: str,
+        *,
+        visible: bool | None = None,
+        opacity: float | None = None,
+        node_size: int | None = None,
+        edge_thickness: int | None = None,
+    ) -> None:
+        self.select_vessel_graph_layer(layer_id)
+        layer = self._vessel_graph_layers[layer_id]
+        if visible and not layer.projection_safe:
+            raise ValueError(
+                "This GraphML layer has a spatial mismatch; patch projections "
+                "remain disabled."
+            )
+        settings = self._vessel_graph_settings[layer_id]
+        if visible is not None:
+            if visible:
+                for candidate_id, candidate in self._vessel_graph_settings.items():
+                    candidate.visible = candidate_id == layer_id
+                if self.graph_state.editing_enabled:
+                    self.set_graph_editing_enabled(False)
+                self.set_graph_display_options(visible=False)
+            else:
+                settings.visible = False
+        if opacity is not None:
+            self.set_graph_display_options(opacity=opacity)
+        if node_size is not None:
+            self.set_graph_display_options(node_size=node_size)
+        if edge_thickness is not None:
+            self.set_graph_display_options(edge_thickness=edge_thickness)
+        self._refresh_vessel_graph_panel()
+        self._refresh_vessel_graph_projection()
+
     def save_graph_state(
         self,
         path: str | Path,
@@ -849,10 +985,10 @@ class PatchViewerWindow(QMainWindow):
         self.graph_state.editing_enabled = editing_enabled
         self.graph_state.active_orientation = active_orientation
         self.slice_viewer.set_projection_graph_state(self.graph_state)
-        self.graph_panel.set_visible_checked(self.graph_state.visible)
         self.graph_panel.set_opacity(self.graph_state.opacity)
         self.graph_panel.set_node_size(self.graph_state.node_size)
         self.graph_panel.set_edge_thickness(self.graph_state.edge_thickness)
+        self._apply_2d_graph_style_to_vessel_projections()
         self.graph_panel.set_editing_enabled(editing_enabled)
         self.restore_projection_settings(
             result.projection_mode,
@@ -979,8 +1115,8 @@ class PatchViewerWindow(QMainWindow):
         enabled_orientations = self.slice_viewer.enabled_projection_orientations()
         if not enabled_orientations:
             raise ValueError("Enable at least one MIP/MinIP projection first.")
+        self._hide_all_vessel_graph_layers()
         self.graph_state.visible = True
-        self.graph_panel.set_visible_checked(True)
         active_view = self.slice_viewer.active_view()
         if active_view in enabled_orientations:
             self.graph_state.active_orientation = active_view
@@ -1002,8 +1138,9 @@ class PatchViewerWindow(QMainWindow):
         edge_thickness: int | None = None,
     ) -> None:
         if visible is not None:
+            if visible:
+                self._hide_all_vessel_graph_layers()
             self.graph_state.visible = bool(visible)
-            self.graph_panel.set_visible_checked(self.graph_state.visible)
             if not self.graph_state.visible:
                 self.graph_state.cancel_pending_edge()
                 self.graph_state.cancel_pending_vector()
@@ -1017,8 +1154,33 @@ class PatchViewerWindow(QMainWindow):
         if edge_thickness is not None:
             self.graph_state.set_edge_thickness(edge_thickness)
             self.graph_panel.set_edge_thickness(self.graph_state.edge_thickness)
+        if (
+            opacity is not None
+            or node_size is not None
+            or edge_thickness is not None
+        ):
+            self._apply_2d_graph_style_to_vessel_projections()
         self.slice_viewer.refresh_graph_overlay()
+        self._refresh_vessel_graph_projection()
         self._refresh_graph_panel_tool_state()
+
+    def _hide_all_vessel_graph_layers(self) -> None:
+        changed = False
+        for settings in self._vessel_graph_settings.values():
+            if settings.visible:
+                settings.visible = False
+                changed = True
+        if not changed:
+            return
+        self._refresh_vessel_graph_panel()
+        self._refresh_vessel_graph_projection()
+
+    def _apply_2d_graph_style_to_vessel_projections(self) -> None:
+        for settings in self._vessel_graph_settings.values():
+            settings.set_opacity(self.graph_state.opacity)
+            settings.set_node_size(self.graph_state.node_size)
+            settings.set_edge_thickness(self.graph_state.edge_thickness)
+        self._sync_shared_graph_sizes_to_3d()
 
     def add_graph_node(
         self,
@@ -1346,7 +1508,7 @@ class PatchViewerWindow(QMainWindow):
 
     def _validate_graph_editing(self) -> None:
         if not self.graph_state.editing_enabled:
-            raise ValueError("Graph mode is not active.")
+            raise ValueError("Graph creation is not enabled.")
         if not self.graph_state.visible:
             raise ValueError("Graph visibility must be enabled before editing.")
         if not self.slice_viewer.enabled_projection_orientations():
@@ -1360,11 +1522,10 @@ class PatchViewerWindow(QMainWindow):
             self.statusBar().showMessage(str(exc))
             return
         self.statusBar().showMessage(
-            "Graph mode activated" if enabled else "Graph mode exited"
+            "Graph creation enabled"
+            if enabled
+            else "Graph creation disabled; created graph remains visible"
         )
-
-    def _on_graph_visibility_changed(self, visible: bool) -> None:
-        self.set_graph_display_options(visible=visible)
 
     def _on_graph_opacity_changed(self, opacity: float) -> None:
         self.set_graph_display_options(opacity=opacity)
@@ -1393,10 +1554,11 @@ class PatchViewerWindow(QMainWindow):
             self.graph_state.cancel_pending_vector()
             self.graph_state.cancel_active_tool()
         self.graph_panel.set_projection_available(bool(enabled))
+        self._refresh_vessel_graph_panel()
         if self.graph_state.editing_enabled and not enabled:
             self.set_graph_editing_enabled(False)
             self.statusBar().showMessage(
-                "Graph mode exited because all projections were disabled"
+                "Graph creation was disabled because all projections were disabled"
             )
             return
         if self.graph_state.active_orientation not in enabled:
@@ -2339,7 +2501,7 @@ class PatchViewerWindow(QMainWindow):
     def _on_save_graph_state_requested(self) -> None:
         selected_path, _ = QFileDialog.getSaveFileName(
             self,
-            "Save Graph State",
+            "Save Created Graph State",
             self._default_graph_state_filename(),
             "MipView Graph State (*.mipgraph.json);;JSON Files (*.json);;All Files (*)",
         )
@@ -2349,7 +2511,11 @@ class PatchViewerWindow(QMainWindow):
         try:
             saved_path = self.save_graph_state(selected_path, overwrite=True)
         except (OSError, ValueError) as exc:
-            QMessageBox.critical(self, "Save Graph State Failed", str(exc))
+            QMessageBox.critical(
+                self,
+                "Save Created Graph State Failed",
+                str(exc),
+            )
             self.statusBar().showMessage("Graph state save failed")
             return
         self.statusBar().showMessage(f"Graph state saved: {saved_path}")
@@ -2357,7 +2523,7 @@ class PatchViewerWindow(QMainWindow):
     def _on_load_graph_state_requested(self) -> None:
         selected_path, _ = QFileDialog.getOpenFileName(
             self,
-            "Load Graph State",
+            "Load Created Graph State",
             str(Path(self._default_graph_state_filename()).parent),
             "MipView Graph State (*.mipgraph.json);;JSON Files (*.json);;All Files (*)",
         )
@@ -2380,7 +2546,11 @@ class PatchViewerWindow(QMainWindow):
         try:
             result = self.load_graph_state(selected_path, replace=replace)
         except (OSError, ValueError) as exc:
-            QMessageBox.critical(self, "Load Graph State Failed", str(exc))
+            QMessageBox.critical(
+                self,
+                "Load Created Graph State Failed",
+                str(exc),
+            )
             self.statusBar().showMessage("Graph state load failed")
             return
         count_text = ", ".join(
@@ -2935,6 +3105,7 @@ class PatchViewerWindow(QMainWindow):
             self._patch_size = expected_shape
             self._patch_volume = patch_volume
             self._patch_data = patch_volume.data
+            self._rebuild_clipped_vessel_graphs()
             self._patch_history.reset(patch_volume.data)
             self._replace_patch_viewer_volume(patch_volume)
             self.update_segmentation_overlay(
@@ -2952,6 +3123,8 @@ class PatchViewerWindow(QMainWindow):
                 brush_mode=self.annotation_panel.current_brush_mode(),
             )
             self.update_projection_mask_layers(projection_mask_layers)
+            self._refresh_vessel_graph_panel()
+            self._refresh_vessel_graph_projection()
             if self.patch_position_panel.display_location_checkbox.isChecked():
                 self._on_display_patch_location_changed(True)
             self.slice_viewer.volume_3d_view.mark_selected_dirty(
@@ -3090,6 +3263,177 @@ class PatchViewerWindow(QMainWindow):
         self._on_projection_mask_changed(selected_index)
         self._sync_volume_3d_sources()
 
+    def update_vessel_graph_layers(
+        self,
+        layers: Sequence[VesselGraphLayer],
+    ) -> None:
+        """Share main-session GraphML data while retaining patch-local settings."""
+        previous_settings = self._vessel_graph_settings
+        self._vessel_graph_layers = {layer.id: layer for layer in layers}
+        self._vessel_graph_settings = {}
+        for layer in layers:
+            existing = previous_settings.get(layer.id)
+            self._vessel_graph_settings[layer.id] = (
+                existing
+                if existing is not None
+                else VesselGraphDisplaySettings(
+                    visible=False,
+                    opacity=self.graph_state.opacity,
+                    node_size=self.graph_state.node_size,
+                    edge_thickness=self.graph_state.edge_thickness,
+                )
+            )
+        if self._active_vessel_graph_id not in self._vessel_graph_layers:
+            self._active_vessel_graph_id = None
+        self._rebuild_clipped_vessel_graphs()
+        self._refresh_vessel_graph_panel()
+        self._refresh_vessel_graph_projection()
+        self._sync_volume_3d_sources()
+
+    def _rebuild_clipped_vessel_graphs(self) -> None:
+        self._clipped_vessel_graphs = {}
+        bounds = self._source_patch_bounds
+        if bounds is None:
+            return
+        for layer in self._vessel_graph_layers.values():
+            if not layer.projection_safe:
+                continue
+            self._clipped_vessel_graphs[layer.id] = clip_vessel_graph_to_patch(
+                layer.data,
+                bounds,
+                self._patch_volume.affine,
+            )
+
+    def _active_vessel_graph_layer(self) -> VesselGraphLayer | None:
+        if self._active_vessel_graph_id is None:
+            return None
+        return self._vessel_graph_layers.get(self._active_vessel_graph_id)
+
+    def _active_vessel_graph_settings(
+        self,
+    ) -> VesselGraphDisplaySettings | None:
+        if self._active_vessel_graph_id is None:
+            return None
+        return self._vessel_graph_settings.get(self._active_vessel_graph_id)
+
+    def _refresh_vessel_graph_panel(self) -> None:
+        self.graph_panel.set_projected_graph_layers(
+            tuple(
+                (layer.id, layer.display_name)
+                for layer in self._vessel_graph_layers.values()
+            ),
+            self._active_vessel_graph_id,
+        )
+        layer = self._active_vessel_graph_layer()
+        settings = self._active_vessel_graph_settings()
+        if layer is None or settings is None:
+            self.graph_panel.set_projected_graph_state(
+                enabled=False,
+                available=False,
+                status=(
+                    "Select a GraphML layer to project."
+                    if self._vessel_graph_layers
+                    else "No GraphML layer loaded."
+                ),
+            )
+            return
+        if not layer.projection_safe:
+            self.graph_panel.set_projected_graph_state(
+                enabled=False,
+                available=False,
+                status="Spatial warning: projection is disabled for this layer.",
+                warning=True,
+            )
+        else:
+            clipped = self._clipped_vessel_graphs.get(layer.id)
+            self.graph_panel.set_projected_graph_state(
+                enabled=settings.visible,
+                available=bool(
+                    self.slice_viewer.enabled_projection_orientations()
+                ),
+                status=(
+                    f"{0 if clipped is None else len(clipped.polylines_world)} "
+                    "clipped paths."
+                ),
+            )
+
+    def _refresh_vessel_graph_projection(self) -> None:
+        layer = self._active_vessel_graph_layer()
+        settings = self._active_vessel_graph_settings()
+        geometry = (
+            None
+            if layer is None or not layer.projection_safe
+            else self._clipped_vessel_graphs.get(layer.id)
+        )
+        self.slice_viewer.set_vessel_graph_projection(geometry, settings)
+
+    def _on_vessel_graph_layer_changed(self, layer_id: object) -> None:
+        self._active_vessel_graph_id = (
+            layer_id if isinstance(layer_id, str) else None
+        )
+        self._refresh_vessel_graph_panel()
+        self._refresh_vessel_graph_projection()
+
+    def _on_vessel_graph_projection_toggle_requested(self) -> None:
+        settings = self._active_vessel_graph_settings()
+        if settings is None:
+            self.statusBar().showMessage(
+                "Select a GraphML layer before enabling projection."
+            )
+            return
+        try:
+            self.set_vessel_graph_display(
+                self._active_vessel_graph_id or "",
+                visible=not settings.visible,
+            )
+        except ValueError as exc:
+            self.statusBar().showMessage(str(exc))
+
+    def _sync_shared_graph_sizes_to_3d(self) -> None:
+        target = self.slice_viewer.volume_3d_view
+        self._syncing_patch_vessel_3d = True
+        try:
+            for layer_id in self._vessel_graph_layers:
+                render_settings = target.state.settings.get(layer_id)
+                if render_settings is None:
+                    continue
+                render_settings.set_node_size(self.graph_state.node_size)
+                render_settings.set_edge_thickness(
+                    self.graph_state.edge_thickness
+                )
+            selected = target.state.selected_source()
+            if selected is not None and selected.kind == "vessel_graph":
+                target.set_selected_node_size(self.graph_state.node_size)
+                target.set_selected_edge_thickness(
+                    self.graph_state.edge_thickness
+                )
+        finally:
+            self._syncing_patch_vessel_3d = False
+
+    def _on_patch_render3d_state_changed(self, status: object) -> None:
+        if self._syncing_patch_vessel_3d:
+            return
+        if not isinstance(status, dict):
+            return
+        layer_id = status.get("selected_source_id")
+        if not isinstance(layer_id, str) or layer_id not in self._vessel_graph_settings:
+            return
+        render_settings = self.slice_viewer.volume_3d_view.state.settings.get(
+            layer_id
+        )
+        if render_settings is None:
+            return
+        self.graph_state.set_node_size(render_settings.node_size)
+        self.graph_state.set_edge_thickness(render_settings.edge_thickness)
+        self.graph_panel.set_node_size(self.graph_state.node_size)
+        self.graph_panel.set_edge_thickness(self.graph_state.edge_thickness)
+        for settings in self._vessel_graph_settings.values():
+            settings.set_node_size(self.graph_state.node_size)
+            settings.set_edge_thickness(self.graph_state.edge_thickness)
+        self._sync_shared_graph_sizes_to_3d()
+        self.slice_viewer.refresh_graph_overlay()
+        self._refresh_vessel_graph_projection()
+
     def _sync_volume_3d_sources(self) -> None:
         sources = [
             Render3DSource(
@@ -3111,7 +3455,38 @@ class PatchViewerWindow(QMainWindow):
             )
             for segmentation_id, volume in self._projection_mask_layers.items()
         )
-        self.slice_viewer.volume_3d_view.set_sources(sources)
+        for layer_id, layer in self._vessel_graph_layers.items():
+            clipped = self._clipped_vessel_graphs.get(layer_id)
+            if clipped is None:
+                continue
+            sources.append(
+                Render3DSource(
+                    id=layer.id,
+                    display_name=layer.display_name,
+                    volume=None,
+                    kind="vessel_graph",
+                    vessel_graph=VesselGraphRenderGeometry(
+                        polylines_world=clipped.polylines_world,
+                        node_world_positions=clipped.node_world_positions,
+                        intercept_world_positions=(
+                            clipped.intercept_world_positions
+                        ),
+                    ),
+                )
+            )
+        self._syncing_patch_vessel_3d = True
+        try:
+            self.slice_viewer.volume_3d_view.set_sources(sources)
+            for layer_id, settings in self._vessel_graph_settings.items():
+                render_settings = (
+                    self.slice_viewer.volume_3d_view.state.settings.get(layer_id)
+                )
+                if render_settings is None:
+                    continue
+                render_settings.set_node_size(settings.node_size)
+                render_settings.set_edge_thickness(settings.edge_thickness)
+        finally:
+            self._syncing_patch_vessel_3d = False
 
     def _on_display_patch_location_changed(self, visible: bool) -> None:
         self.slice_viewer.volume_3d_view.set_locator_context(

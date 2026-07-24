@@ -51,6 +51,14 @@ class CommandRegistry:
         self.register("render3d.update", self.controller.update_render3d)
         self.register("render3d.set_display", self.controller.set_render3d_display)
         self.register("render3d.reset_camera", self.controller.reset_render3d_camera)
+        self.register("graph3d.status", self.controller.get_vessel_graph_status)
+        self.register("graph3d.load", self.controller.load_vessel_graph)
+        self.register("graph3d.unload", self.controller.unload_vessel_graph)
+        self.register("graph3d.select", self.controller.select_vessel_graph)
+        self.register(
+            "graph3d.set_display",
+            self.controller.set_vessel_graph_display,
+        )
         self.register(
             "patch.display_location",
             self.controller.set_patch_location_display,

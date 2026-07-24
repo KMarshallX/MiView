@@ -1,27 +1,64 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
-from PySide6.QtCore import QObject, QRunnable, QThreadPool, Qt, Signal, Slot
-from PySide6.QtGui import QCloseEvent
+from PySide6.QtCore import (
+    QEvent,
+    QObject,
+    QPointF,
+    QRectF,
+    QRunnable,
+    QThreadPool,
+    Qt,
+    Signal,
+    Slot,
+)
+from PySide6.QtGui import (
+    QCloseEvent,
+    QColor,
+    QFont,
+    QPaintEvent,
+    QPainter,
+    QPen,
+    QPolygonF,
+)
 from PySide6.QtWidgets import QApplication, QLabel, QVBoxLayout, QWidget
 
 from mipview.io.nifti_io import NiftiLoadResult
 from mipview.patch.selector import PatchBounds
 from mipview.ui.volume_3d_panel import Volume3DPanel
+from mipview.viewer.orientation_indicator import (
+    ORIENTATION_INDICATOR_LABELS,
+    ORIENTATION_INDICATOR_WIDGET,
+    OrientationIndicatorMode,
+    normalize_orientation_indicator_mode,
+    orientation_axis_colour,
+)
 from mipview.viewer.render_3d_preparation import (
     PreparedRender3D,
+    cursor_world_position,
+    orientation_label_world_positions,
+    patch_box_extension_world_segments,
     patch_box_world_segments,
     prepare_render,
+    prepare_vessel_graph_render,
     source_box_world_segments,
 )
 from mipview.viewer.render_3d_state import (
     RAW_RENDER_MODES,
     SEGMENTATION_RENDER_MODES,
+    VESSEL_GRAPH_RENDER_MODES,
     Render3DSource,
     Render3DState,
+    render_mode_supports_mask,
+)
+from mipview.vessel_graph.model import (
+    PROJECTED_INTERCEPT_COLOR,
+    VESSEL_EDGE_COLOR,
+    VESSEL_NODE_COLOR,
 )
 
 
@@ -37,23 +74,37 @@ class _PreparationWorker(QRunnable):
         source: Render3DSource,
         render_mode: str,
         threshold: float,
+        mask_source: Render3DSource | None,
     ) -> None:
         super().__init__()
         self.token = token
         self.source = source
         self.render_mode = render_mode
         self.threshold = threshold
+        self.mask_source = mask_source
         self.signals = _PreparationSignals()
 
     @Slot()
     def run(self) -> None:
         try:
-            prepared = prepare_render(
-                self.source.volume,
-                kind=self.source.kind,
-                render_mode=self.render_mode,
-                threshold=self.threshold,
-            )
+            if self.source.kind == "vessel_graph":
+                if self.source.vessel_graph is None:
+                    raise ValueError("Vessel graph render geometry is unavailable.")
+                prepared = prepare_vessel_graph_render(self.source.vessel_graph)
+            else:
+                if self.source.volume is None:
+                    raise ValueError("NIfTI render volume is unavailable.")
+                prepared = prepare_render(
+                    self.source.volume,
+                    kind=self.source.kind,
+                    render_mode=self.render_mode,
+                    threshold=self.threshold,
+                    mask_volume=(
+                        None
+                        if self.mask_source is None
+                        else self.mask_source.volume
+                    ),
+                )
         except Exception as exc:
             self.signals.failed.emit(self.token, str(exc))
             return
@@ -65,6 +116,219 @@ class _PatchBoxState:
     bounds: PatchBounds | None = None
     affine: np.ndarray | None = None
     visible: bool = False
+
+
+class _Volume3DCursorOverlay(QWidget):
+    """Mouse-transparent cursor and orientation overlay above the VisPy canvas."""
+
+    def __init__(
+        self,
+        position_provider: Callable[[], tuple[float, float] | None],
+        mode_provider: Callable[[], OrientationIndicatorMode],
+        orientation_provider: Callable[
+            [], tuple[tuple[str, float, float], ...]
+        ],
+        widget_provider: Callable[
+            [], tuple[tuple[str, float, float], ...]
+        ],
+        parent: QWidget,
+    ) -> None:
+        super().__init__(parent)
+        self._position_provider = position_provider
+        self._mode_provider = mode_provider
+        self._orientation_provider = orientation_provider
+        self._widget_provider = widget_provider
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setAutoFillBackground(False)
+        parent.installEventFilter(self)
+        self.setGeometry(parent.rect())
+        self.show()
+        self.raise_()
+
+    def detach(self) -> None:
+        parent = self.parentWidget()
+        if parent is not None:
+            parent.removeEventFilter(self)
+        self.close()
+        self.setParent(None)
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+        parent = self.parentWidget()
+        if watched is parent and event.type() in {
+            QEvent.Type.Resize,
+            QEvent.Type.Show,
+        }:
+            self.setGeometry(parent.rect())
+            self.raise_()
+            self.update()
+        return False
+
+    def paintEvent(self, event: QPaintEvent) -> None:
+        _ = event
+        position = self._position_provider()
+        orientation_mode = self._mode_provider()
+        orientation_labels = (
+            self._orientation_provider()
+            if orientation_mode == ORIENTATION_INDICATOR_LABELS
+            else ()
+        )
+        orientation_widget = (
+            self._widget_provider()
+            if orientation_mode == ORIENTATION_INDICATOR_WIDGET
+            else ()
+        )
+        if (
+            position is None
+            and not orientation_labels
+            and not orientation_widget
+        ):
+            return
+
+        painter = QPainter(self)
+        if position is not None:
+            x = int(round(position[0]))
+            y = int(round(position[1]))
+            if 0 <= x < self.width() and 0 <= y < self.height():
+                painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+                pen = QPen(QColor("#ffb000"))
+                pen.setWidth(1)
+                painter.setPen(pen)
+                painter.drawLine(x, 0, x, self.height() - 1)
+                painter.drawLine(0, y, self.width() - 1, y)
+
+        if orientation_labels:
+            painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+            label_font = QFont(self.font())
+            label_font.setBold(True)
+            painter.setFont(label_font)
+            painter.setPen(QPen(QColor("#ffd400")))
+            font_metrics = painter.fontMetrics()
+            margin = 8.0
+            for label, projected_x, projected_y in orientation_labels:
+                text_width = max(float(font_metrics.horizontalAdvance(label) + 6), 16.0)
+                text_height = max(float(font_metrics.height() + 4), 16.0)
+                center_x = min(
+                    max(float(projected_x), margin + text_width / 2.0),
+                    max(margin + text_width / 2.0, self.width() - margin - text_width / 2.0),
+                )
+                center_y = min(
+                    max(float(projected_y), margin + text_height / 2.0),
+                    max(
+                        margin + text_height / 2.0,
+                        self.height() - margin - text_height / 2.0,
+                    ),
+                )
+                painter.drawText(
+                    QRectF(
+                        center_x - text_width / 2.0,
+                        center_y - text_height / 2.0,
+                        text_width,
+                        text_height,
+                    ),
+                    Qt.AlignmentFlag.AlignCenter,
+                    label,
+                )
+        if orientation_widget:
+            self._draw_orientation_widget(painter, orientation_widget)
+        painter.end()
+
+    def _draw_orientation_widget(
+        self,
+        painter: QPainter,
+        axes: tuple[tuple[str, float, float], ...],
+    ) -> None:
+        widget_extent = 42.0
+        center = np.asarray(
+            [
+                max(
+                    widget_extent + 8.0,
+                    self.width() - widget_extent - 10.0,
+                ),
+                max(
+                    widget_extent + 8.0,
+                    self.height() - widget_extent - 10.0,
+                ),
+            ],
+            dtype=np.float64,
+        )
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
+        label_font = QFont(self.font())
+        label_font.setBold(True)
+        painter.setFont(label_font)
+        axis_length = 25.0
+        for index, (label, direction_x, direction_y) in enumerate(axes):
+            colour = QColor(orientation_axis_colour(label))
+            direction = np.asarray(
+                [direction_x, direction_y],
+                dtype=np.float64,
+            )
+            projected_length = float(np.linalg.norm(direction))
+            if projected_length <= 1.0e-6:
+                painter.setPen(QPen(colour, 2))
+                painter.setBrush(colour)
+                painter.drawEllipse(QPointF(*center), 3.0, 3.0)
+                label_center = center + np.asarray(
+                    [(index - 1) * 13.0, -9.0],
+                    dtype=np.float64,
+                )
+            else:
+                endpoint = center + direction * axis_length
+                self._draw_widget_arrow(
+                    painter,
+                    QPointF(*center),
+                    QPointF(*endpoint),
+                    colour,
+                )
+                label_center = endpoint + (
+                    direction / projected_length
+                ) * 8.0
+            painter.setPen(QPen(colour))
+            painter.drawText(
+                QRectF(
+                    float(label_center[0] - 8.0),
+                    float(label_center[1] - 8.0),
+                    16.0,
+                    16.0,
+                ),
+                Qt.AlignmentFlag.AlignCenter,
+                label,
+            )
+        painter.restore()
+
+    @staticmethod
+    def _draw_widget_arrow(
+        painter: QPainter,
+        start: QPointF,
+        end: QPointF,
+        colour: QColor,
+    ) -> None:
+        pen = QPen(colour, 2)
+        pen.setCosmetic(True)
+        painter.setPen(pen)
+        painter.setBrush(colour)
+        painter.drawLine(start, end)
+        delta = np.asarray(
+            [end.x() - start.x(), end.y() - start.y()],
+            dtype=np.float64,
+        )
+        length = float(np.linalg.norm(delta))
+        if length <= 0.0:
+            return
+        unit = delta / length
+        perpendicular = np.asarray([-unit[1], unit[0]])
+        base = np.asarray([end.x(), end.y()]) - unit * 6.0
+        painter.drawPolygon(
+            QPolygonF(
+                [
+                    end,
+                    QPointF(*(base + perpendicular * 4.0)),
+                    QPointF(*(base - perpendicular * 4.0)),
+                ]
+            )
+        )
 
 
 class Volume3DWidget(QWidget):
@@ -86,15 +350,26 @@ class Volume3DWidget(QWidget):
         self._canvas: Any | None = None
         self._view: Any | None = None
         self._active_visual: Any | None = None
+        self._active_graph_visuals: dict[str, Any] = {}
         self._prepared: PreparedRender3D | None = None
         self._patch_visual: Any | None = None
+        self._patch_extension_visual: Any | None = None
         self._source_box_visual: Any | None = None
         self._locator_visual: Any | None = None
+        self._cursor_overlay: _Volume3DCursorOverlay | None = None
+        self._volume_shape: tuple[int, int, int] | None = None
+        self._volume_affine: np.ndarray | None = None
+        self._cursor_position: tuple[int, int, int] | None = None
+        self._cursor_visible = True
+        self._orientation_indicator_mode: OrientationIndicatorMode = (
+            ORIENTATION_INDICATOR_LABELS
+        )
         self._locator_volume: NiftiLoadResult | None = None
         self._locator_visible = False
         self._locator_source_shape: tuple[int, int, int] | None = None
         self._locator_source_affine: np.ndarray | None = None
         self._patch_box = _PatchBoxState()
+        self._patch_extension_lines_visible = True
 
         self.title_label = QLabel("3D", self)
         self.title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -127,10 +402,16 @@ class Volume3DWidget(QWidget):
         self._panel = panel
         panel.activation_requested.connect(self.set_active)
         panel.source_changed.connect(self.select_source)
-        panel.visibility_changed.connect(self.set_selected_visibility)
         panel.opacity_changed.connect(self.set_selected_opacity)
+        panel.vessel_graph_node_size_changed.connect(
+            self.set_selected_node_size
+        )
+        panel.vessel_graph_edge_thickness_changed.connect(
+            self.set_selected_edge_thickness
+        )
         panel.colour_changed.connect(self.set_selected_colour)
         panel.render_mode_changed.connect(self.set_selected_render_mode)
+        panel.mask_changed.connect(self.set_selected_mask_source)
         panel.threshold_changed.connect(self.set_selected_threshold)
         panel.update_requested.connect(self.update_selected_render)
         panel.reset_camera_requested.connect(self.reset_camera)
@@ -146,21 +427,59 @@ class Volume3DWidget(QWidget):
             if rendered_before is None
             else self.state.sources.get(rendered_before)
         )
+        previous_settings = (
+            None
+            if rendered_before is None
+            else self.state.settings.get(rendered_before)
+        )
+        previous_mask_id = (
+            None
+            if previous_settings is None
+            else previous_settings.mask_source_id
+        )
+        previous_mask_source = (
+            None
+            if previous_mask_id is None
+            else self.state.sources.get(previous_mask_id)
+        )
         replacement_source = next(
             (source for source in sources if source.id == rendered_before),
+            None,
+        )
+        replacement_mask_source = next(
+            (source for source in sources if source.id == previous_mask_id),
             None,
         )
         self.state.set_sources(sources)
         source_data_changed = (
             previous_source is not None
             and replacement_source is not None
-            and previous_source.volume is not replacement_source.volume
+            and (
+                previous_source.volume is not replacement_source.volume
+                or previous_source.vessel_graph
+                is not replacement_source.vessel_graph
+            )
+        )
+        mask_data_changed = (
+            previous_mask_source is not None
+            and previous_source is not None
+            and previous_settings is not None
+            and render_mode_supports_mask(
+                previous_source.kind,
+                previous_settings.render_mode,
+            )
+            and (
+                replacement_mask_source is None
+                or previous_mask_source.volume
+                is not replacement_mask_source.volume
+            )
         )
         if (
             rendered_before is not None
             and (
                 self.state.rendered_source_id is None
                 or source_data_changed
+                or mask_data_changed
             )
         ):
             self._release_active_visual()
@@ -212,6 +531,8 @@ class Volume3DWidget(QWidget):
             self._panel.set_status("Choose a layer and click Update.")
         self._refresh_patch_visual()
         self._refresh_locator_visual()
+        self._refresh_cursor_overlay()
+        self._refresh_orientation_overlay()
         self._emit_state()
         self.active_changed.emit(True)
 
@@ -253,6 +574,14 @@ class Volume3DWidget(QWidget):
             source,
             settings.render_mode,
             settings.threshold,
+            (
+                self.state.selected_mask_source()
+                if render_mode_supports_mask(
+                    source.kind,
+                    settings.render_mode,
+                )
+                else None
+            ),
         )
         self._workers[token] = worker
         worker.signals.finished.connect(self._on_preparation_finished)
@@ -295,12 +624,38 @@ class Volume3DWidget(QWidget):
         self._apply_active_style()
         self._emit_state()
 
+    def set_selected_node_size(self, node_size: int) -> None:
+        settings = self.state.selected_settings()
+        if settings is None:
+            return
+        settings.set_node_size(node_size)
+        self._apply_active_style()
+        self._sync_panel_settings()
+        self._emit_state()
+
+    def set_selected_edge_thickness(self, edge_thickness: int) -> None:
+        settings = self.state.selected_settings()
+        if settings is None:
+            return
+        settings.set_edge_thickness(edge_thickness)
+        self._apply_active_style()
+        self._sync_panel_settings()
+        self._emit_state()
+
     def set_selected_render_mode(self, render_mode: str) -> None:
         source = self.state.selected_source()
         settings = self.state.selected_settings()
         if source is None or settings is None:
             return
-        allowed = RAW_RENDER_MODES if source.kind == "image" else SEGMENTATION_RENDER_MODES
+        allowed = (
+            RAW_RENDER_MODES
+            if source.kind == "image"
+            else (
+                SEGMENTATION_RENDER_MODES
+                if source.kind == "segmentation"
+                else VESSEL_GRAPH_RENDER_MODES
+            )
+        )
         if render_mode not in allowed:
             return
         if settings.render_mode != render_mode:
@@ -310,6 +665,36 @@ class Volume3DWidget(QWidget):
                 )
             settings.render_mode = render_mode
             settings.dirty = True
+            self._sync_panel_settings()
+        if self._panel is not None:
+            self._panel.set_status("Update required.")
+        self._emit_state()
+
+    def set_selected_mask_source(self, mask_source_id: object) -> None:
+        settings = self.state.selected_settings()
+        if settings is None:
+            return
+        normalized = mask_source_id if isinstance(mask_source_id, str) else None
+        compatible_ids = {
+            source.id
+            for source in self.state.compatible_masks_for(
+                self.state.selected_source_id
+            )
+        }
+        if normalized is not None and normalized not in compatible_ids:
+            self._set_error(
+                "3D render mask is unavailable or spatially incompatible: "
+                f"{normalized}"
+            )
+            return
+        if settings.mask_source_id != normalized:
+            if self.state.busy:
+                self._cancel_pending_preparation(
+                    "3D render mask changed; click Update."
+                )
+            settings.mask_source_id = normalized
+            settings.dirty = True
+            self._sync_panel_settings()
         if self._panel is not None:
             self._panel.set_status("Update required.")
         self._emit_state()
@@ -376,6 +761,12 @@ class Volume3DWidget(QWidget):
                     self._locator_source_affine,
                 )
 
+        if self._volume_shape is not None and self._volume_affine is not None:
+            return _volume_world_limits(
+                self._volume_shape,
+                self._volume_affine,
+            )
+
         prepared = self._prepared
         if prepared is None:
             return None
@@ -386,6 +777,17 @@ class Volume3DWidget(QWidget):
             )
         if prepared.vertices is not None and prepared.vertices.size:
             return _point_world_limits(prepared.vertices)
+        graph_points = [
+            points
+            for points in (
+                prepared.graph_edge_segments,
+                prepared.graph_node_positions,
+                prepared.graph_intercept_positions,
+            )
+            if points is not None and points.size
+        ]
+        if graph_points:
+            return _point_world_limits(np.concatenate(graph_points, axis=0))
         return None
 
     def set_patch_box(
@@ -401,6 +803,70 @@ class Volume3DWidget(QWidget):
             visible=bool(visible),
         )
         self._refresh_patch_visual()
+
+    def set_patch_extension_lines_visible(self, visible: bool) -> None:
+        normalized = bool(visible)
+        if normalized == self._patch_extension_lines_visible:
+            return
+        self._patch_extension_lines_visible = normalized
+        self._refresh_patch_visual()
+
+    def patch_extension_lines_visible(self) -> bool:
+        return self._patch_extension_lines_visible
+
+    def set_volume_geometry(
+        self,
+        shape: tuple[int, int, int] | None,
+        affine: np.ndarray | None,
+    ) -> None:
+        """Set source voxel geometry used by the cursor and orientation labels."""
+        if shape is None or affine is None:
+            self._volume_shape = None
+            self._volume_affine = None
+            self._cursor_position = None
+        else:
+            normalized_shape = tuple(int(value) for value in shape)
+            if len(normalized_shape) != 3 or any(
+                value <= 0 for value in normalized_shape
+            ):
+                raise ValueError(
+                    "3D source geometry must contain three positive shape values."
+                )
+            normalized_affine = np.asarray(affine, dtype=np.float64)
+            if normalized_affine.shape != (4, 4):
+                raise ValueError(
+                    f"3D source affine must be 4x4, got {normalized_affine.shape}."
+                )
+            self._volume_shape = normalized_shape
+            self._volume_affine = normalized_affine
+        self._refresh_patch_visual()
+        self._refresh_cursor_overlay()
+        self._refresh_orientation_overlay()
+
+    def set_cursor_position(
+        self,
+        cursor_position: tuple[int, int, int] | None,
+    ) -> None:
+        self._cursor_position = (
+            None
+            if cursor_position is None
+            else tuple(int(value) for value in cursor_position)
+        )
+        self._refresh_cursor_overlay()
+
+    def set_cursor_overlay_visible(self, visible: bool) -> None:
+        self._cursor_visible = bool(visible)
+        self._refresh_cursor_overlay()
+
+    def set_orientation_indicator_mode(self, mode: str) -> None:
+        normalized = normalize_orientation_indicator_mode(mode)
+        if normalized == self._orientation_indicator_mode:
+            return
+        self._orientation_indicator_mode = normalized
+        self._refresh_orientation_overlay()
+
+    def orientation_indicator_mode(self) -> OrientationIndicatorMode:
+        return self._orientation_indicator_mode
 
     def set_locator_context(
         self,
@@ -421,6 +887,8 @@ class Volume3DWidget(QWidget):
         self._locator_volume = volume
         self._locator_visible = bool(visible)
         self._refresh_locator_visual()
+        self._refresh_patch_visual()
+        self._refresh_orientation_overlay()
 
     def set_locator_source_extent(
         self,
@@ -432,11 +900,25 @@ class Volume3DWidget(QWidget):
             None if affine is None else np.asarray(affine, dtype=np.float64)
         )
         self._refresh_locator_visual()
+        self._refresh_patch_visual()
+        self._refresh_orientation_overlay()
 
     def status(self) -> dict[str, object]:
         status = self.state.status()
         status["locator_visible"] = self._locator_visible
         status["patch_box_visible"] = self._patch_box.visible
+        status["patch_extension_lines_visible"] = (
+            self._patch_extension_lines_visible
+        )
+        status["cursor_visible"] = self._cursor_visible
+        status["cursor_position"] = (
+            None
+            if self._cursor_position is None
+            else list(self._cursor_position)
+        )
+        status["orientation_indicator_mode"] = (
+            self._orientation_indicator_mode
+        )
         return status
 
     def closeEvent(self, event: QCloseEvent) -> None:
@@ -513,9 +995,25 @@ class Volume3DWidget(QWidget):
         native.show()
         self._canvas = canvas
         self._view = canvas.central_widget.add_view()
-        self._view.camera = scene.cameras.TurntableCamera(
+        class _MiddlePanTurntableCamera(scene.cameras.TurntableCamera):
+            def viewbox_mouse_event(camera_self: Any, event: Any) -> None:
+                if _pan_camera_with_middle_drag(camera_self, event):
+                    return
+                super().viewbox_mouse_event(event)
+
+        self._view.camera = _MiddlePanTurntableCamera(
             fov=45.0,
             up="+z",
+        )
+        self._cursor_overlay = _Volume3DCursorOverlay(
+            self._cursor_canvas_position,
+            self.orientation_indicator_mode,
+            self._orientation_canvas_positions,
+            self._orientation_widget_axes,
+            native,
+        )
+        self._view.scene.transform.changed.connect(
+            self._on_scene_transform_changed
         )
         if self.isVisible():
             QApplication.processEvents()
@@ -528,7 +1026,19 @@ class Volume3DWidget(QWidget):
 
     def _destroy_canvas(self) -> None:
         self._release_active_visual()
-        for name in ("_patch_visual", "_source_box_visual", "_locator_visual"):
+        if self._view is not None:
+            self._view.scene.transform.changed.disconnect(
+                self._on_scene_transform_changed
+            )
+        if self._cursor_overlay is not None:
+            self._cursor_overlay.detach()
+            self._cursor_overlay = None
+        for name in (
+            "_patch_visual",
+            "_patch_extension_visual",
+            "_source_box_visual",
+            "_locator_visual",
+        ):
             visual = getattr(self, name)
             if visual is not None:
                 visual.parent = None
@@ -546,6 +1056,7 @@ class Volume3DWidget(QWidget):
         if self._active_visual is not None:
             self._active_visual.parent = None
         self._active_visual = None
+        self._active_graph_visuals = {}
         self._prepared = None
 
     def _create_visual(self, prepared: PreparedRender3D, settings: Any) -> Any:
@@ -555,7 +1066,45 @@ class Volume3DWidget(QWidget):
         from vispy.visuals.transforms import MatrixTransform
 
         rgba = _rgba(settings.colour, settings.opacity)
-        if prepared.kind == "image":
+        if prepared.kind == "vessel_graph":
+            parent = scene.Node(parent=self._view.scene)
+            if (
+                prepared.graph_edge_segments is not None
+                and prepared.graph_edge_segments.size
+            ):
+                self._active_graph_visuals["edges"] = scene.visuals.Line(
+                    pos=prepared.graph_edge_segments,
+                    connect="segments",
+                    color=_rgba(VESSEL_EDGE_COLOR, settings.opacity),
+                    width=float(settings.edge_thickness),
+                    parent=parent,
+                )
+            if (
+                prepared.graph_node_positions is not None
+                and prepared.graph_node_positions.size
+            ):
+                nodes = scene.visuals.Markers(parent=parent)
+                nodes.set_data(
+                    prepared.graph_node_positions,
+                    face_color=_rgba(VESSEL_NODE_COLOR, settings.opacity),
+                    edge_width=0,
+                    size=float(settings.node_size * 2),
+                )
+                self._active_graph_visuals["nodes"] = nodes
+            if (
+                prepared.graph_intercept_positions is not None
+                and prepared.graph_intercept_positions.size
+            ):
+                intercepts = scene.visuals.Markers(parent=parent)
+                intercepts.set_data(
+                    prepared.graph_intercept_positions,
+                    face_color=_rgba(PROJECTED_INTERCEPT_COLOR, settings.opacity),
+                    edge_width=0,
+                    size=float(settings.node_size * 2),
+                )
+                self._active_graph_visuals["intercepts"] = intercepts
+            visual = parent
+        elif prepared.kind == "image":
             _require_pyopengl_3d_textures()
             method = {
                 "MIP": "mip",
@@ -571,11 +1120,18 @@ class Volume3DWidget(QWidget):
                 prepared.data,
                 method=method,
                 clim=(0, 255),
+                interpolation=(
+                    "nearest" if prepared.mask_applied else "linear"
+                ),
                 cmap=_volume_colormap(
                     settings.colour,
                     settings.opacity,
                     translucent=method == "translucent",
                     cutoff=cutoff,
+                    masked_minip=(
+                        prepared.mask_applied
+                        and prepared.render_mode == "MinIP"
+                    ),
                 ),
                 parent=self._view.scene,
             )
@@ -619,7 +1175,35 @@ class Volume3DWidget(QWidget):
         if settings is None:
             return
         rgba = _rgba(settings.colour, settings.opacity)
-        if self._prepared.kind == "image":
+        if self._prepared.kind == "vessel_graph":
+            edges = self._active_graph_visuals.get("edges")
+            if edges is not None:
+                edges.set_data(
+                    pos=self._prepared.graph_edge_segments,
+                    connect="segments",
+                    color=_rgba(VESSEL_EDGE_COLOR, settings.opacity),
+                    width=float(settings.edge_thickness),
+                )
+            nodes = self._active_graph_visuals.get("nodes")
+            if nodes is not None:
+                nodes.set_data(
+                    self._prepared.graph_node_positions,
+                    face_color=_rgba(VESSEL_NODE_COLOR, settings.opacity),
+                    edge_width=0,
+                    size=float(settings.node_size * 2),
+                )
+            intercepts = self._active_graph_visuals.get("intercepts")
+            if intercepts is not None:
+                intercepts.set_data(
+                    self._prepared.graph_intercept_positions,
+                    face_color=_rgba(
+                        PROJECTED_INTERCEPT_COLOR,
+                        settings.opacity,
+                    ),
+                    edge_width=0,
+                    size=float(settings.node_size * 2),
+                )
+        elif self._prepared.kind == "image":
             cutoff = _normalized_threshold(
                 settings.threshold,
                 self._prepared.source_range,
@@ -629,6 +1213,10 @@ class Volume3DWidget(QWidget):
                 settings.opacity,
                 translucent=self._prepared.render_mode == "Translucent",
                 cutoff=cutoff,
+                masked_minip=(
+                    self._prepared.mask_applied
+                    and self._prepared.render_mode == "MinIP"
+                ),
             )
         elif self._prepared.render_mode == "Points":
             self._active_visual.set_data(
@@ -644,24 +1232,233 @@ class Volume3DWidget(QWidget):
     def _refresh_patch_visual(self) -> None:
         if self._view is None:
             return
-        if self._patch_visual is not None:
-            self._patch_visual.parent = None
-            self._patch_visual = None
         state = self._patch_box
         if not state.visible or state.bounds is None or state.affine is None:
+            self._remove_patch_visuals()
             self._request_canvas_update()
             return
         from vispy import scene
 
         segments = patch_box_world_segments(state.bounds, state.affine)
-        self._patch_visual = scene.visuals.Line(
-            pos=segments,
-            connect="segments",
-            color=(1.0, 0.85, 0.05, 1.0),
-            width=2.5,
-            parent=self._view.scene,
-        )
+        if self._patch_visual is None:
+            self._patch_visual = scene.visuals.Line(
+                pos=segments,
+                connect="segments",
+                color=(1.0, 0.85, 0.05, 1.0),
+                width=2.5,
+                parent=self._view.scene,
+            )
+        else:
+            self._patch_visual.set_data(
+                pos=segments,
+                connect="segments",
+            )
+        extension_geometry = self._source_context_geometry()
+        if (
+            self._patch_extension_lines_visible
+            and extension_geometry is not None
+        ):
+            source_shape, source_affine = extension_geometry
+            bounds_within_source = (
+                0 <= state.bounds.x_start < state.bounds.x_end <= source_shape[0]
+                and 0
+                <= state.bounds.y_start
+                < state.bounds.y_end
+                <= source_shape[1]
+                and 0
+                <= state.bounds.z_start
+                < state.bounds.z_end
+                <= source_shape[2]
+            )
+            affines_match = np.allclose(
+                state.affine,
+                source_affine,
+                atol=1.0e-4,
+                rtol=0.0,
+            )
+            extension_segments = (
+                patch_box_extension_world_segments(
+                    state.bounds,
+                    source_shape,
+                    source_affine,
+                )
+                if bounds_within_source and affines_match
+                else np.empty((0, 3), dtype=np.float32)
+            )
+            if extension_segments.size:
+                if self._patch_extension_visual is None:
+                    self._patch_extension_visual = scene.visuals.Line(
+                        pos=extension_segments,
+                        connect="segments",
+                        color=(1.0, 0.85, 0.05, 0.9),
+                        width=1.0,
+                        parent=self._view.scene,
+                    )
+                else:
+                    self._patch_extension_visual.set_data(
+                        pos=extension_segments,
+                        connect="segments",
+                    )
+            elif self._patch_extension_visual is not None:
+                self._patch_extension_visual.parent = None
+                self._patch_extension_visual = None
+        elif self._patch_extension_visual is not None:
+            self._patch_extension_visual.parent = None
+            self._patch_extension_visual = None
         self._request_canvas_update()
+
+    def _remove_patch_visuals(self) -> None:
+        for name in ("_patch_visual", "_patch_extension_visual"):
+            visual = getattr(self, name)
+            if visual is not None:
+                visual.parent = None
+                setattr(self, name, None)
+
+    def _source_context_geometry(
+        self,
+    ) -> tuple[tuple[int, int, int], np.ndarray] | None:
+        if self._locator_visible:
+            if self._locator_volume is not None:
+                return (
+                    tuple(int(value) for value in self._locator_volume.shape),
+                    np.asarray(self._locator_volume.affine, dtype=np.float64),
+                )
+            if (
+                self._locator_source_shape is not None
+                and self._locator_source_affine is not None
+            ):
+                return (
+                    tuple(int(value) for value in self._locator_source_shape),
+                    self._locator_source_affine,
+                )
+        if self._volume_shape is None or self._volume_affine is None:
+            return None
+        return self._volume_shape, self._volume_affine
+
+    def _refresh_cursor_overlay(self) -> None:
+        if self._cursor_overlay is not None:
+            self._cursor_overlay.update()
+
+    def _cursor_canvas_position(self) -> tuple[float, float] | None:
+        if (
+            self._view is None
+            or not self._cursor_visible
+            or self._cursor_position is None
+            or self._volume_shape is None
+            or self._volume_affine is None
+        ):
+            return None
+        try:
+            centre = cursor_world_position(
+                self._cursor_position,
+                self._volume_shape,
+                self._volume_affine,
+            )
+        except ValueError:
+            return None
+        return self._world_canvas_position(centre)
+
+    def _world_canvas_position(
+        self,
+        world_position: np.ndarray,
+    ) -> tuple[float, float] | None:
+        if self._view is None:
+            return None
+        mapped = np.asarray(
+            self._view.scene.transform.map(world_position),
+            dtype=np.float64,
+        )
+        if mapped.shape != (4,) or not np.all(np.isfinite(mapped)):
+            return None
+        if abs(float(mapped[3])) <= np.finfo(np.float64).eps:
+            return None
+        return float(mapped[0] / mapped[3]), float(mapped[1] / mapped[3])
+
+    def _orientation_canvas_positions(
+        self,
+    ) -> tuple[tuple[str, float, float], ...]:
+        geometry = self._source_context_geometry()
+        if self._view is None or geometry is None:
+            return ()
+        shape, affine = geometry
+        labels, world_positions = orientation_label_world_positions(
+            shape,
+            affine,
+        )
+        projected: list[tuple[str, float, float]] = []
+        for label, world_position in zip(labels, world_positions, strict=True):
+            canvas_position = self._world_canvas_position(world_position)
+            if canvas_position is not None:
+                projected.append(
+                    (label, canvas_position[0], canvas_position[1])
+                )
+        return tuple(projected)
+
+    def _orientation_widget_axes(
+        self,
+    ) -> tuple[tuple[str, float, float], ...]:
+        geometry = self._source_context_geometry()
+        if self._view is None or geometry is None:
+            return ()
+        shape, affine = geometry
+        limits = _volume_world_limits(
+            shape,
+            affine,
+        )
+        world_center = np.asarray(
+            [
+                (minimum + maximum) / 2.0
+                for minimum, maximum in limits
+            ],
+            dtype=np.float64,
+        )
+        center_canvas = self._world_canvas_position(world_center)
+        if center_canvas is None:
+            return ()
+        world_span = max(
+            maximum - minimum
+            for minimum, maximum in limits
+        )
+        axis_step = max(float(world_span) * 0.12, 1.0e-3)
+        projected_axes: list[tuple[str, float, float]] = []
+        for axis, label in enumerate(("R", "A", "S")):
+            endpoint = world_center.copy()
+            endpoint[axis] += axis_step
+            endpoint_canvas = self._world_canvas_position(endpoint)
+            if endpoint_canvas is None:
+                continue
+            projected_axes.append(
+                (
+                    label,
+                    endpoint_canvas[0] - center_canvas[0],
+                    endpoint_canvas[1] - center_canvas[1],
+                )
+            )
+        if not projected_axes:
+            return ()
+        maximum_length = max(
+            float(np.hypot(direction_x, direction_y))
+            for _label, direction_x, direction_y in projected_axes
+        )
+        if maximum_length <= 1.0e-6:
+            return tuple(
+                (label, 0.0, 0.0)
+                for label, _direction_x, _direction_y in projected_axes
+            )
+        return tuple(
+            (
+                label,
+                direction_x / maximum_length,
+                direction_y / maximum_length,
+            )
+            for label, direction_x, direction_y in projected_axes
+        )
+
+    def _on_scene_transform_changed(self, _event: object = None) -> None:
+        self._refresh_cursor_overlay()
+
+    def _refresh_orientation_overlay(self) -> None:
+        self._refresh_cursor_overlay()
 
     def _refresh_locator_visual(self) -> None:
         if self._view is None:
@@ -736,11 +1533,32 @@ class Volume3DWidget(QWidget):
         source = self.state.selected_source()
         settings = self.state.selected_settings()
         if source is None or settings is None:
+            self._panel.set_source_kind(None)
+            self._panel.set_modes((), "")
+            self._panel.set_masks((), None)
             self._panel.set_status("Load an image before rendering.")
             self._panel.set_render_controls_enabled(False)
             return
-        modes = RAW_RENDER_MODES if source.kind == "image" else SEGMENTATION_RENDER_MODES
+        modes = (
+            RAW_RENDER_MODES
+            if source.kind == "image"
+            else (
+                SEGMENTATION_RENDER_MODES
+                if source.kind == "segmentation"
+                else VESSEL_GRAPH_RENDER_MODES
+            )
+        )
+        self._panel.set_source_kind(source.kind)
         self._panel.set_modes(modes, settings.render_mode)
+        self._panel.set_masks(
+            [
+                (mask_source.id, mask_source.display_name)
+                for mask_source in self.state.compatible_masks_for(
+                    self.state.selected_source_id
+                )
+            ],
+            settings.mask_source_id,
+        )
         self._panel.set_settings(settings)
         self._panel.set_render_controls_enabled(self.state.active)
 
@@ -806,6 +1624,48 @@ def _point_world_limits(
     )
 
 
+def _pan_camera_with_middle_drag(camera: Any, event: Any) -> bool:
+    """Translate a VisPy turntable camera during an unmodified middle drag."""
+    if (
+        event.type != "mouse_move"
+        or event.press_event is None
+        or 3 not in event.buttons
+        or event.mouse_event.modifiers
+    ):
+        return False
+
+    press_position = np.asarray(event.mouse_event.press_event.pos, dtype=np.float64)
+    current_position = np.asarray(event.mouse_event.pos, dtype=np.float64)
+    view_size = np.asarray(camera._viewbox.size, dtype=np.float64)
+    normalization = float(np.mean(view_size))
+    if normalization <= 0.0:
+        return False
+    event_value = camera._event_value
+    if event_value is None or np.asarray(event_value).shape != (3,):
+        camera._event_value = tuple(float(value) for value in camera.center)
+
+    distance = (press_position - current_position) / normalization
+    distance *= float(camera._scale_factor)
+    distance[1] *= -1.0
+    delta_x, delta_y, delta_z = camera._dist_to_trans(distance)
+    flip_factors = camera._flip_factors
+    up, forward, right = camera._get_dim_vectors()
+    delta_x, delta_y, delta_z = (
+        right * delta_x + forward * delta_y + up * delta_z
+    )
+    delta_x = flip_factors[0] * delta_x
+    delta_y = flip_factors[1] * delta_y
+    delta_z = flip_factors[2] * delta_z
+    start_x, start_y, start_z = camera._event_value
+    camera.center = (
+        start_x + delta_x,
+        start_y + delta_y,
+        start_z + delta_z,
+    )
+    event.handled = True
+    return True
+
+
 def _require_pyopengl_3d_textures() -> None:
     """Fail before VisPy's deferred draw when 3D texture support is absent."""
     try:
@@ -824,6 +1684,7 @@ def _volume_colormap(
     *,
     translucent: bool = False,
     cutoff: float = 0.0,
+    masked_minip: bool = False,
 ) -> Any:
     from vispy.color import Colormap
 
@@ -851,6 +1712,15 @@ def _volume_colormap(
                 (red, green, blue, alpha * 0.25),
             ],
             controls=[0.0, lower, middle, 1.0],
+        )
+    if masked_minip:
+        return Colormap(
+            [
+                (0.0, 0.0, 0.0, 0.0),
+                (red, green, blue, alpha),
+                (red, green, blue, 0.0),
+            ],
+            controls=[0.0, 254.0 / 255.0, 1.0],
         )
     return Colormap(
         [

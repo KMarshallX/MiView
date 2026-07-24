@@ -29,7 +29,21 @@ from mipview.graph.spatial import (
     normal_line_plane_endpoints,
 )
 from mipview.graph.vector import GraphVector, resolve_graph_vector
+from mipview.vessel_graph.model import (
+    PROJECTED_INTERCEPT_COLOR,
+    VESSEL_EDGE_COLOR,
+    VESSEL_NODE_COLOR,
+    ProjectedVesselGraphLayer,
+)
 from mipview.viewer.intensity import normalize_slice_to_uint8, window_slice_to_uint8
+from mipview.viewer.orientation_indicator import (
+    ORIENTATION_INDICATOR_LABELS,
+    ORIENTATION_INDICATOR_OFF,
+    ORIENTATION_INDICATOR_WIDGET,
+    OrientationIndicatorMode,
+    normalize_orientation_indicator_mode,
+    orientation_axis_colour,
+)
 from mipview.segmentation.overlay import build_segmentation_overlay_rgba
 from mipview.viewer.oriented_volume import OrientedVolume
 from mipview.viewer.ruler import display_voxel_spacing_mm, select_ruler_geometry
@@ -97,6 +111,9 @@ class SliceViewerWidget(QWidget):
         self._zoom_factor = 1.0
         self._pan_offset = (0.0, 0.0)
         self._cursor_overlay_visible = True
+        self._orientation_indicator_mode: OrientationIndicatorMode = (
+            ORIENTATION_INDICATOR_LABELS
+        )
         self._ruler_visible = True
         self._patch_overlay_visible = False
         self._patch_overlay_opacity = 0.5
@@ -143,6 +160,11 @@ class SliceViewerWidget(QWidget):
         self._graph_normal_line_thickness = 1
         self._graph_extension_line_edge: GraphEdge | None = None
         self._graph_extension_line_thickness = 1
+        self._vessel_graph_layer: ProjectedVesselGraphLayer | None = None
+        self._vessel_graph_visible = False
+        self._vessel_graph_opacity = 1.0
+        self._vessel_graph_node_size = 4
+        self._vessel_graph_edge_thickness = 2
         self._active_patch_resize_handle: str | None = None
         self._interaction_mode: str | None = None
         self._last_drag_position: QPointF | None = None
@@ -248,6 +270,16 @@ class SliceViewerWidget(QWidget):
         self._cursor_overlay_visible = visible
         self._update_scaled_pixmap()
 
+    def set_orientation_indicator_mode(self, mode: str) -> None:
+        normalized = normalize_orientation_indicator_mode(mode)
+        if normalized == self._orientation_indicator_mode:
+            return
+        self._orientation_indicator_mode = normalized
+        self._update_scaled_pixmap()
+
+    def orientation_indicator_mode(self) -> OrientationIndicatorMode:
+        return self._orientation_indicator_mode
+
     def set_ruler_visible(self, visible: bool) -> None:
         self._ruler_visible = bool(visible)
         self._update_scaled_pixmap()
@@ -317,6 +349,26 @@ class SliceViewerWidget(QWidget):
             and self._graph_pending_vector_source_node_id is None
         ):
             self._graph_preview_label_position = None
+        self._update_scaled_pixmap()
+
+    def set_vessel_graph_overlay(
+        self,
+        layer: ProjectedVesselGraphLayer | None,
+        *,
+        visible: bool,
+        opacity: float,
+        node_size: int,
+        edge_thickness: int,
+    ) -> None:
+        """Set the independent, read-only GraphML projection layer."""
+        self._vessel_graph_layer = layer
+        self._vessel_graph_visible = bool(visible)
+        self._vessel_graph_opacity = min(max(float(opacity), 0.0), 1.0)
+        self._vessel_graph_node_size = min(max(int(node_size), 1), 10)
+        self._vessel_graph_edge_thickness = min(
+            max(int(edge_thickness), 1),
+            10,
+        )
         self._update_scaled_pixmap()
 
     def set_patch_overlay(
@@ -605,8 +657,6 @@ class SliceViewerWidget(QWidget):
         )
         self._draw_segmentation_overlay(painter, display_rect)
         self._draw_annotation_overlay(painter, display_rect)
-        self._draw_orientation_indicators(painter)
-
         if (
             self._patch_overlay_visible
             and self._patch_plane_bounds is not None
@@ -629,8 +679,10 @@ class SliceViewerWidget(QWidget):
             painter.drawLine(crosshair_x, 0, crosshair_x, canvas.height() - 1)
             painter.drawLine(0, crosshair_y, canvas.width() - 1, crosshair_y)
 
+        self._draw_vessel_graph_overlay(painter, display_rect)
         self._draw_graph_overlay(painter, display_rect)
         self._draw_ruler(painter, display_rect)
+        self._draw_orientation_indicator(painter)
         painter.end()
 
         self.image_label.setPixmap(canvas)
@@ -734,6 +786,81 @@ class SliceViewerWidget(QWidget):
                 painter.setPen(preview_pen)
                 painter.setBrush(Qt.BrushStyle.NoBrush)
                 painter.drawLine(start, self._graph_preview_label_position)
+        painter.restore()
+
+    def _draw_vessel_graph_overlay(
+        self,
+        painter: QPainter,
+        display_rect: DisplayRect,
+    ) -> None:
+        layer = self._vessel_graph_layer
+        if (
+            layer is None
+            or not self._vessel_graph_visible
+            or self._vessel_graph_opacity <= 0.0
+            or self._projection_slice_2d is None
+            or layer.plane_shape
+            != (
+                int(self._projection_slice_2d.shape[1]),
+                int(self._projection_slice_2d.shape[0]),
+            )
+        ):
+            return
+
+        alpha = int(round(self._vessel_graph_opacity * 255.0))
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        edge_pen = QPen(
+            QColor(*VESSEL_EDGE_COLOR, alpha),
+            self._vessel_graph_edge_thickness,
+        )
+        edge_pen.setCosmetic(True)
+        painter.setPen(edge_pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        for polyline in layer.polylines:
+            if polyline.shape[0] < 2:
+                continue
+            path = QPainterPath(
+                self._projection_point_to_screen(
+                    polyline[0],
+                    layer.plane_shape,
+                    display_rect,
+                )
+            )
+            for point in polyline[1:]:
+                path.lineTo(
+                    self._projection_point_to_screen(
+                        point,
+                        layer.plane_shape,
+                        display_rect,
+                    )
+                )
+            painter.drawPath(path)
+
+        painter.setPen(Qt.PenStyle.NoPen)
+        radius = float(self._vessel_graph_node_size)
+        painter.setBrush(QColor(*VESSEL_NODE_COLOR, alpha))
+        for point in layer.node_positions:
+            painter.drawEllipse(
+                self._projection_point_to_screen(
+                    point,
+                    layer.plane_shape,
+                    display_rect,
+                ),
+                radius,
+                radius,
+            )
+        painter.setBrush(QColor(*PROJECTED_INTERCEPT_COLOR, alpha))
+        for point in layer.intercept_positions:
+            painter.drawEllipse(
+                self._projection_point_to_screen(
+                    point,
+                    layer.plane_shape,
+                    display_rect,
+                ),
+                radius,
+                radius,
+            )
         painter.restore()
 
     def _draw_graph_construction_lines(
@@ -1110,7 +1237,19 @@ class SliceViewerWidget(QWidget):
     ) -> QPointF:
         assert self._graph_layer is not None
         assert self._graph_layer.plane_shape is not None
-        width, height = self._graph_layer.plane_shape
+        return self._projection_point_to_screen(
+            point,
+            self._graph_layer.plane_shape,
+            display_rect,
+        )
+
+    @staticmethod
+    def _projection_point_to_screen(
+        point: tuple[float, float] | np.ndarray,
+        plane_shape: tuple[int, int],
+        display_rect: DisplayRect,
+    ) -> QPointF:
+        width, height = plane_shape
         return QPointF(
             display_rect.left + (((float(point[0]) + 0.5) / width) * display_rect.width),
             display_rect.top + (((float(point[1]) + 0.5) / height) * display_rect.height),
@@ -1939,7 +2078,17 @@ class SliceViewerWidget(QWidget):
                 self.PATCH_HANDLE_RADIUS,
             )
 
-    def _draw_orientation_indicators(self, painter: QPainter) -> None:
+    def _draw_orientation_indicator(self, painter: QPainter) -> None:
+        if self._orientation_indicator_mode == ORIENTATION_INDICATOR_LABELS:
+            self._draw_orientation_labels(painter)
+        elif self._orientation_indicator_mode == ORIENTATION_INDICATOR_WIDGET:
+            self._draw_orientation_widget(painter)
+        elif self._orientation_indicator_mode != ORIENTATION_INDICATOR_OFF:
+            raise ValueError(
+                f"Unsupported orientation mode: {self._orientation_indicator_mode}"
+            )
+
+    def _draw_orientation_labels(self, painter: QPainter) -> None:
         indicators = orientation_indicators_for_orientation(self.orientation)
         indicator_font = QFont(self._fixed_orientation_indicator_font)
         indicator_font.setBold(True)
@@ -1968,6 +2117,127 @@ class SliceViewerWidget(QWidget):
             rect.adjusted(0, 0, 0, -margin),
             Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignHCenter,
             indicators.bottom,
+        )
+
+    def _draw_orientation_widget(self, painter: QPainter) -> None:
+        indicators = orientation_indicators_for_orientation(self.orientation)
+        widget_extent = 38.0
+        center = QPointF(
+            max(
+                widget_extent + 8.0,
+                self.image_label.width() - widget_extent - 10.0,
+            ),
+            max(
+                widget_extent + 8.0,
+                self.image_label.height() - widget_extent - 10.0,
+            ),
+        )
+
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        arrow_radius = 23.0
+        labelled_endpoints = (
+            (
+                indicators.left,
+                QPointF(center.x() - arrow_radius, center.y()),
+            ),
+            (
+                indicators.right,
+                QPointF(center.x() + arrow_radius, center.y()),
+            ),
+            (
+                indicators.top,
+                QPointF(center.x(), center.y() - arrow_radius),
+            ),
+            (
+                indicators.bottom,
+                QPointF(center.x(), center.y() + arrow_radius),
+            ),
+        )
+        for label, endpoint in labelled_endpoints:
+            self._draw_orientation_arrow(
+                painter,
+                center,
+                endpoint,
+                QColor(orientation_axis_colour(label)),
+            )
+
+        label_font = QFont(self._fixed_orientation_indicator_font)
+        label_font.setBold(True)
+        painter.setFont(label_font)
+        label_radius = 30.0
+        label_size = 16.0
+        labelled_centers = (
+            (
+                indicators.left,
+                QPointF(center.x() - label_radius, center.y()),
+            ),
+            (
+                indicators.right,
+                QPointF(center.x() + label_radius, center.y()),
+            ),
+            (
+                indicators.top,
+                QPointF(center.x(), center.y() - label_radius),
+            ),
+            (
+                indicators.bottom,
+                QPointF(center.x(), center.y() + label_radius),
+            ),
+        )
+        for label, label_center in labelled_centers:
+            painter.setPen(QPen(QColor(orientation_axis_colour(label))))
+            painter.drawText(
+                QRectF(
+                    label_center.x() - label_size / 2.0,
+                    label_center.y() - label_size / 2.0,
+                    label_size,
+                    label_size,
+                ),
+                Qt.AlignmentFlag.AlignCenter,
+                label,
+            )
+        painter.restore()
+
+    @staticmethod
+    def _draw_orientation_arrow(
+        painter: QPainter,
+        start: QPointF,
+        end: QPointF,
+        colour: QColor,
+    ) -> None:
+        axis_pen = QPen(colour, 2)
+        axis_pen.setCosmetic(True)
+        painter.setPen(axis_pen)
+        painter.setBrush(colour)
+        painter.drawLine(start, end)
+        delta_x = end.x() - start.x()
+        delta_y = end.y() - start.y()
+        length = float(np.hypot(delta_x, delta_y))
+        if length <= 0.0:
+            return
+        unit_x = delta_x / length
+        unit_y = delta_y / length
+        perpendicular_x = -unit_y
+        perpendicular_y = unit_x
+        head_length = 5.0
+        head_width = 3.5
+        base_x = end.x() - unit_x * head_length
+        base_y = end.y() - unit_y * head_length
+        painter.drawPolygon(
+            QPolygonF(
+                [
+                    end,
+                    QPointF(
+                        base_x + perpendicular_x * head_width,
+                        base_y + perpendicular_y * head_width,
+                    ),
+                    QPointF(
+                        base_x - perpendicular_x * head_width,
+                        base_y - perpendicular_y * head_width,
+                    ),
+                ]
+            )
         )
 
     def _start_patch_resize_if_hit(self, label_position: QPointF) -> bool:

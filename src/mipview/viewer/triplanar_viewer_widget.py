@@ -18,8 +18,14 @@ from mipview.graph.spatial import (
     resolve_projection_voxel,
     update_control_point_from_projection,
 )
+from mipview.vessel_graph.model import (
+    ClippedVesselGraph,
+    VesselGraphDisplaySettings,
+)
+from mipview.vessel_graph.spatial import project_clipped_vessel_graph
 from mipview.ui.drop_loading import (
     first_supported_local_drop_path,
+    is_supported_graphml_path,
     is_supported_graph_state_path,
 )
 from mipview.state.cursor_state import CursorState
@@ -34,6 +40,11 @@ from mipview.patch.selector import (
     source_bounds_to_display_bounds,
 )
 from mipview.viewer.oriented_volume import OrientedVolume, build_oriented_volume
+from mipview.viewer.orientation_indicator import (
+    ORIENTATION_INDICATOR_LABELS,
+    OrientationIndicatorMode,
+    normalize_orientation_indicator_mode,
+)
 from mipview.viewer.ruler import spatial_unit_to_mm
 from mipview.viewer.slice_geometry import (
     Orientation,
@@ -52,12 +63,14 @@ VIEW_MODE_AXIAL = "axial"
 VIEW_MODE_SAGITTAL = "sagittal"
 VIEW_MODE_CORONAL = "coronal"
 VIEW_MODE_3D = "3d"
+VIEW_MODE_ORTHOGONAL = "orthogonal"
 VIEW_MODE_ORTHOGONAL_3D = "orthogonal_3d"
 VIEW_MODES = (
     VIEW_MODE_AXIAL,
     VIEW_MODE_SAGITTAL,
     VIEW_MODE_CORONAL,
     VIEW_MODE_3D,
+    VIEW_MODE_ORTHOGONAL,
     VIEW_MODE_ORTHOGONAL_3D,
 )
 
@@ -144,6 +157,7 @@ class TriPlanarViewerWidget(QWidget):
     annotation_changed = Signal(object)
     annotation_undo_availability_changed = Signal(bool)
     nifti_file_dropped = Signal(object)
+    graphml_file_dropped = Signal(object)
     graph_state_file_dropped = Signal(object)
     projection_state_changed = Signal(str, object)
     graph_context_requested = Signal(str, object, object, object)
@@ -182,6 +196,8 @@ class TriPlanarViewerWidget(QWidget):
         self._annotation_brush_mode: str = "paint"
         self._annotation_undo_stack = AnnotationUndoStack()
         self._projection_graph_state: ProjectionGraphState | None = None
+        self._vessel_graph_geometry: ClippedVesselGraph | None = None
+        self._vessel_graph_settings = VesselGraphDisplaySettings()
         self._contrast_window: tuple[float, float] | None = None
         patch_debug_value = os.getenv("MIPVIEW_PATCH_DEBUG")
         if patch_debug_value is None:
@@ -199,6 +215,9 @@ class TriPlanarViewerWidget(QWidget):
         self._projection_segmentation_enabled = True
         self._projection_segmentation_source: str | None = "all"
         self._active_view: Orientation | None = None
+        self._orientation_indicator_mode: OrientationIndicatorMode = (
+            ORIENTATION_INDICATOR_LABELS
+        )
         self._drop_loading_enabled = False
         self._projection_enabled: dict[str, bool] = {
             "axial": False,
@@ -367,6 +386,16 @@ class TriPlanarViewerWidget(QWidget):
             self._viewer_splitter.setSizes(root)
             self._top_splitter.setSizes(top)
             self._bottom_splitter.setSizes(bottom)
+        elif self._view_mode == VIEW_MODE_ORTHOGONAL:
+            self._top_splitter.insertWidget(0, self.axial_view)
+            self._top_splitter.insertWidget(1, self.coronal_view)
+            self._top_splitter.insertWidget(2, self.sagittal_view)
+            self.axial_view.setVisible(True)
+            self.coronal_view.setVisible(True)
+            self.sagittal_view.setVisible(True)
+            self._top_splitter.setSizes(
+                self._splitter_sizes.get(VIEW_MODE_ORTHOGONAL, ([1, 1, 1],))[0]
+            )
         else:
             selected_widget = {
                 VIEW_MODE_AXIAL: self.axial_view,
@@ -384,6 +413,11 @@ class TriPlanarViewerWidget(QWidget):
         *,
         volume_active: bool | None = None,
     ) -> None:
+        if self._view_mode == VIEW_MODE_ORTHOGONAL:
+            candidate = self._top_splitter.sizes()
+            if sum(candidate) > 0:
+                self._splitter_sizes[VIEW_MODE_ORTHOGONAL] = (candidate,)
+            return
         if self._view_mode != VIEW_MODE_ORTHOGONAL_3D:
             return
         _ = volume_active
@@ -403,6 +437,7 @@ class TriPlanarViewerWidget(QWidget):
             )
 
         self._display_volume = build_oriented_volume(volume.data, volume.affine)
+        self.volume_3d_view.set_volume_geometry(volume.shape, volume.affine)
         unit_scale_to_mm = spatial_unit_to_mm(volume.header.get_xyzt_units()[0])
         # Reset cursor state before reloading the views so the initial cursor
         # is always re-emitted into the freshly cleared slice widgets.
@@ -425,6 +460,7 @@ class TriPlanarViewerWidget(QWidget):
         self.patch_selector.set_center(initial_center)
         self.cursor_state.set_cursor_position(initial_center)
         self._update_projection_overrides()
+        self.refresh_vessel_graph_overlay()
 
     def replace_volume(
         self,
@@ -457,12 +493,14 @@ class TriPlanarViewerWidget(QWidget):
 
     def unload_volume(self) -> None:
         self.volume_3d_view.dismiss()
+        self.volume_3d_view.set_volume_geometry(None, None)
         self._display_volume = None
         self._segmentation_display_volume = None
         self._projection_mask_display_volume = None
         self._annotation_mask = None
         self._annotation_display_volume = None
         self._annotation_editing_enabled = False
+        self._vessel_graph_geometry = None
         self._active_view = None
         self.cursor_state.clear()
         self.zoom_state.set_zoom_factor(1.0)
@@ -485,6 +523,13 @@ class TriPlanarViewerWidget(QWidget):
                 None,
             )
             view.set_projection_slice(None)
+            view.set_vessel_graph_overlay(
+                None,
+                visible=False,
+                opacity=0.0,
+                node_size=1,
+                edge_thickness=1,
+            )
         self.patch_selection_changed.emit(None)
 
     def current_cursor_position(self) -> tuple[int, int, int] | None:
@@ -507,6 +552,19 @@ class TriPlanarViewerWidget(QWidget):
     def set_cursor_overlay_visible(self, visible: bool) -> None:
         for view in self._views:
             view.set_cursor_overlay_visible(visible)
+        self.volume_3d_view.set_cursor_overlay_visible(visible)
+
+    def set_orientation_indicator_mode(self, mode: str) -> None:
+        normalized = normalize_orientation_indicator_mode(mode)
+        if normalized == self._orientation_indicator_mode:
+            return
+        self._orientation_indicator_mode = normalized
+        for view in self._views:
+            view.set_orientation_indicator_mode(normalized)
+        self.volume_3d_view.set_orientation_indicator_mode(normalized)
+
+    def orientation_indicator_mode(self) -> OrientationIndicatorMode:
+        return self._orientation_indicator_mode
 
     def set_ruler_visible(self, visible: bool) -> None:
         for view in self._views:
@@ -590,6 +648,7 @@ class TriPlanarViewerWidget(QWidget):
             return
         self._projection_enabled[orientation] = enabled
         self._update_projection_overrides()
+        self.refresh_vessel_graph_overlay()
         self.projection_state_changed.emit(
             self._projection_mode,
             self.enabled_projection_orientations(),
@@ -635,6 +694,43 @@ class TriPlanarViewerWidget(QWidget):
         self._projection_graph_state = graph_state
         self._sync_graph_plane_shapes()
         self.refresh_graph_overlay()
+
+    def set_vessel_graph_projection(
+        self,
+        geometry: ClippedVesselGraph | None,
+        settings: VesselGraphDisplaySettings | None = None,
+    ) -> None:
+        self._vessel_graph_geometry = geometry
+        if settings is not None:
+            self._vessel_graph_settings = settings
+        self.refresh_vessel_graph_overlay()
+
+    def refresh_vessel_graph_overlay(self) -> None:
+        for view in self._views:
+            if (
+                self._vessel_graph_geometry is None
+                or self._display_volume is None
+                or not self.projection_enabled(view.orientation)
+            ):
+                view.set_vessel_graph_overlay(
+                    None,
+                    visible=False,
+                    opacity=0.0,
+                    node_size=1,
+                    edge_thickness=1,
+                )
+                continue
+            view.set_vessel_graph_overlay(
+                project_clipped_vessel_graph(
+                    self._vessel_graph_geometry,
+                    self._display_volume,
+                    view.orientation,
+                ),
+                visible=self._vessel_graph_settings.visible,
+                opacity=self._vessel_graph_settings.opacity,
+                node_size=self._vessel_graph_settings.node_size,
+                edge_thickness=self._vessel_graph_settings.edge_thickness,
+            )
 
     def refresh_graph_overlay(self) -> None:
         graph_state = self._projection_graph_state
@@ -951,7 +1047,8 @@ class TriPlanarViewerWidget(QWidget):
         self._emit_dropped_path(dropped_path)
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:
-        if watched in self._drop_event_sources and self._handle_drop_event(event):
+        drop_event_sources = getattr(self, "_drop_event_sources", ())
+        if watched in drop_event_sources and self._handle_drop_event(event):
             return True
         return super().eventFilter(watched, event)
 
@@ -966,6 +1063,7 @@ class TriPlanarViewerWidget(QWidget):
         cursor_position = (x, y, z)
         for view in self._views:
             view.set_cursor_position(cursor_position)
+        self.volume_3d_view.set_cursor_position(cursor_position)
 
         intensity = self._display_volume.source_data[x, y, z].item()
         self.cursor_inspection_changed.emit(x, y, z, intensity)
@@ -1346,6 +1444,8 @@ class TriPlanarViewerWidget(QWidget):
     def _emit_dropped_path(self, dropped_path: Path) -> None:
         if is_supported_graph_state_path(dropped_path):
             self.graph_state_file_dropped.emit(dropped_path)
+        elif is_supported_graphml_path(dropped_path):
+            self.graphml_file_dropped.emit(dropped_path)
         else:
             self.nifti_file_dropped.emit(dropped_path)
 

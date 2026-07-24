@@ -5,24 +5,38 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from mipview.io.nifti_io import NiftiLoadResult
+from mipview.vessel_graph.model import VesselGraphRenderGeometry
 
 
 RAW_RENDER_MODES = ("MIP", "MinIP", "Translucent", "Isosurface")
 SEGMENTATION_RENDER_MODES = ("Surface", "Points")
+VESSEL_GRAPH_RENDER_MODES = ("Skeleton",)
+MASKED_IMAGE_RENDER_MODES = ("MIP", "MinIP")
+MASKED_SEGMENTATION_RENDER_MODES = SEGMENTATION_RENDER_MODES
 
 
 @dataclass(frozen=True)
 class Render3DSource:
-    """A loaded NIfTI volume available to one 3D viewer."""
+    """One standalone file layer available to a 3D viewer."""
 
     id: str
     display_name: str
-    volume: NiftiLoadResult
+    volume: NiftiLoadResult | None
     kind: str
+    vessel_graph: VesselGraphRenderGeometry | None = None
 
     def __post_init__(self) -> None:
-        if self.kind not in {"image", "segmentation"}:
-            raise ValueError("3D render source kind must be image or segmentation.")
+        if self.kind not in {"image", "segmentation", "vessel_graph"}:
+            raise ValueError(
+                "3D render source kind must be image, segmentation, or vessel_graph."
+            )
+        if self.kind == "vessel_graph":
+            if self.vessel_graph is None or self.volume is not None:
+                raise ValueError(
+                    "A vessel-graph 3D source requires graph geometry and no volume."
+                )
+        elif self.volume is None or self.vessel_graph is not None:
+            raise ValueError("A NIfTI 3D source requires a volume and no graph geometry.")
 
 
 @dataclass
@@ -33,7 +47,10 @@ class Render3DSettings:
     opacity: float = 1.0
     colour: tuple[int, int, int] = (255, 255, 255)
     render_mode: str = "MIP"
+    mask_source_id: str | None = None
     threshold: float = 0.0
+    node_size: int = 4
+    edge_thickness: int = 2
     dirty: bool = True
 
     def set_opacity(self, opacity: float) -> None:
@@ -43,6 +60,12 @@ class Render3DSettings:
         if len(colour) != 3 or any(not 0 <= int(value) <= 255 for value in colour):
             raise ValueError("3D layer colour must contain three values in 0..255.")
         self.colour = tuple(int(value) for value in colour)
+
+    def set_node_size(self, node_size: int) -> None:
+        self.node_size = min(max(int(node_size), 1), 10)
+
+    def set_edge_thickness(self, edge_thickness: int) -> None:
+        self.edge_thickness = min(max(int(edge_thickness), 1), 10)
 
 
 @dataclass
@@ -68,6 +91,11 @@ class Render3DState:
 
         for source in sources:
             self.settings.setdefault(source.id, default_settings_for_source(source))
+        for source_id, settings in self.settings.items():
+            if settings.mask_source_id not in {
+                source.id for source in self.compatible_masks_for(source_id)
+            }:
+                settings.mask_source_id = None
 
         if self.selected_source_id not in self.sources:
             self.selected_source_id = sources[0].id if sources else None
@@ -94,6 +122,37 @@ class Render3DState:
         if settings is not None:
             settings.dirty = True
 
+    def compatible_masks_for(
+        self,
+        source_id: str | None,
+    ) -> tuple[Render3DSource, ...]:
+        source = self.sources.get(source_id) if source_id is not None else None
+        if source is None:
+            return ()
+        return tuple(
+            candidate
+            for candidate in self.sources.values()
+            if candidate.kind == "segmentation"
+            and source.volume is not None
+            and candidate.volume is not None
+            and _volumes_are_spatially_compatible(
+                source.volume,
+                candidate.volume,
+            )
+        )
+
+    def selected_mask_source(self) -> Render3DSource | None:
+        settings = self.selected_settings()
+        if settings is None or settings.mask_source_id is None:
+            return None
+        compatible_ids = {
+            source.id
+            for source in self.compatible_masks_for(self.selected_source_id)
+        }
+        if settings.mask_source_id not in compatible_ids:
+            return None
+        return self.sources.get(settings.mask_source_id)
+
     def status(self) -> dict[str, object]:
         source = self.selected_source()
         settings = self.selected_settings()
@@ -102,12 +161,31 @@ class Render3DState:
             "busy": self.busy,
             "selected_source_id": self.selected_source_id,
             "selected_source_name": None if source is None else source.display_name,
+            "selected_source_kind": None if source is None else source.kind,
             "rendered_source_id": self.rendered_source_id,
             "visible": None if settings is None else settings.visible,
             "opacity": None if settings is None else settings.opacity,
             "colour": None if settings is None else list(settings.colour),
             "render_mode": None if settings is None else settings.render_mode,
+            "mask_source_id": (
+                None if settings is None else settings.mask_source_id
+            ),
+            "mask_source_name": (
+                None
+                if settings is None or self.selected_mask_source() is None
+                else self.selected_mask_source().display_name
+            ),
+            "mask_applied": (
+                False
+                if source is None or settings is None
+                else render_mode_supports_mask(source.kind, settings.render_mode)
+                and self.selected_mask_source() is not None
+            ),
             "threshold": None if settings is None else settings.threshold,
+            "node_size": None if settings is None else settings.node_size,
+            "edge_thickness": (
+                None if settings is None else settings.edge_thickness
+            ),
             "update_required": None if settings is None else settings.dirty,
             "prepared_shape": (
                 None if self.prepared_shape is None else list(self.prepared_shape)
@@ -122,6 +200,13 @@ class Render3DState:
 
 
 def default_settings_for_source(source: Render3DSource) -> Render3DSettings:
+    if source.kind == "vessel_graph":
+        return Render3DSettings(
+            colour=(57, 255, 20),
+            render_mode="Skeleton",
+            threshold=0.0,
+        )
+    assert source.volume is not None
     data = source.volume.data
     sample_stride = max(1, int(np.ceil(max(data.shape) / 128)))
     sample = np.asarray(data[::sample_stride, ::sample_stride, ::sample_stride])
@@ -136,3 +221,32 @@ def default_settings_for_source(source: Render3DSource) -> Render3DSettings:
             threshold=0.5,
         )
     return Render3DSettings(render_mode="MIP", threshold=threshold)
+
+
+def render_mode_supports_mask(source_kind: str, render_mode: str) -> bool:
+    if source_kind == "image":
+        return render_mode in MASKED_IMAGE_RENDER_MODES
+    if source_kind == "segmentation":
+        return render_mode in MASKED_SEGMENTATION_RENDER_MODES
+    return False
+
+
+def _volumes_are_spatially_compatible(
+    source: NiftiLoadResult,
+    mask: NiftiLoadResult,
+) -> bool:
+    return (
+        np.asarray(source.data).ndim == 3
+        and np.asarray(mask.data).ndim == 3
+        and source.shape == mask.shape
+        and np.asarray(source.affine).shape == (4, 4)
+        and np.asarray(mask.affine).shape == (4, 4)
+        and bool(
+            np.allclose(
+                source.affine,
+                mask.affine,
+                atol=1.0e-4,
+                rtol=0.0,
+            )
+        )
+    )

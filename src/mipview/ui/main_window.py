@@ -62,7 +62,9 @@ from mipview.ui.cursor_panel import CursorInspectionPanel
 from mipview.ui.drop_load_choice_dialog import DropLoadChoice, DropLoadChoiceDialog
 from mipview.ui.drop_loading import (
     first_supported_local_drop_path,
+    is_supported_graphml_path,
     is_supported_graph_state_path,
+    is_supported_nifti_path,
 )
 from mipview.ui.overlay_opacity_control_bar import OverlayOpacityControlBar
 from mipview.ui.patch_window import PatchViewerWindow
@@ -74,15 +76,26 @@ from mipview.ui.window_styling import (
     ResponsiveFontScaler,
     apply_window_content_frame,
 )
+from mipview.viewer.orientation_indicator import (
+    ORIENTATION_INDICATOR_LABELS,
+    ORIENTATION_INDICATOR_OFF,
+    ORIENTATION_INDICATOR_WIDGET,
+)
 from mipview.viewer.triplanar_viewer_widget import (
     VIEW_MODE_3D,
     VIEW_MODE_AXIAL,
     VIEW_MODE_CORONAL,
+    VIEW_MODE_ORTHOGONAL,
     VIEW_MODE_ORTHOGONAL_3D,
     VIEW_MODE_SAGITTAL,
     TriPlanarViewerWidget,
 )
 from mipview.viewer.render_3d_state import Render3DSource
+from mipview.vessel_graph import (
+    VesselGraphRenderGeometry,
+    full_vessel_graph_geometry,
+    load_vessel_graphml,
+)
 
 ANNOTATION_LOAD_FILTER = (
     "Annotation Files (*.nii *.nii.gz *.json);;"
@@ -110,7 +123,10 @@ class MainWindow(QMainWindow):
         self.slice_viewer = TriPlanarViewerWidget(maximum_zoom=25.0)
         self.cursor_panel = CursorInspectionPanel(adaptable_width=True)
         self.annotation_panel = AnnotationPanel(adaptable_width=True)
-        self.volume_3d_panel = Volume3DPanel(self)
+        self.volume_3d_panel = Volume3DPanel(
+            self,
+            allow_vessel_graph_unload=True,
+        )
         self.slice_viewer.volume_3d_view.connect_panel(self.volume_3d_panel)
         self.contrast_control_bar = ContrastControlBar(self)
         self.overlay_opacity_control_bar = OverlayOpacityControlBar(
@@ -120,6 +136,9 @@ class MainWindow(QMainWindow):
         self.cursor_overlay_action: QAction | None = None
         self.view_mode_actions: dict[str, QAction] = {}
         self.view_mode_action_group: QActionGroup | None = None
+        self.orientation_indicator_actions: dict[str, QAction] = {}
+        self.orientation_indicator_action_group: QActionGroup | None = None
+        self.patch_extension_lines_action: QAction | None = None
         self.ruler_action: QAction | None = None
         self._cursor_overlay_checked_before_patch = True
         self.patch_toggle_action: QAction | None = None
@@ -131,6 +150,7 @@ class MainWindow(QMainWindow):
         self._patch_windows: list[PatchViewerWindow] = []
         self._content_widget: QWidget | None = None
         self._main_splitter: QSplitter | None = None
+        self._syncing_main_vessel_3d = False
         self.segmentation_config_window = SegmentationConfigWindow(self)
         self.setAcceptDrops(True)
         self._loading_hide_timer.setSingleShot(True)
@@ -158,6 +178,9 @@ class MainWindow(QMainWindow):
             self.annotation_panel.set_undo_available
         )
         self.slice_viewer.nifti_file_dropped.connect(self._on_viewer_nifti_file_dropped)
+        self.slice_viewer.graphml_file_dropped.connect(
+            self._on_viewer_graphml_file_dropped
+        )
         self.slice_viewer.graph_state_file_dropped.connect(
             self._on_viewer_graph_state_file_dropped
         )
@@ -187,6 +210,12 @@ class MainWindow(QMainWindow):
             self._on_annotation_brush_mode_changed
         )
         self.annotation_panel.undo_requested.connect(self._on_annotation_undo_requested)
+        self.volume_3d_panel.vessel_graph_unload_requested.connect(
+            self._on_unload_vessel_graph
+        )
+        self.slice_viewer.volume_3d_view.state_changed.connect(
+            self._on_render3d_state_changed
+        )
         connect_contrast_controls(
             self.contrast_control_bar,
             self.contrast_state,
@@ -220,7 +249,12 @@ class MainWindow(QMainWindow):
         right_layout.setSpacing(0)
         right_layout.addWidget(self.cursor_panel)
         right_layout.addWidget(self.annotation_panel)
-        right_layout.addWidget(self.volume_3d_panel)
+        volume_3d_panel_container = QWidget(right_panel)
+        volume_3d_panel_layout = QVBoxLayout(volume_3d_panel_container)
+        volume_3d_panel_layout.setContentsMargins(8, 0, 8, 8)
+        volume_3d_panel_layout.setSpacing(0)
+        volume_3d_panel_layout.addWidget(self.volume_3d_panel)
+        right_layout.addWidget(volume_3d_panel_container)
         right_layout.addStretch(1)
 
         right_scroll_area = QScrollArea(self)
@@ -267,6 +301,7 @@ class MainWindow(QMainWindow):
         file_menu = self.menuBar().addMenu("&File")
         view_menu = self.menuBar().addMenu("&View")
         segmentation_menu = self.menuBar().addMenu("&Segmentation")
+        graph_menu = self.menuBar().addMenu("&Graph")
         tools_menu = self.menuBar().addMenu("&Tools")
 
         open_action = QAction("&Open", self)
@@ -293,6 +328,19 @@ class MainWindow(QMainWindow):
             self.slice_viewer.set_cursor_overlay_visible
         )
         view_menu.addAction(self.cursor_overlay_action)
+        view_menu.addSeparator()
+        self._add_orientation_indicator_actions(view_menu)
+        view_menu.addSeparator()
+        self.patch_extension_lines_action = QAction(
+            "Turn on/off patch indicator extension lines",
+            self,
+        )
+        self.patch_extension_lines_action.setCheckable(True)
+        self.patch_extension_lines_action.setChecked(True)
+        self.patch_extension_lines_action.toggled.connect(
+            self.slice_viewer.volume_3d_view.set_patch_extension_lines_visible
+        )
+        view_menu.addAction(self.patch_extension_lines_action)
 
         self.patch_toggle_action = QAction("&Patch Selection", self)
         self.patch_toggle_action.setCheckable(True)
@@ -335,6 +383,10 @@ class MainWindow(QMainWindow):
         )
         segmentation_menu.addAction(self.open_segmentation_config_action)
 
+        load_graphml_action = QAction("Load &GraphML…", self)
+        load_graphml_action.triggered.connect(self._on_load_vessel_graphs)
+        graph_menu.addAction(load_graphml_action)
+
     def _add_view_mode_actions(self, view_menu: object) -> None:
         action_group = QActionGroup(self)
         action_group.setExclusive(True)
@@ -344,6 +396,7 @@ class MainWindow(QMainWindow):
             ("Sagittal View", VIEW_MODE_SAGITTAL),
             ("Coronal View", VIEW_MODE_CORONAL),
             ("3D Render", VIEW_MODE_3D),
+            ("Orthogonal", VIEW_MODE_ORTHOGONAL),
             ("Orthogonal and 3D", VIEW_MODE_ORTHOGONAL_3D),
         )
         for label, mode in labels:
@@ -366,6 +419,31 @@ class MainWindow(QMainWindow):
         action = self.view_mode_actions.get(mode)
         if action is not None:
             action.setChecked(True)
+
+    def _add_orientation_indicator_actions(self, view_menu: object) -> None:
+        action_group = QActionGroup(self)
+        action_group.setExclusive(True)
+        self.orientation_indicator_action_group = action_group
+        for label, mode in (
+            ("Display orientation labels", ORIENTATION_INDICATOR_LABELS),
+            ("Display orientation widget", ORIENTATION_INDICATOR_WIDGET),
+            ("Turn off Orientation Indicator", ORIENTATION_INDICATOR_OFF),
+        ):
+            action = QAction(label, self)
+            action.setCheckable(True)
+            action.setChecked(
+                mode == self.slice_viewer.orientation_indicator_mode()
+            )
+            action.triggered.connect(
+                lambda _checked=False, selected_mode=mode: (
+                    self.slice_viewer.set_orientation_indicator_mode(
+                        selected_mode
+                    )
+                )
+            )
+            action_group.addAction(action)
+            view_menu.addAction(action)
+            self.orientation_indicator_actions[mode] = action
 
     def resizeEvent(self, event: QResizeEvent) -> None:
         super().resizeEvent(event)
@@ -417,6 +495,7 @@ class MainWindow(QMainWindow):
         self.state.selected_patch_data = None
         self._clear_annotation_session()
         self._clear_segmentation_session()
+        self._clear_vessel_graph_session()
         self._set_patch_selection_active(False)
         if self.cursor_overlay_action is not None:
             self.cursor_overlay_action.setEnabled(True)
@@ -536,6 +615,7 @@ class MainWindow(QMainWindow):
                 None if active_segmentation is None else active_segmentation.kind
             ),
             projection_mask_layers=self._projection_mask_layers_for_bounds(bounds),
+            vessel_graph_layers=self.state.loaded_vessel_graphs,
             segmentation_opacity=self.state.segmentation_opacity,
             annotation_mask=active_annotation_patch,
             annotation_opacity=self.state.annotation.opacity,
@@ -1419,8 +1499,181 @@ class MainWindow(QMainWindow):
         if loaded_count > 0:
             self.statusBar().showMessage(f"Loaded {loaded_count} segmentation file(s)")
 
+    def _on_load_vessel_graphs(self) -> None:
+        if self.state.volume is None:
+            QMessageBox.warning(
+                self,
+                "No Image Loaded",
+                "Load a base image before loading GraphML vessel graphs.",
+            )
+            return
+        selected_files, _ = QFileDialog.getOpenFileNames(
+            self,
+            "Load Vessel GraphML",
+            "",
+            "GraphML Files (*.graphml);;All Files (*)",
+        )
+        for selected_file in selected_files:
+            self._load_vessel_graph_from_path(Path(selected_file))
+
+    def _load_vessel_graph_from_path(self, path: Path) -> bool:
+        try:
+            layer, already_loaded = self.load_vessel_graph(path)
+        except (FileNotFoundError, OSError, ValueError) as exc:
+            QMessageBox.warning(self, "GraphML Load Failed", str(exc))
+            self.statusBar().showMessage("GraphML load failed")
+            return False
+        if already_loaded:
+            self.statusBar().showMessage(f"GraphML already loaded: {path.name}")
+            return True
+        if layer.warnings:
+            QMessageBox.warning(
+                self,
+                "GraphML Loaded with Spatial Warning",
+                "\n".join(layer.warnings)
+                + "\n\nPatch projections are disabled for this layer.",
+            )
+        self.statusBar().showMessage(
+            f"Loaded GraphML {path.name}: {layer.data.node_count} nodes, "
+            f"{layer.data.edge_count} edges"
+        )
+        return True
+
+    def load_vessel_graph(
+        self,
+        path: str | Path,
+    ):
+        if self.state.volume is None:
+            raise ValueError(
+                "Load a base image before loading GraphML vessel graphs."
+            )
+        graph_path = Path(path)
+        resolved = graph_path.resolve(strict=False)
+        existing = next(
+            (
+                layer
+                for layer in self.state.loaded_vessel_graphs
+                if layer.path == resolved
+            ),
+            None,
+        )
+        if existing is not None:
+            self.state.active_vessel_graph_id = existing.id
+            self._on_vessel_graph_layer_changed(existing.id)
+            return existing, True
+        layer = load_vessel_graphml(graph_path, self.state.volume)
+        layer.settings.visible = True
+        self.state.loaded_vessel_graphs.append(layer)
+        self.state.active_vessel_graph_id = layer.id
+        self._sync_volume_3d_sources()
+        self._sync_patch_windows_vessel_graphs()
+        self._on_vessel_graph_layer_changed(layer.id)
+        return layer, False
+
+    def _on_unload_vessel_graph(self, layer_id: object) -> None:
+        if not isinstance(layer_id, str):
+            return
+        try:
+            self.unload_vessel_graph(layer_id)
+        except ValueError:
+            return
+        self.statusBar().showMessage("GraphML layer unloaded")
+
+    def unload_vessel_graph(self, layer_id: str):
+        removed = next(
+            (
+                layer
+                for layer in self.state.loaded_vessel_graphs
+                if layer.id == layer_id
+            ),
+            None,
+        )
+        if removed is None:
+            raise ValueError(f"GraphML layer does not exist: {layer_id}")
+        self.state.loaded_vessel_graphs = [
+            layer
+            for layer in self.state.loaded_vessel_graphs
+            if layer.id != layer_id
+        ]
+        self.state.active_vessel_graph_id = (
+            self.state.loaded_vessel_graphs[0].id
+            if self.state.loaded_vessel_graphs
+            else None
+        )
+        self._sync_volume_3d_sources()
+        self._sync_patch_windows_vessel_graphs()
+        return removed
+
+    def _active_vessel_graph(self):
+        layer_id = self.state.active_vessel_graph_id
+        return next(
+            (
+                layer
+                for layer in self.state.loaded_vessel_graphs
+                if layer.id == layer_id
+            ),
+            None,
+        )
+
+    def _on_vessel_graph_layer_changed(self, layer_id: object) -> None:
+        self.state.active_vessel_graph_id = (
+            layer_id if isinstance(layer_id, str) else None
+        )
+        layer = self._active_vessel_graph()
+        if layer is not None:
+            target = self.slice_viewer.volume_3d_view
+            if layer.id in target.state.sources:
+                self._syncing_main_vessel_3d = True
+                try:
+                    target.select_source(layer.id)
+                    target.set_selected_visibility(layer.settings.visible)
+                    target.set_selected_opacity(layer.settings.opacity)
+                    target.set_selected_node_size(layer.settings.node_size)
+                    target.set_selected_edge_thickness(
+                        layer.settings.edge_thickness
+                    )
+                finally:
+                    self._syncing_main_vessel_3d = False
+
+    def _on_render3d_state_changed(self, status: object) -> None:
+        if self._syncing_main_vessel_3d:
+            return
+        if not isinstance(status, dict):
+            return
+        layer_id = status.get("selected_source_id")
+        layer = next(
+            (
+                candidate
+                for candidate in self.state.loaded_vessel_graphs
+                if candidate.id == layer_id
+            ),
+            None,
+        )
+        if layer is None:
+            return
+        settings = self.slice_viewer.volume_3d_view.state.settings.get(layer.id)
+        if settings is None:
+            return
+        layer.settings.visible = settings.visible
+        layer.settings.set_opacity(settings.opacity)
+        layer.settings.set_node_size(settings.node_size)
+        layer.settings.set_edge_thickness(settings.edge_thickness)
+        self.state.active_vessel_graph_id = layer.id
+
+    def _sync_patch_windows_vessel_graphs(self) -> None:
+        for patch_window in self._patch_windows_for_current_image():
+            patch_window.update_vessel_graph_layers(
+                self.state.loaded_vessel_graphs
+            )
+
+    def _clear_vessel_graph_session(self) -> None:
+        self.state.loaded_vessel_graphs = []
+        self.state.active_vessel_graph_id = None
+        for patch_window in tuple(self._patch_windows):
+            patch_window.update_vessel_graph_layers(())
+
     def _on_viewer_nifti_file_dropped(self, dropped_path: Path) -> None:
-        choice = self._prompt_drop_load_choice()
+        choice = self._prompt_drop_load_choice(dropped_path)
         if choice is None:
             self.statusBar().showMessage("Dropped file load canceled")
             return
@@ -1428,6 +1681,13 @@ class MainWindow(QMainWindow):
             self._load_base_image_from_path(dropped_path)
             return
         self._load_segmentation_from_path(dropped_path)
+
+    def _on_viewer_graphml_file_dropped(self, dropped_path: Path) -> None:
+        choice = self._prompt_drop_load_choice(dropped_path)
+        if choice != DropLoadChoice.GRAPH:
+            self.statusBar().showMessage("Dropped GraphML load canceled")
+            return
+        self._load_vessel_graph_from_path(dropped_path)
 
     def _on_viewer_graph_state_file_dropped(self, dropped_path: Path) -> None:
         choice = QMessageBox.question(
@@ -1701,7 +1961,38 @@ class MainWindow(QMainWindow):
             )
             for segmentation in self.state.loaded_segmentations
         )
-        self.slice_viewer.volume_3d_view.set_sources(sources)
+        for layer in self.state.loaded_vessel_graphs:
+            polylines, nodes = full_vessel_graph_geometry(
+                layer.data,
+                use_centerlines=layer.projection_safe,
+            )
+            sources.append(
+                Render3DSource(
+                    id=layer.id,
+                    display_name=layer.display_name,
+                    volume=None,
+                    kind="vessel_graph",
+                    vessel_graph=VesselGraphRenderGeometry(
+                        polylines_world=polylines,
+                        node_world_positions=nodes,
+                    ),
+                )
+            )
+        self._syncing_main_vessel_3d = True
+        try:
+            self.slice_viewer.volume_3d_view.set_sources(sources)
+            for layer in self.state.loaded_vessel_graphs:
+                settings = self.slice_viewer.volume_3d_view.state.settings.get(
+                    layer.id
+                )
+                if settings is None:
+                    continue
+                settings.visible = layer.settings.visible
+                settings.set_opacity(layer.settings.opacity)
+                settings.set_node_size(layer.settings.node_size)
+                settings.set_edge_thickness(layer.settings.edge_thickness)
+        finally:
+            self._syncing_main_vessel_3d = False
 
     def _clear_segmentation_session(self) -> None:
         self.state.segmentation_image_path = None
@@ -1740,6 +2031,18 @@ class MainWindow(QMainWindow):
             patch_window.graph_status()
             for patch_window in self._patch_windows_for_current_image()
         ]
+
+    def vessel_graph_status(self) -> dict[str, object]:
+        return {
+            "active_layer_id": self.state.active_vessel_graph_id,
+            "layers": [
+                layer.status() for layer in self.state.loaded_vessel_graphs
+            ],
+            "patch_sessions": [
+                patch_window.vessel_graph_status()
+                for patch_window in self._patch_windows_for_current_image()
+            ],
+        }
 
     def _update_patch_windows_segmentation_for_current_image(
         self,
@@ -1885,6 +2188,8 @@ class MainWindow(QMainWindow):
         event.acceptProposedAction()
         if is_supported_graph_state_path(dropped_path):
             self._on_viewer_graph_state_file_dropped(dropped_path)
+        elif is_supported_graphml_path(dropped_path):
+            self._on_viewer_graphml_file_dropped(dropped_path)
         else:
             self._on_viewer_nifti_file_dropped(dropped_path)
         return True
@@ -1907,9 +2212,16 @@ class MainWindow(QMainWindow):
         viewer_top_left = self.slice_viewer.mapFromGlobal(source_widget.mapToGlobal(point))
         return self.slice_viewer.rect().contains(viewer_top_left)
 
-    def _prompt_drop_load_choice(self) -> DropLoadChoice | None:
+    def _prompt_drop_load_choice(
+        self,
+        dropped_path: Path,
+    ) -> DropLoadChoice | None:
+        is_graphml = is_supported_graphml_path(dropped_path)
+        is_nifti = is_supported_nifti_path(dropped_path)
         dialog = DropLoadChoiceDialog(
-            allow_segmentation=self.state.volume is not None,
+            allow_base_image=is_nifti,
+            allow_segmentation=is_nifti and self.state.volume is not None,
+            allow_graph=is_graphml and self.state.volume is not None,
             parent=self,
         )
         if dialog.exec() != dialog.DialogCode.Accepted:
@@ -1942,6 +2254,7 @@ class MainWindow(QMainWindow):
         self.state.selected_patch_bounds = None
         self.state.selected_patch_data = None
         self._clear_annotation_session()
+        self._clear_vessel_graph_session()
         cleared_count = self._reset_segmentation_session_for_loaded_image(image_path)
         self._sync_volume_3d_sources()
         self._initialize_contrast_for_loaded_volume()
