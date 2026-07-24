@@ -96,6 +96,7 @@ from mipview.vessel_graph import (
     full_vessel_graph_geometry,
     load_vessel_graphml,
 )
+from mipview.version import versioned_window_title
 
 ANNOTATION_LOAD_FILTER = (
     "Annotation Files (*.nii *.nii.gz *.json);;"
@@ -111,7 +112,7 @@ RECON_ANNOTATION_SEGMENTATION_NAME = f"recon_{ANNOTATION_SEGMENTATION_NAME}"
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("MipView")
+        self.setWindowTitle(versioned_window_title("MipView"))
         self.resize(1100, 700)
         self.state = AppState()
         self._font_scaler = ResponsiveFontScaler(
