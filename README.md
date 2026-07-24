@@ -103,6 +103,16 @@ The optional 3D viewer uses VisPy with its PySide6 backend and PyOpenGL for
 raw-volume texture uploads. A working OpenGL implementation is also required.
 If 3D rendering is unavailable, the orthogonal viewers remain usable and the
 **3D Volume** toolbox reports an actionable error.
+The main and patch 3D viewers support one independent overlay in addition to
+the base render. Overlay choices are limited to loaded file-backed NIfTI
+segmentations and loaded GraphML vessel graphs; unsaved annotations and
+additional scalar image volumes are not offered. NIfTI overlays must retain
+the source shape and affine, are never resampled automatically, and use
+editable deterministic per-label colours. GraphML overlays retain their
+semantic edge, node, and intercept colours. Base and overlay renders are
+prepared independently and alpha-composited with the overlay drawn last. The
+base-pass depth buffer is reset before the overlay pass so ray-cast scalar
+volume proxy geometry cannot clip overlays located inside the volume.
 Camera framing uses affine-scaled world bounds so raw textures and foreground
 meshes open at the same physical scale and default viewing angle.
 

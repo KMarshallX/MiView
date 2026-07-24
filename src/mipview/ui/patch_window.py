@@ -117,6 +117,7 @@ from mipview.vessel_graph import (
     VesselGraphRenderGeometry,
     clip_vessel_graph_to_patch,
 )
+from mipview.version import versioned_window_title
 
 
 class PatchViewerWindow(QMainWindow):
@@ -165,7 +166,7 @@ class PatchViewerWindow(QMainWindow):
         active_segmentation_kind: str | None = None,
     ) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Selected Patch")
+        self.setWindowTitle(versioned_window_title("Selected Patch"))
         self.setAcceptDrops(False)
 
         self._source_image_name = source_image_name

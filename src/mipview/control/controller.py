@@ -22,6 +22,9 @@ from mipview.patch.selector import PatchBounds
 from mipview.viewer.intensity import normalize_slice_to_uint8
 from mipview.viewer.oriented_volume import build_oriented_volume
 from mipview.viewer.render_3d_state import (
+    RENDER_LAYER_BASE,
+    RENDER_LAYER_OVERLAY,
+    RENDER_LAYERS,
     RAW_RENDER_MODES,
     SEGMENTATION_RENDER_MODES,
     VESSEL_GRAPH_RENDER_MODES,
@@ -33,6 +36,15 @@ from mipview.viewer.slice_geometry import project_oriented_volume
 SUPPORTED_ORIENTATIONS: set[str] = {"axial", "coronal", "sagittal"}
 SUPPORTED_PROJECTION_MODES: set[str] = {"MIP", "MINIP"}
 _UNSET = object()
+
+
+def _validate_render3d_layer(layer: str) -> CommandResult | None:
+    if layer in RENDER_LAYERS:
+        return None
+    return CommandResult(
+        False,
+        f"3D render layer must be one of: {', '.join(RENDER_LAYERS)}.",
+    )
 
 
 class MipViewController:
@@ -121,22 +133,42 @@ class MipViewController:
 
         return CommandResult(True, "Viewer state exported.", data)
 
-    def get_render3d_status(self, session_id: str | None = None) -> CommandResult:
+    def get_render3d_status(
+        self,
+        session_id: str | None = None,
+        layer: str = RENDER_LAYER_BASE,
+    ) -> CommandResult:
+        invalid_layer = _validate_render3d_layer(layer)
+        if invalid_layer is not None:
+            return invalid_layer
         target = self._render3d_target(session_id)
         if isinstance(target, CommandResult):
             return target
-        return CommandResult(True, "3D render status exported.", target.status())
+        return CommandResult(
+            True,
+            f"3D {layer} render status exported.",
+            target.state.layer_status(layer),
+        )
 
     def set_render3d_active(
         self,
         active: bool,
         session_id: str | None = None,
+        layer: str = RENDER_LAYER_BASE,
     ) -> CommandResult:
+        invalid_layer = _validate_render3d_layer(layer)
+        if invalid_layer is not None:
+            return invalid_layer
         target = self._render3d_target(session_id)
         if isinstance(target, CommandResult):
             return target
-        target.set_active(bool(active))
-        status = target.status()
+        if layer == RENDER_LAYER_BASE:
+            target.set_active(bool(active))
+        elif active:
+            target.set_overlay_active(True)
+        else:
+            target.dismiss_overlay()
+        status = target.state.layer_status(layer)
         if bool(active) and not status["active"]:
             return CommandResult(
                 False,
@@ -145,41 +177,89 @@ class MipViewController:
             )
         return CommandResult(
             True,
-            "3D view activated." if active else "3D resources released.",
+            (
+                (
+                    "3D overlay shown."
+                    if layer == RENDER_LAYER_OVERLAY
+                    else "3D base activated."
+                )
+                if active
+                else (
+                    "3D overlay hidden."
+                    if layer == RENDER_LAYER_OVERLAY
+                    else "3D base resources released."
+                )
+            ),
             status,
         )
 
     def select_render3d_source(
         self,
-        source_id: str,
+        source_id: str | None,
         session_id: str | None = None,
+        layer: str = RENDER_LAYER_BASE,
     ) -> CommandResult:
+        invalid_layer = _validate_render3d_layer(layer)
+        if invalid_layer is not None:
+            return invalid_layer
         target = self._render3d_target(session_id)
         if isinstance(target, CommandResult):
             return target
-        normalized = str(source_id)
-        if normalized not in target.state.sources:
+        normalized = (
+            None
+            if source_id in {None, "---"}
+            else str(source_id)
+        )
+        eligible_ids = (
+            set(target.state.sources)
+            if layer == RENDER_LAYER_BASE
+            else {source.id for source in target.state.overlay_sources()}
+        )
+        if normalized is not None and normalized not in eligible_ids:
             return CommandResult(
                 False,
-                f"3D layer does not exist: {normalized}",
+                f"3D {layer} layer does not exist or is ineligible: {normalized}",
             )
-        target.select_source(normalized)
-        return CommandResult(True, "3D layer selected.", target.status())
+        target.select_source(normalized, layer)
+        return CommandResult(
+            True,
+            f"3D {layer} layer selected.",
+            target.state.layer_status(layer),
+        )
 
     def update_render3d(
         self,
         session_id: str | None = None,
+        layer: str = RENDER_LAYER_BASE,
     ) -> CommandResult:
+        invalid_layer = _validate_render3d_layer(layer)
+        if invalid_layer is not None:
+            return invalid_layer
         target = self._render3d_target(session_id)
         if isinstance(target, CommandResult):
             return target
-        if target.state.selected_source() is None:
-            return CommandResult(False, "No NIfTI layer is available for 3D rendering.")
-        target.update_selected_render()
-        status = target.status()
+        if target.state.selected_source(layer) is None:
+            return CommandResult(
+                False,
+                f"No {layer} layer is available for 3D rendering.",
+            )
+        if (
+            layer == RENDER_LAYER_OVERLAY
+            and target.state.rendered_source_id is None
+        ):
+            return CommandResult(
+                False,
+                "Render the base 3D layer before updating the overlay.",
+            )
+        target.update_selected_render(layer)
+        status = target.state.layer_status(layer)
         if status["last_error"] is not None and not status["busy"]:
             return CommandResult(False, str(status["last_error"]), status)
-        return CommandResult(True, "3D render update started.", status)
+        return CommandResult(
+            True,
+            f"3D {layer} render update started.",
+            status,
+        )
 
     def set_render3d_display(
         self,
@@ -191,11 +271,16 @@ class MipViewController:
         render_mode: str | None = None,
         threshold: float | None = None,
         mask_source_id: object = _UNSET,
+        label_colour: list[int] | tuple[int, int, int, int] | None = None,
+        layer: str = RENDER_LAYER_BASE,
     ) -> CommandResult:
+        invalid_layer = _validate_render3d_layer(layer)
+        if invalid_layer is not None:
+            return invalid_layer
         target = self._render3d_target(session_id)
         if isinstance(target, CommandResult):
             return target
-        if target.state.selected_source() is None:
+        if target.state.selected_source(layer) is None:
             return CommandResult(False, "No 3D layer is selected.")
         if opacity is not None and not 0.0 <= float(opacity) <= 1.0:
             return CommandResult(False, "3D opacity must be between 0.0 and 1.0.")
@@ -204,7 +289,7 @@ class MipViewController:
         ):
             return CommandResult(False, "3D colour must contain three values in 0..255.")
         if render_mode is not None:
-            source = target.state.selected_source()
+            source = target.state.selected_source(layer)
             allowed_modes = (
                 RAW_RENDER_MODES
                 if source is not None and source.kind == "image"
@@ -234,7 +319,11 @@ class MipViewController:
             compatible_ids = {
                 source.id
                 for source in target.state.compatible_masks_for(
-                    target.state.selected_source_id
+                    (
+                        target.state.selected_source_id
+                        if layer == RENDER_LAYER_BASE
+                        else target.state.overlay_selected_source_id
+                    )
                 )
             }
             if (
@@ -246,31 +335,70 @@ class MipViewController:
                     "3D render mask must be a loaded, spatially compatible "
                     f"segmentation layer: {normalized_mask_id}",
                 )
+        if label_colour is not None:
+            if len(label_colour) != 4:
+                return CommandResult(
+                    False,
+                    "3D label colour must contain LABEL R G B.",
+                )
+            label_value, *rgb = (int(value) for value in label_colour)
+            if label_value <= 0 or any(not 0 <= value <= 255 for value in rgb):
+                return CommandResult(
+                    False,
+                    "3D label colour requires a positive label and RGB values in 0..255.",
+                )
+            source = target.state.selected_source(layer)
+            if source is None or source.kind != "segmentation":
+                return CommandResult(
+                    False,
+                    "Per-label colours apply only to segmentation layers.",
+                )
         if visible is not None:
-            target.set_selected_visibility(visible)
+            target.set_selected_visibility(visible, layer)
         if opacity is not None:
-            target.set_selected_opacity(opacity)
+            target.set_selected_opacity(opacity, layer)
         if colour is not None:
-            target.set_selected_colour(tuple(int(value) for value in colour))
+            target.set_selected_colour(
+                tuple(int(value) for value in colour),
+                layer,
+            )
         if render_mode is not None:
-            target.set_selected_render_mode(str(render_mode))
+            target.set_selected_render_mode(str(render_mode), layer)
         if threshold is not None:
-            target.set_selected_threshold(float(threshold))
+            target.set_selected_threshold(float(threshold), layer)
         if mask_source_id is not _UNSET:
-            target.set_selected_mask_source(normalized_mask_id)
-        return CommandResult(True, "3D display settings updated.", target.status())
+            target.set_selected_mask_source(normalized_mask_id, layer)
+        if label_colour is not None:
+            target.set_selected_label_colour(
+                int(label_colour[0]),
+                tuple(int(value) for value in label_colour[1:]),
+                layer,
+            )
+        return CommandResult(
+            True,
+            f"3D {layer} display settings updated.",
+            target.state.layer_status(layer),
+        )
 
     def reset_render3d_camera(
         self,
         session_id: str | None = None,
+        layer: str = RENDER_LAYER_BASE,
     ) -> CommandResult:
+        invalid_layer = _validate_render3d_layer(layer)
+        if invalid_layer is not None:
+            return invalid_layer
         target = self._render3d_target(session_id)
         if isinstance(target, CommandResult):
             return target
         if not target.state.active:
             return CommandResult(False, "Activate the 3D view before resetting its camera.")
         target.reset_camera()
-        return CommandResult(True, "3D camera reset.", target.status())
+        return CommandResult(
+            True,
+            "3D camera reset.",
+            target.state.layer_status(layer),
+        )
 
     def get_vessel_graph_status(
         self,

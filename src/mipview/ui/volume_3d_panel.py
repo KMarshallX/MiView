@@ -32,11 +32,20 @@ class Volume3DPanel(CollapsibleGroupBox):
     vessel_graph_edge_thickness_changed = Signal(int)
     vessel_graph_unload_requested = Signal(object)
     colour_changed = Signal(object)
+    label_colour_changed = Signal(int, object)
     render_mode_changed = Signal(str)
     mask_changed = Signal(object)
     threshold_changed = Signal(float)
     update_requested = Signal()
     reset_camera_requested = Signal()
+    overlay_source_changed = Signal(object)
+    overlay_opacity_changed = Signal(float)
+    overlay_label_colour_changed = Signal(int, object)
+    overlay_render_mode_changed = Signal(str)
+    overlay_mask_changed = Signal(object)
+    overlay_threshold_changed = Signal(float)
+    overlay_vessel_graph_node_size_changed = Signal(int)
+    overlay_vessel_graph_edge_thickness_changed = Signal(int)
 
     def __init__(
         self,
@@ -46,7 +55,10 @@ class Volume3DPanel(CollapsibleGroupBox):
     ) -> None:
         super().__init__("3D Volume", parent)
         self._colour = (255, 255, 255)
+        self._label_colours: dict[int, tuple[int, int, int]] = {}
         self._source_kind: str | None = None
+        self._overlay_label_colours: dict[int, tuple[int, int, int]] = {}
+        self._overlay_source_kind: str | None = None
 
         form = QFormLayout(self)
         form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
@@ -70,6 +82,18 @@ class Volume3DPanel(CollapsibleGroupBox):
         self.colour_button = QPushButton("Choose…", self)
         self.colour_button.clicked.connect(self._choose_colour)
         self._refresh_colour_button()
+
+        self.label_colour_combo = QComboBox(self)
+        self.label_colour_combo.currentIndexChanged.connect(
+            lambda _index: self._refresh_label_colour_button()
+        )
+        self.label_colour_button = QPushButton("Choose…", self)
+        self.label_colour_button.clicked.connect(self._choose_label_colour)
+        self.label_colour_widget = QWidget(self)
+        label_colour_layout = QHBoxLayout(self.label_colour_widget)
+        label_colour_layout.setContentsMargins(0, 0, 0, 0)
+        label_colour_layout.addWidget(self.label_colour_combo)
+        label_colour_layout.addWidget(self.label_colour_button)
 
         self.render_mode_combo = QComboBox(self)
         self.render_mode_combo.currentTextChanged.connect(
@@ -158,20 +182,152 @@ class Volume3DPanel(CollapsibleGroupBox):
             self.vessel_graph_unload_button = None
         self.vessel_graph_group.setVisible(False)
 
+        self.overlay_group = QGroupBox("3D Overlay", self)
+        overlay_form = QFormLayout(self.overlay_group)
+        overlay_form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
+
+        self.overlay_source_combo = QComboBox(self.overlay_group)
+        self.overlay_source_combo.addItem("---", None)
+        self.overlay_source_combo.currentIndexChanged.connect(
+            lambda _index: self.overlay_source_changed.emit(
+                self.overlay_source_combo.currentData()
+            )
+        )
+
+        self.overlay_opacity_slider = QSlider(
+            Qt.Orientation.Horizontal,
+            self.overlay_group,
+        )
+        self.overlay_opacity_slider.setRange(0, 100)
+        self.overlay_opacity_slider.setValue(100)
+        self.overlay_opacity_slider.valueChanged.connect(
+            lambda value: self.overlay_opacity_changed.emit(value / 100.0)
+        )
+
+        self.overlay_label_colour_combo = QComboBox(self.overlay_group)
+        self.overlay_label_colour_combo.currentIndexChanged.connect(
+            lambda _index: self._refresh_overlay_label_colour_button()
+        )
+        self.overlay_label_colour_button = QPushButton(
+            "Choose…",
+            self.overlay_group,
+        )
+        self.overlay_label_colour_button.clicked.connect(
+            self._choose_overlay_label_colour
+        )
+        self.overlay_label_colour_widget = QWidget(self.overlay_group)
+        overlay_label_colour_layout = QHBoxLayout(
+            self.overlay_label_colour_widget
+        )
+        overlay_label_colour_layout.setContentsMargins(0, 0, 0, 0)
+        overlay_label_colour_layout.addWidget(self.overlay_label_colour_combo)
+        overlay_label_colour_layout.addWidget(self.overlay_label_colour_button)
+
+        self.overlay_render_mode_combo = QComboBox(self.overlay_group)
+        self.overlay_render_mode_combo.currentTextChanged.connect(
+            self._on_overlay_render_mode_changed
+        )
+
+        self.overlay_mask_combo = QComboBox(self.overlay_group)
+        self.overlay_mask_combo.addItem("---", None)
+        self.overlay_mask_combo.currentIndexChanged.connect(
+            lambda _index: self.overlay_mask_changed.emit(
+                self.overlay_mask_combo.currentData()
+            )
+        )
+        self.overlay_mask_label = QLabel("Mask:", self.overlay_group)
+
+        self.overlay_threshold_spinbox = QDoubleSpinBox(self.overlay_group)
+        self.overlay_threshold_spinbox.setDecimals(4)
+        self.overlay_threshold_spinbox.setRange(-1.0e12, 1.0e12)
+        self.overlay_threshold_spinbox.valueChanged.connect(
+            self.overlay_threshold_changed.emit
+        )
+
+        self.overlay_vessel_graph_group = QGroupBox(
+            "Vessel Graph",
+            self.overlay_group,
+        )
+        overlay_vessel_form = QFormLayout(self.overlay_vessel_graph_group)
+        self.overlay_vessel_graph_opacity_slider = QSlider(
+            Qt.Orientation.Horizontal,
+            self.overlay_vessel_graph_group,
+        )
+        self.overlay_vessel_graph_opacity_slider.setRange(0, 100)
+        self.overlay_vessel_graph_opacity_slider.setValue(100)
+        self.overlay_vessel_graph_opacity_slider.valueChanged.connect(
+            lambda value: self.overlay_opacity_changed.emit(value / 100.0)
+        )
+        self.overlay_vessel_graph_node_size_slider = QSlider(
+            Qt.Orientation.Horizontal,
+            self.overlay_vessel_graph_group,
+        )
+        self.overlay_vessel_graph_node_size_slider.setRange(1, 10)
+        self.overlay_vessel_graph_node_size_slider.setValue(4)
+        self.overlay_vessel_graph_node_size_slider.valueChanged.connect(
+            self.overlay_vessel_graph_node_size_changed.emit
+        )
+        self.overlay_vessel_graph_edge_thickness_slider = QSlider(
+            Qt.Orientation.Horizontal,
+            self.overlay_vessel_graph_group,
+        )
+        self.overlay_vessel_graph_edge_thickness_slider.setRange(1, 10)
+        self.overlay_vessel_graph_edge_thickness_slider.setValue(2)
+        self.overlay_vessel_graph_edge_thickness_slider.valueChanged.connect(
+            self.overlay_vessel_graph_edge_thickness_changed.emit
+        )
+        overlay_vessel_form.addRow(
+            "Opacity:",
+            self.overlay_vessel_graph_opacity_slider,
+        )
+        overlay_vessel_form.addRow(
+            "Node size:",
+            self.overlay_vessel_graph_node_size_slider,
+        )
+        overlay_vessel_form.addRow(
+            "Edge thickness:",
+            self.overlay_vessel_graph_edge_thickness_slider,
+        )
+        self.overlay_vessel_graph_group.setVisible(False)
+
+        self.overlay_opacity_label = QLabel("Opacity:", self.overlay_group)
+        self.overlay_label_colour_label = QLabel(
+            "Label colour:",
+            self.overlay_group,
+        )
+        overlay_form.addRow("File:", self.overlay_source_combo)
+        overlay_form.addRow(
+            self.overlay_opacity_label,
+            self.overlay_opacity_slider,
+        )
+        overlay_form.addRow(
+            self.overlay_label_colour_label,
+            self.overlay_label_colour_widget,
+        )
+        overlay_form.addRow("Render mode:", self.overlay_render_mode_combo)
+        overlay_form.addRow(self.overlay_mask_label, self.overlay_mask_combo)
+        overlay_form.addRow("Threshold:", self.overlay_threshold_spinbox)
+        overlay_form.addRow(self.overlay_vessel_graph_group)
+
         self.opacity_label = QLabel("Opacity:", self)
+        self.label_colour_label = QLabel("Label colour:", self)
         form.addRow(self.activation_button)
         form.addRow("3D Layer:", self.source_combo)
         form.addRow(self.opacity_label, self.opacity_slider)
         form.addRow("Colour:", self.colour_button)
+        form.addRow(self.label_colour_label, self.label_colour_widget)
         form.addRow("Render mode:", self.render_mode_combo)
         form.addRow(self.mask_label, self.mask_combo)
         form.addRow("Threshold:", self.threshold_spinbox)
+        form.addRow(self.overlay_group)
         form.addRow(action_row)
         form.addRow(self.progress_bar)
         form.addRow(self.status_label)
         form.addRow(self.vessel_graph_group)
         self.set_render_controls_enabled(False)
         self._refresh_mask_availability()
+        self.set_overlay_source_kind(None)
+        self.set_overlay_controls_enabled(False)
 
     def set_sources(
         self,
@@ -197,6 +353,29 @@ class Volume3DPanel(CollapsibleGroupBox):
         source_id = self.source_combo.currentData()
         return source_id if isinstance(source_id, str) else None
 
+    def set_overlay_sources(
+        self,
+        sources: Sequence[tuple[str, str]],
+        selected_source_id: str | None,
+    ) -> None:
+        was_blocked = self.overlay_source_combo.blockSignals(True)
+        self.overlay_source_combo.clear()
+        self.overlay_source_combo.addItem("---", None)
+        selected_index = 0
+        for source_id, display_name in sources:
+            self.overlay_source_combo.addItem(display_name, source_id)
+            if source_id == selected_source_id:
+                selected_index = self.overlay_source_combo.count() - 1
+        self.overlay_source_combo.setCurrentIndex(selected_index)
+        self.overlay_source_combo.blockSignals(was_blocked)
+        self.set_overlay_controls_enabled(
+            selected_index > 0
+        )
+
+    def selected_overlay_source_id(self) -> str | None:
+        source_id = self.overlay_source_combo.currentData()
+        return source_id if isinstance(source_id, str) else None
+
     def set_modes(self, modes: Sequence[str], selected_mode: str) -> None:
         was_blocked = self.render_mode_combo.blockSignals(True)
         self.render_mode_combo.clear()
@@ -206,6 +385,20 @@ class Volume3DPanel(CollapsibleGroupBox):
         self.render_mode_combo.blockSignals(was_blocked)
         self._refresh_threshold_availability()
         self._refresh_mask_availability()
+
+    def set_overlay_modes(
+        self,
+        modes: Sequence[str],
+        selected_mode: str,
+    ) -> None:
+        was_blocked = self.overlay_render_mode_combo.blockSignals(True)
+        self.overlay_render_mode_combo.clear()
+        self.overlay_render_mode_combo.addItems(list(modes))
+        index = self.overlay_render_mode_combo.findText(selected_mode)
+        self.overlay_render_mode_combo.setCurrentIndex(max(index, 0))
+        self.overlay_render_mode_combo.blockSignals(was_blocked)
+        self._refresh_overlay_threshold_availability()
+        self._refresh_overlay_mask_availability()
 
     def set_masks(
         self,
@@ -223,6 +416,23 @@ class Volume3DPanel(CollapsibleGroupBox):
         self.mask_combo.setCurrentIndex(selected_index)
         self.mask_combo.blockSignals(was_blocked)
         self._refresh_mask_availability()
+
+    def set_overlay_masks(
+        self,
+        masks: Sequence[tuple[str, str]],
+        selected_mask_id: str | None,
+    ) -> None:
+        was_blocked = self.overlay_mask_combo.blockSignals(True)
+        self.overlay_mask_combo.clear()
+        self.overlay_mask_combo.addItem("---", None)
+        selected_index = 0
+        for source_id, display_name in masks:
+            self.overlay_mask_combo.addItem(display_name, source_id)
+            if source_id == selected_mask_id:
+                selected_index = self.overlay_mask_combo.count() - 1
+        self.overlay_mask_combo.setCurrentIndex(selected_index)
+        self.overlay_mask_combo.blockSignals(was_blocked)
+        self._refresh_overlay_mask_availability()
 
     def set_settings(self, settings: Render3DSettings) -> None:
         blockers: list[tuple[QWidget, bool]] = []
@@ -262,6 +472,85 @@ class Volume3DPanel(CollapsibleGroupBox):
             "Update required." if settings.dirty else "3D layer ready."
         )
 
+    def set_label_colours(
+        self,
+        labels: Sequence[int],
+        settings: Render3DSettings,
+    ) -> None:
+        self._label_colours = {
+            int(label): settings.colour_for_label(int(label))
+            for label in labels
+        }
+        selected_label = self.label_colour_combo.currentData()
+        was_blocked = self.label_colour_combo.blockSignals(True)
+        self.label_colour_combo.clear()
+        selected_index = 0
+        for label in labels:
+            self.label_colour_combo.addItem(f"Label {int(label)}", int(label))
+            if int(label) == selected_label:
+                selected_index = self.label_colour_combo.count() - 1
+        if self.label_colour_combo.count() > 0:
+            self.label_colour_combo.setCurrentIndex(selected_index)
+        self.label_colour_combo.blockSignals(was_blocked)
+        self._refresh_label_colour_button()
+
+    def set_overlay_settings(
+        self,
+        settings: Render3DSettings,
+        labels: Sequence[int] = (),
+    ) -> None:
+        blockers: list[tuple[QWidget, bool]] = []
+        for widget in (
+            self.overlay_opacity_slider,
+            self.overlay_vessel_graph_opacity_slider,
+            self.overlay_vessel_graph_node_size_slider,
+            self.overlay_vessel_graph_edge_thickness_slider,
+            self.overlay_mask_combo,
+            self.overlay_threshold_spinbox,
+        ):
+            blockers.append((widget, widget.blockSignals(True)))
+        opacity_value = int(round(settings.opacity * 100.0))
+        self.overlay_opacity_slider.setValue(opacity_value)
+        self.overlay_vessel_graph_opacity_slider.setValue(opacity_value)
+        self.overlay_vessel_graph_node_size_slider.setValue(settings.node_size)
+        self.overlay_vessel_graph_edge_thickness_slider.setValue(
+            settings.edge_thickness
+        )
+        self.overlay_threshold_spinbox.setValue(settings.threshold)
+        mask_index = self.overlay_mask_combo.findData(settings.mask_source_id)
+        self.overlay_mask_combo.setCurrentIndex(max(mask_index, 0))
+        for widget, blocked in blockers:
+            widget.blockSignals(blocked)
+
+        mode_index = self.overlay_render_mode_combo.findText(
+            settings.render_mode
+        )
+        if mode_index >= 0:
+            was_blocked = self.overlay_render_mode_combo.blockSignals(True)
+            self.overlay_render_mode_combo.setCurrentIndex(mode_index)
+            self.overlay_render_mode_combo.blockSignals(was_blocked)
+        self._overlay_label_colours = {
+            int(label): settings.colour_for_label(int(label))
+            for label in labels
+        }
+        selected_label = self.overlay_label_colour_combo.currentData()
+        was_blocked = self.overlay_label_colour_combo.blockSignals(True)
+        self.overlay_label_colour_combo.clear()
+        selected_index = 0
+        for label in labels:
+            self.overlay_label_colour_combo.addItem(
+                f"Label {int(label)}",
+                int(label),
+            )
+            if int(label) == selected_label:
+                selected_index = self.overlay_label_colour_combo.count() - 1
+        if self.overlay_label_colour_combo.count() > 0:
+            self.overlay_label_colour_combo.setCurrentIndex(selected_index)
+        self.overlay_label_colour_combo.blockSignals(was_blocked)
+        self._refresh_overlay_label_colour_button()
+        self._refresh_overlay_threshold_availability()
+        self._refresh_overlay_mask_availability()
+
     def set_active(self, active: bool) -> None:
         was_blocked = self.activation_button.blockSignals(True)
         self.activation_button.setChecked(active)
@@ -281,6 +570,12 @@ class Volume3DPanel(CollapsibleGroupBox):
             self.reset_camera_button,
         ):
             widget.setEnabled(enabled)
+        self.label_colour_combo.setEnabled(
+            enabled and self.label_colour_combo.count() > 0
+        )
+        self.label_colour_button.setEnabled(
+            enabled and isinstance(self.label_colour_combo.currentData(), int)
+        )
         is_graph = self._source_kind == "vessel_graph"
         self.colour_button.setEnabled(enabled and not is_graph)
         self.render_mode_combo.setEnabled(enabled and not is_graph)
@@ -296,17 +591,74 @@ class Volume3DPanel(CollapsibleGroupBox):
         self._refresh_threshold_availability()
         self._refresh_mask_availability()
 
+    def set_overlay_controls_enabled(self, enabled: bool) -> None:
+        self.overlay_source_combo.setEnabled(True)
+        is_graph = self._overlay_source_kind == "vessel_graph"
+        for widget in (
+            self.overlay_opacity_slider,
+            self.overlay_render_mode_combo,
+            self.overlay_mask_combo,
+            self.overlay_threshold_spinbox,
+        ):
+            widget.setEnabled(enabled and not is_graph)
+        self.overlay_label_colour_combo.setEnabled(
+            enabled
+            and not is_graph
+            and self.overlay_label_colour_combo.count() > 0
+        )
+        self.overlay_label_colour_button.setEnabled(
+            enabled
+            and not is_graph
+            and isinstance(
+                self.overlay_label_colour_combo.currentData(),
+                int,
+            )
+        )
+        self.overlay_vessel_graph_opacity_slider.setEnabled(enabled and is_graph)
+        self.overlay_vessel_graph_node_size_slider.setEnabled(enabled and is_graph)
+        self.overlay_vessel_graph_edge_thickness_slider.setEnabled(
+            enabled and is_graph
+        )
+        self._refresh_overlay_threshold_availability()
+        self._refresh_overlay_mask_availability()
+
     def set_source_kind(self, source_kind: str | None) -> None:
         self._source_kind = source_kind
         is_graph = source_kind == "vessel_graph"
         self.vessel_graph_group.setVisible(is_graph)
         self.opacity_label.setVisible(not is_graph)
         self.opacity_slider.setVisible(not is_graph)
+        is_segmentation = source_kind == "segmentation"
+        self.colour_button.setVisible(source_kind == "image")
+        self.label_colour_label.setVisible(is_segmentation)
+        self.label_colour_widget.setVisible(is_segmentation)
+        if is_segmentation:
+            self.label_colour_button.setEnabled(
+                self.activation_button.isChecked()
+                and self.label_colour_combo.currentIndex() >= 0
+            )
         self._refresh_threshold_availability()
         self._refresh_mask_availability()
         self.set_render_controls_enabled(
             self.activation_button.isChecked()
             and self.source_combo.currentIndex() >= 0
+        )
+
+    def set_overlay_source_kind(self, source_kind: str | None) -> None:
+        self._overlay_source_kind = source_kind
+        is_graph = source_kind == "vessel_graph"
+        is_segmentation = source_kind == "segmentation"
+        self.overlay_vessel_graph_group.setVisible(is_graph)
+        self.overlay_opacity_label.setVisible(not is_graph)
+        self.overlay_opacity_slider.setVisible(not is_graph)
+        self.overlay_label_colour_label.setVisible(is_segmentation)
+        self.overlay_label_colour_widget.setVisible(is_segmentation)
+        self.overlay_render_mode_combo.setVisible(source_kind is not None)
+        self.overlay_threshold_spinbox.setVisible(is_segmentation)
+        self._refresh_overlay_threshold_availability()
+        self._refresh_overlay_mask_availability()
+        self.set_overlay_controls_enabled(
+            self.overlay_source_combo.currentIndex() > 0
         )
 
     def set_busy(self, busy: bool, message: str = "Preparing 3D layer…") -> None:
@@ -349,6 +701,11 @@ class Volume3DPanel(CollapsibleGroupBox):
         self._refresh_mask_availability()
         self.render_mode_changed.emit(render_mode)
 
+    def _on_overlay_render_mode_changed(self, render_mode: str) -> None:
+        self._refresh_overlay_threshold_availability()
+        self._refresh_overlay_mask_availability()
+        self.overlay_render_mode_changed.emit(render_mode)
+
     def _choose_colour(self) -> None:
         selected = QColorDialog.getColor(QColor(*self._colour), self, "3D Layer Colour")
         if not selected.isValid():
@@ -357,12 +714,83 @@ class Volume3DPanel(CollapsibleGroupBox):
         self._refresh_colour_button()
         self.colour_changed.emit(self._colour)
 
+    def _choose_label_colour(self) -> None:
+        label = self.label_colour_combo.currentData()
+        if not isinstance(label, int):
+            return
+        current = self._label_colours.get(label, (255, 255, 255))
+        selected = QColorDialog.getColor(
+            QColor(*current),
+            self,
+            f"3D Label {label} Colour",
+        )
+        if not selected.isValid():
+            return
+        colour = (selected.red(), selected.green(), selected.blue())
+        self._label_colours[label] = colour
+        self._refresh_label_colour_button()
+        self.label_colour_changed.emit(label, colour)
+
+    def _choose_overlay_label_colour(self) -> None:
+        label = self.overlay_label_colour_combo.currentData()
+        if not isinstance(label, int):
+            return
+        current = self._overlay_label_colours.get(label, (255, 255, 255))
+        selected = QColorDialog.getColor(
+            QColor(*current),
+            self,
+            f"3D Overlay Label {label} Colour",
+        )
+        if not selected.isValid():
+            return
+        colour = (selected.red(), selected.green(), selected.blue())
+        self._overlay_label_colours[label] = colour
+        self._refresh_overlay_label_colour_button()
+        self.overlay_label_colour_changed.emit(label, colour)
+
     def _refresh_colour_button(self) -> None:
         red, green, blue = self._colour
         foreground = "#000" if red + green + blue > 420 else "#fff"
         self.colour_button.setStyleSheet(
             f"background-color: rgb({red}, {green}, {blue}); color: {foreground};"
         )
+
+    def _refresh_label_colour_button(self) -> None:
+        label = self.label_colour_combo.currentData()
+        colour = (
+            self._label_colours.get(label)
+            if isinstance(label, int)
+            else None
+        )
+        self._set_colour_button_style(self.label_colour_button, colour)
+
+    def _refresh_overlay_label_colour_button(self) -> None:
+        label = self.overlay_label_colour_combo.currentData()
+        colour = (
+            self._overlay_label_colours.get(label)
+            if isinstance(label, int)
+            else None
+        )
+        self._set_colour_button_style(
+            self.overlay_label_colour_button,
+            colour,
+        )
+
+    @staticmethod
+    def _set_colour_button_style(
+        button: QPushButton,
+        colour: tuple[int, int, int] | None,
+    ) -> None:
+        if colour is None:
+            button.setStyleSheet("")
+            button.setEnabled(False)
+            return
+        red, green, blue = colour
+        foreground = "#000" if red + green + blue > 420 else "#fff"
+        button.setStyleSheet(
+            f"background-color: rgb({red}, {green}, {blue}); color: {foreground};"
+        )
+        button.setEnabled(True)
 
     def _refresh_threshold_availability(self) -> None:
         mode = self.render_mode_combo.currentText()
@@ -385,4 +813,25 @@ class Volume3DPanel(CollapsibleGroupBox):
             visible
             and self.activation_button.isChecked()
             and self.source_combo.currentIndex() >= 0
+        )
+
+    def _refresh_overlay_threshold_availability(self) -> None:
+        mode = self.overlay_render_mode_combo.currentText()
+        available = (
+            self._overlay_source_kind == "segmentation"
+            and mode in {"Surface", "Points"}
+        )
+        self.overlay_threshold_spinbox.setEnabled(available)
+
+    def _refresh_overlay_mask_availability(self) -> None:
+        mode = self.overlay_render_mode_combo.currentText()
+        visible = (
+            self._overlay_source_kind == "segmentation"
+            and mode in {"Surface", "Points"}
+        )
+        self.overlay_mask_label.setVisible(visible)
+        self.overlay_mask_combo.setVisible(visible)
+        self.overlay_mask_combo.setEnabled(
+            visible
+            and self.overlay_source_combo.currentIndex() > 0
         )

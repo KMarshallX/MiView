@@ -483,18 +483,45 @@ mipview-ctl render3d update
 mipview-ctl render3d reset-camera
 mipview-ctl render3d dismiss
 
+mipview-ctl render3d select SEGMENTATION_ID --layer overlay
+mipview-ctl render3d display --layer overlay --opacity 0.5 --mode Surface
+mipview-ctl render3d display --layer overlay --label-colour 1 255 64 64
+mipview-ctl render3d update --layer overlay
+mipview-ctl render3d dismiss --layer overlay
+mipview-ctl render3d activate --layer overlay
+
 mipview-ctl render3d status --session-id SESSION_ID
 mipview-ctl patch display-location SESSION_ID show
 ```
 
 `render3d display` accepts `--visible` / `--no-visible`, `--opacity`,
-`--colour R G B`, `--mode`, `--mask`, `--no-mask`, and `--threshold`. Masks
+`--colour R G B`, `--label-colour LABEL R G B`, `--mode`, `--mask`,
+`--no-mask`, and `--threshold`. Every `render3d` command accepts
+`--layer base|overlay`; omitting it preserves the existing base-layer
+behaviour.
+
+The overlay role supports exactly one file-backed loaded NIfTI segmentation or
+GraphML layer and excludes the selected base source. Selecting or changing the
+overlay marks it for update, and `render3d update --layer overlay` prepares and
+displays it automatically. Selecting `---` clears the overlay choice. Main and patch
+windows retain independent 3D overlay settings, and neither selection follows
+the active 2D orthogonal overlay.
+
+Masks
 include all nonzero voxels and must be loaded,
 spatially compatible segmentation layers. Masking applies to image MIP/MinIP
 and segmentation Surface/Points modes; it is ignored for image Translucent and
-Isosurface modes. Exactly one selected NIfTI file is rendered at a time.
-Dismissing the view releases its VisPy canvas and GPU resources.
-`render3d.status` reports the selected and rendered source IDs, selected mask,
+Isosurface modes and is unavailable for GraphML. Segmentation Surface and
+Points rendering requires finite, non-negative integer labels, supports up to
+256 foreground labels, and uses editable deterministic per-label colours.
+Overlay rendering is prepared independently and alpha-composited after the
+base render.
+
+Dismissing the base view releases its VisPy canvas and both layers. For the
+overlay role, `dismiss` hides the prepared visual and `activate` shows it again
+without recomputation; the selected source, prepared data, and settings are
+retained. `render3d.status` reports the selected and rendered source
+IDs, selected mask,
 whether that mask applies to the current mode, busy/update-required state,
 prepared shape, downsampling stride, locator state, and the last renderer error.
 
