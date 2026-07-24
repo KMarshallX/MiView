@@ -477,7 +477,7 @@ and `render3d update` starts background preparation.
 mipview-ctl render3d status
 mipview-ctl render3d activate
 mipview-ctl render3d select image
-mipview-ctl render3d display --opacity 0.6 --mode MIP
+mipview-ctl render3d display --opacity 0.6 --mode MIP --mask SEGMENTATION_ID
 mipview-ctl render3d update
 mipview-ctl render3d reset-camera
 mipview-ctl render3d dismiss
@@ -487,11 +487,15 @@ mipview-ctl patch display-location SESSION_ID show
 ```
 
 `render3d display` accepts `--visible` / `--no-visible`, `--opacity`,
-`--colour R G B`, `--mode`, and `--threshold`. Exactly one selected NIfTI file
-is rendered at a time. Dismissing the view releases its VisPy canvas and GPU
-resources. `render3d.status` reports the selected and rendered source IDs,
-busy/update-required state, prepared shape, downsampling stride, locator state,
-and the last renderer error.
+`--colour R G B`, `--mode`, `--mask`, `--no-mask`, and `--threshold`. Masks
+include all nonzero voxels and must be loaded,
+spatially compatible segmentation layers. Masking applies to image MIP/MinIP
+and segmentation Surface/Points modes; it is ignored for image Translucent and
+Isosurface modes. Exactly one selected NIfTI file is rendered at a time.
+Dismissing the view releases its VisPy canvas and GPU resources.
+`render3d.status` reports the selected and rendered source IDs, selected mask,
+whether that mask applies to the current mode, busy/update-required state,
+prepared shape, downsampling stride, locator state, and the last renderer error.
 
 The equivalent direct commands are `render3d.status`, `render3d.activate`,
 `render3d.select`, `render3d.update`, `render3d.set_display`,

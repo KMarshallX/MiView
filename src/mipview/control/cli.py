@@ -269,6 +269,19 @@ def _build_parser() -> argparse.ArgumentParser:
     render_display.add_argument("--opacity", type=float, default=None)
     render_display.add_argument("--colour", type=int, nargs=3, default=None)
     render_display.add_argument("--mode", default=None)
+    render_mask_group = render_display.add_mutually_exclusive_group()
+    render_mask_group.add_argument(
+        "--mask",
+        default=None,
+        help="Segmentation source ID to use as a mask.",
+    )
+    render_mask_group.add_argument(
+        "--no-mask",
+        dest="mask",
+        action="store_const",
+        const="---",
+        help="Clear the selected 3D render mask.",
+    )
     render_display.add_argument("--threshold", type=float, default=None)
 
     projection_parser = subparsers.add_parser(
@@ -688,16 +701,19 @@ def _command_from_args(args: argparse.Namespace) -> tuple[str, dict[str, Any], A
         if args.render3d_command == "reset-camera":
             return "render3d.reset_camera", common, None
         if args.render3d_command == "display":
+            display_args = {
+                **common,
+                "visible": args.visible,
+                "opacity": args.opacity,
+                "colour": args.colour,
+                "render_mode": args.mode,
+                "threshold": args.threshold,
+            }
+            if args.mask is not None:
+                display_args["mask_source_id"] = args.mask
             return (
                 "render3d.set_display",
-                {
-                    **common,
-                    "visible": args.visible,
-                    "opacity": args.opacity,
-                    "colour": args.colour,
-                    "render_mode": args.mode,
-                    "threshold": args.threshold,
-                },
+                display_args,
                 None,
             )
 

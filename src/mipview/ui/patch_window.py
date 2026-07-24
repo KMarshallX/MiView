@@ -526,6 +526,17 @@ class PatchViewerWindow(QMainWindow):
             self.orientation_indicator_action_group.addAction(action)
             view_menu.addAction(action)
             self.orientation_indicator_actions[mode] = action
+        view_menu.addSeparator()
+        self.patch_extension_lines_action = QAction(
+            "Turn on/off patch indicator extension lines",
+            self,
+        )
+        self.patch_extension_lines_action.setCheckable(True)
+        self.patch_extension_lines_action.setChecked(True)
+        self.patch_extension_lines_action.toggled.connect(
+            self.slice_viewer.volume_3d_view.set_patch_extension_lines_visible
+        )
+        view_menu.addAction(self.patch_extension_lines_action)
 
         self.segmentation_menu = self.menuBar().addMenu("&Segmentation")
         self.unload_current_segmentation_action = QAction(

@@ -31,6 +31,7 @@ from mipview.viewer.slice_geometry import project_oriented_volume
 
 SUPPORTED_ORIENTATIONS: set[str] = {"axial", "coronal", "sagittal"}
 SUPPORTED_PROJECTION_MODES: set[str] = {"MIP", "MINIP"}
+_UNSET = object()
 
 
 class MipViewController:
@@ -186,6 +187,7 @@ class MipViewController:
         colour: list[int] | tuple[int, int, int] | None = None,
         render_mode: str | None = None,
         threshold: float | None = None,
+        mask_source_id: object = _UNSET,
     ) -> CommandResult:
         target = self._render3d_target(session_id)
         if isinstance(target, CommandResult):
@@ -210,6 +212,33 @@ class MipViewController:
                     False,
                     f"3D render mode must be one of: {', '.join(allowed_modes)}.",
                 )
+        normalized_mask_id: str | None = None
+        if mask_source_id is not _UNSET:
+            if mask_source_id is not None and not isinstance(mask_source_id, str):
+                return CommandResult(
+                    False,
+                    "3D render mask source ID must be a string or null.",
+                )
+            normalized_mask_id = (
+                None
+                if mask_source_id in {None, "---"}
+                else str(mask_source_id)
+            )
+            compatible_ids = {
+                source.id
+                for source in target.state.compatible_masks_for(
+                    target.state.selected_source_id
+                )
+            }
+            if (
+                normalized_mask_id is not None
+                and normalized_mask_id not in compatible_ids
+            ):
+                return CommandResult(
+                    False,
+                    "3D render mask must be a loaded, spatially compatible "
+                    f"segmentation layer: {normalized_mask_id}",
+                )
         if visible is not None:
             target.set_selected_visibility(visible)
         if opacity is not None:
@@ -220,6 +249,8 @@ class MipViewController:
             target.set_selected_render_mode(str(render_mode))
         if threshold is not None:
             target.set_selected_threshold(float(threshold))
+        if mask_source_id is not _UNSET:
+            target.set_selected_mask_source(normalized_mask_id)
         return CommandResult(True, "3D display settings updated.", target.status())
 
     def reset_render3d_camera(

@@ -41,6 +41,7 @@ from mipview.viewer.render_3d_preparation import (
     PreparedRender3D,
     cursor_world_position,
     orientation_label_world_positions,
+    patch_box_extension_world_segments,
     patch_box_world_segments,
     prepare_render,
     source_box_world_segments,
@@ -50,6 +51,7 @@ from mipview.viewer.render_3d_state import (
     SEGMENTATION_RENDER_MODES,
     Render3DSource,
     Render3DState,
+    render_mode_supports_mask,
 )
 
 
@@ -65,12 +67,14 @@ class _PreparationWorker(QRunnable):
         source: Render3DSource,
         render_mode: str,
         threshold: float,
+        mask_source: Render3DSource | None,
     ) -> None:
         super().__init__()
         self.token = token
         self.source = source
         self.render_mode = render_mode
         self.threshold = threshold
+        self.mask_source = mask_source
         self.signals = _PreparationSignals()
 
     @Slot()
@@ -81,6 +85,11 @@ class _PreparationWorker(QRunnable):
                 kind=self.source.kind,
                 render_mode=self.render_mode,
                 threshold=self.threshold,
+                mask_volume=(
+                    None
+                    if self.mask_source is None
+                    else self.mask_source.volume
+                ),
             )
         except Exception as exc:
             self.signals.failed.emit(self.token, str(exc))
@@ -329,6 +338,7 @@ class Volume3DWidget(QWidget):
         self._active_visual: Any | None = None
         self._prepared: PreparedRender3D | None = None
         self._patch_visual: Any | None = None
+        self._patch_extension_visual: Any | None = None
         self._source_box_visual: Any | None = None
         self._locator_visual: Any | None = None
         self._cursor_overlay: _Volume3DCursorOverlay | None = None
@@ -344,6 +354,7 @@ class Volume3DWidget(QWidget):
         self._locator_source_shape: tuple[int, int, int] | None = None
         self._locator_source_affine: np.ndarray | None = None
         self._patch_box = _PatchBoxState()
+        self._patch_extension_lines_visible = True
 
         self.title_label = QLabel("3D", self)
         self.title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -380,6 +391,7 @@ class Volume3DWidget(QWidget):
         panel.opacity_changed.connect(self.set_selected_opacity)
         panel.colour_changed.connect(self.set_selected_colour)
         panel.render_mode_changed.connect(self.set_selected_render_mode)
+        panel.mask_changed.connect(self.set_selected_mask_source)
         panel.threshold_changed.connect(self.set_selected_threshold)
         panel.update_requested.connect(self.update_selected_render)
         panel.reset_camera_requested.connect(self.reset_camera)
@@ -395,8 +407,27 @@ class Volume3DWidget(QWidget):
             if rendered_before is None
             else self.state.sources.get(rendered_before)
         )
+        previous_settings = (
+            None
+            if rendered_before is None
+            else self.state.settings.get(rendered_before)
+        )
+        previous_mask_id = (
+            None
+            if previous_settings is None
+            else previous_settings.mask_source_id
+        )
+        previous_mask_source = (
+            None
+            if previous_mask_id is None
+            else self.state.sources.get(previous_mask_id)
+        )
         replacement_source = next(
             (source for source in sources if source.id == rendered_before),
+            None,
+        )
+        replacement_mask_source = next(
+            (source for source in sources if source.id == previous_mask_id),
             None,
         )
         self.state.set_sources(sources)
@@ -405,11 +436,26 @@ class Volume3DWidget(QWidget):
             and replacement_source is not None
             and previous_source.volume is not replacement_source.volume
         )
+        mask_data_changed = (
+            previous_mask_source is not None
+            and previous_source is not None
+            and previous_settings is not None
+            and render_mode_supports_mask(
+                previous_source.kind,
+                previous_settings.render_mode,
+            )
+            and (
+                replacement_mask_source is None
+                or previous_mask_source.volume
+                is not replacement_mask_source.volume
+            )
+        )
         if (
             rendered_before is not None
             and (
                 self.state.rendered_source_id is None
                 or source_data_changed
+                or mask_data_changed
             )
         ):
             self._release_active_visual()
@@ -504,6 +550,14 @@ class Volume3DWidget(QWidget):
             source,
             settings.render_mode,
             settings.threshold,
+            (
+                self.state.selected_mask_source()
+                if render_mode_supports_mask(
+                    source.kind,
+                    settings.render_mode,
+                )
+                else None
+            ),
         )
         self._workers[token] = worker
         worker.signals.finished.connect(self._on_preparation_finished)
@@ -561,6 +615,36 @@ class Volume3DWidget(QWidget):
                 )
             settings.render_mode = render_mode
             settings.dirty = True
+            self._sync_panel_settings()
+        if self._panel is not None:
+            self._panel.set_status("Update required.")
+        self._emit_state()
+
+    def set_selected_mask_source(self, mask_source_id: object) -> None:
+        settings = self.state.selected_settings()
+        if settings is None:
+            return
+        normalized = mask_source_id if isinstance(mask_source_id, str) else None
+        compatible_ids = {
+            source.id
+            for source in self.state.compatible_masks_for(
+                self.state.selected_source_id
+            )
+        }
+        if normalized is not None and normalized not in compatible_ids:
+            self._set_error(
+                "3D render mask is unavailable or spatially incompatible: "
+                f"{normalized}"
+            )
+            return
+        if settings.mask_source_id != normalized:
+            if self.state.busy:
+                self._cancel_pending_preparation(
+                    "3D render mask changed; click Update."
+                )
+            settings.mask_source_id = normalized
+            settings.dirty = True
+            self._sync_panel_settings()
         if self._panel is not None:
             self._panel.set_status("Update required.")
         self._emit_state()
@@ -659,6 +743,16 @@ class Volume3DWidget(QWidget):
         )
         self._refresh_patch_visual()
 
+    def set_patch_extension_lines_visible(self, visible: bool) -> None:
+        normalized = bool(visible)
+        if normalized == self._patch_extension_lines_visible:
+            return
+        self._patch_extension_lines_visible = normalized
+        self._refresh_patch_visual()
+
+    def patch_extension_lines_visible(self) -> bool:
+        return self._patch_extension_lines_visible
+
     def set_volume_geometry(
         self,
         shape: tuple[int, int, int] | None,
@@ -684,6 +778,7 @@ class Volume3DWidget(QWidget):
                 )
             self._volume_shape = normalized_shape
             self._volume_affine = normalized_affine
+        self._refresh_patch_visual()
         self._refresh_cursor_overlay()
         self._refresh_orientation_overlay()
 
@@ -731,6 +826,8 @@ class Volume3DWidget(QWidget):
         self._locator_volume = volume
         self._locator_visible = bool(visible)
         self._refresh_locator_visual()
+        self._refresh_patch_visual()
+        self._refresh_orientation_overlay()
 
     def set_locator_source_extent(
         self,
@@ -742,11 +839,16 @@ class Volume3DWidget(QWidget):
             None if affine is None else np.asarray(affine, dtype=np.float64)
         )
         self._refresh_locator_visual()
+        self._refresh_patch_visual()
+        self._refresh_orientation_overlay()
 
     def status(self) -> dict[str, object]:
         status = self.state.status()
         status["locator_visible"] = self._locator_visible
         status["patch_box_visible"] = self._patch_box.visible
+        status["patch_extension_lines_visible"] = (
+            self._patch_extension_lines_visible
+        )
         status["cursor_visible"] = self._cursor_visible
         status["cursor_position"] = (
             None
@@ -872,6 +974,7 @@ class Volume3DWidget(QWidget):
             self._cursor_overlay = None
         for name in (
             "_patch_visual",
+            "_patch_extension_visual",
             "_source_box_visual",
             "_locator_visual",
         ):
@@ -917,11 +1020,18 @@ class Volume3DWidget(QWidget):
                 prepared.data,
                 method=method,
                 clim=(0, 255),
+                interpolation=(
+                    "nearest" if prepared.mask_applied else "linear"
+                ),
                 cmap=_volume_colormap(
                     settings.colour,
                     settings.opacity,
                     translucent=method == "translucent",
                     cutoff=cutoff,
+                    masked_minip=(
+                        prepared.mask_applied
+                        and prepared.render_mode == "MinIP"
+                    ),
                 ),
                 parent=self._view.scene,
             )
@@ -975,6 +1085,10 @@ class Volume3DWidget(QWidget):
                 settings.opacity,
                 translucent=self._prepared.render_mode == "Translucent",
                 cutoff=cutoff,
+                masked_minip=(
+                    self._prepared.mask_applied
+                    and self._prepared.render_mode == "MinIP"
+                ),
             )
         elif self._prepared.render_mode == "Points":
             self._active_visual.set_data(
@@ -990,24 +1104,108 @@ class Volume3DWidget(QWidget):
     def _refresh_patch_visual(self) -> None:
         if self._view is None:
             return
-        if self._patch_visual is not None:
-            self._patch_visual.parent = None
-            self._patch_visual = None
         state = self._patch_box
         if not state.visible or state.bounds is None or state.affine is None:
+            self._remove_patch_visuals()
             self._request_canvas_update()
             return
         from vispy import scene
 
         segments = patch_box_world_segments(state.bounds, state.affine)
-        self._patch_visual = scene.visuals.Line(
-            pos=segments,
-            connect="segments",
-            color=(1.0, 0.85, 0.05, 1.0),
-            width=2.5,
-            parent=self._view.scene,
-        )
+        if self._patch_visual is None:
+            self._patch_visual = scene.visuals.Line(
+                pos=segments,
+                connect="segments",
+                color=(1.0, 0.85, 0.05, 1.0),
+                width=2.5,
+                parent=self._view.scene,
+            )
+        else:
+            self._patch_visual.set_data(
+                pos=segments,
+                connect="segments",
+            )
+        extension_geometry = self._source_context_geometry()
+        if (
+            self._patch_extension_lines_visible
+            and extension_geometry is not None
+        ):
+            source_shape, source_affine = extension_geometry
+            bounds_within_source = (
+                0 <= state.bounds.x_start < state.bounds.x_end <= source_shape[0]
+                and 0
+                <= state.bounds.y_start
+                < state.bounds.y_end
+                <= source_shape[1]
+                and 0
+                <= state.bounds.z_start
+                < state.bounds.z_end
+                <= source_shape[2]
+            )
+            affines_match = np.allclose(
+                state.affine,
+                source_affine,
+                atol=1.0e-4,
+                rtol=0.0,
+            )
+            extension_segments = (
+                patch_box_extension_world_segments(
+                    state.bounds,
+                    source_shape,
+                    source_affine,
+                )
+                if bounds_within_source and affines_match
+                else np.empty((0, 3), dtype=np.float32)
+            )
+            if extension_segments.size:
+                if self._patch_extension_visual is None:
+                    self._patch_extension_visual = scene.visuals.Line(
+                        pos=extension_segments,
+                        connect="segments",
+                        color=(1.0, 0.85, 0.05, 0.9),
+                        width=1.0,
+                        parent=self._view.scene,
+                    )
+                else:
+                    self._patch_extension_visual.set_data(
+                        pos=extension_segments,
+                        connect="segments",
+                    )
+            elif self._patch_extension_visual is not None:
+                self._patch_extension_visual.parent = None
+                self._patch_extension_visual = None
+        elif self._patch_extension_visual is not None:
+            self._patch_extension_visual.parent = None
+            self._patch_extension_visual = None
         self._request_canvas_update()
+
+    def _remove_patch_visuals(self) -> None:
+        for name in ("_patch_visual", "_patch_extension_visual"):
+            visual = getattr(self, name)
+            if visual is not None:
+                visual.parent = None
+                setattr(self, name, None)
+
+    def _source_context_geometry(
+        self,
+    ) -> tuple[tuple[int, int, int], np.ndarray] | None:
+        if self._locator_visible:
+            if self._locator_volume is not None:
+                return (
+                    tuple(int(value) for value in self._locator_volume.shape),
+                    np.asarray(self._locator_volume.affine, dtype=np.float64),
+                )
+            if (
+                self._locator_source_shape is not None
+                and self._locator_source_affine is not None
+            ):
+                return (
+                    tuple(int(value) for value in self._locator_source_shape),
+                    self._locator_source_affine,
+                )
+        if self._volume_shape is None or self._volume_affine is None:
+            return None
+        return self._volume_shape, self._volume_affine
 
     def _refresh_cursor_overlay(self) -> None:
         if self._cursor_overlay is not None:
@@ -1051,15 +1249,13 @@ class Volume3DWidget(QWidget):
     def _orientation_canvas_positions(
         self,
     ) -> tuple[tuple[str, float, float], ...]:
-        if (
-            self._view is None
-            or self._volume_shape is None
-            or self._volume_affine is None
-        ):
+        geometry = self._source_context_geometry()
+        if self._view is None or geometry is None:
             return ()
+        shape, affine = geometry
         labels, world_positions = orientation_label_world_positions(
-            self._volume_shape,
-            self._volume_affine,
+            shape,
+            affine,
         )
         projected: list[tuple[str, float, float]] = []
         for label, world_position in zip(labels, world_positions, strict=True):
@@ -1073,15 +1269,13 @@ class Volume3DWidget(QWidget):
     def _orientation_widget_axes(
         self,
     ) -> tuple[tuple[str, float, float], ...]:
-        if (
-            self._view is None
-            or self._volume_shape is None
-            or self._volume_affine is None
-        ):
+        geometry = self._source_context_geometry()
+        if self._view is None or geometry is None:
             return ()
+        shape, affine = geometry
         limits = _volume_world_limits(
-            self._volume_shape,
-            self._volume_affine,
+            shape,
+            affine,
         )
         world_center = np.asarray(
             [
@@ -1211,11 +1405,22 @@ class Volume3DWidget(QWidget):
         source = self.state.selected_source()
         settings = self.state.selected_settings()
         if source is None or settings is None:
+            self._panel.set_modes((), "")
+            self._panel.set_masks((), None)
             self._panel.set_status("Load an image before rendering.")
             self._panel.set_render_controls_enabled(False)
             return
         modes = RAW_RENDER_MODES if source.kind == "image" else SEGMENTATION_RENDER_MODES
         self._panel.set_modes(modes, settings.render_mode)
+        self._panel.set_masks(
+            [
+                (mask_source.id, mask_source.display_name)
+                for mask_source in self.state.compatible_masks_for(
+                    self.state.selected_source_id
+                )
+            ],
+            settings.mask_source_id,
+        )
         self._panel.set_settings(settings)
         self._panel.set_render_controls_enabled(self.state.active)
 
@@ -1341,6 +1546,7 @@ def _volume_colormap(
     *,
     translucent: bool = False,
     cutoff: float = 0.0,
+    masked_minip: bool = False,
 ) -> Any:
     from vispy.color import Colormap
 
@@ -1368,6 +1574,15 @@ def _volume_colormap(
                 (red, green, blue, alpha * 0.25),
             ],
             controls=[0.0, lower, middle, 1.0],
+        )
+    if masked_minip:
+        return Colormap(
+            [
+                (0.0, 0.0, 0.0, 0.0),
+                (red, green, blue, alpha),
+                (red, green, blue, 0.0),
+            ],
+            controls=[0.0, 254.0 / 255.0, 1.0],
         )
     return Colormap(
         [

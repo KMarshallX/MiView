@@ -31,6 +31,7 @@ class Volume3DPanel(CollapsibleGroupBox):
     opacity_changed = Signal(float)
     colour_changed = Signal(object)
     render_mode_changed = Signal(str)
+    mask_changed = Signal(object)
     threshold_changed = Signal(float)
     update_requested = Signal()
     reset_camera_requested = Signal()
@@ -68,8 +69,15 @@ class Volume3DPanel(CollapsibleGroupBox):
 
         self.render_mode_combo = QComboBox(self)
         self.render_mode_combo.currentTextChanged.connect(
-            self.render_mode_changed.emit
+            self._on_render_mode_changed
         )
+
+        self.mask_combo = QComboBox(self)
+        self.mask_combo.addItem("---", None)
+        self.mask_combo.currentIndexChanged.connect(
+            lambda _index: self.mask_changed.emit(self.mask_combo.currentData())
+        )
+        self.mask_label = QLabel("Mask:", self)
 
         self.threshold_spinbox = QDoubleSpinBox(self)
         self.threshold_spinbox.setDecimals(4)
@@ -101,11 +109,13 @@ class Volume3DPanel(CollapsibleGroupBox):
         form.addRow("Opacity:", self.opacity_slider)
         form.addRow("Colour:", self.colour_button)
         form.addRow("Render mode:", self.render_mode_combo)
+        form.addRow(self.mask_label, self.mask_combo)
         form.addRow("Threshold:", self.threshold_spinbox)
         form.addRow(action_row)
         form.addRow(self.progress_bar)
         form.addRow(self.status_label)
         self.set_render_controls_enabled(False)
+        self._refresh_mask_availability()
 
     def set_sources(
         self,
@@ -139,18 +149,39 @@ class Volume3DPanel(CollapsibleGroupBox):
         self.render_mode_combo.setCurrentIndex(max(index, 0))
         self.render_mode_combo.blockSignals(was_blocked)
         self._refresh_threshold_availability()
+        self._refresh_mask_availability()
+
+    def set_masks(
+        self,
+        masks: Sequence[tuple[str, str]],
+        selected_mask_id: str | None,
+    ) -> None:
+        was_blocked = self.mask_combo.blockSignals(True)
+        self.mask_combo.clear()
+        self.mask_combo.addItem("---", None)
+        selected_index = 0
+        for source_id, display_name in masks:
+            self.mask_combo.addItem(display_name, source_id)
+            if source_id == selected_mask_id:
+                selected_index = self.mask_combo.count() - 1
+        self.mask_combo.setCurrentIndex(selected_index)
+        self.mask_combo.blockSignals(was_blocked)
+        self._refresh_mask_availability()
 
     def set_settings(self, settings: Render3DSettings) -> None:
         blockers: list[tuple[QWidget, bool]] = []
         for widget in (
             self.visible_checkbox,
             self.opacity_slider,
+            self.mask_combo,
             self.threshold_spinbox,
         ):
             blockers.append((widget, widget.blockSignals(True)))
         self.visible_checkbox.setChecked(settings.visible)
         self.opacity_slider.setValue(int(round(settings.opacity * 100.0)))
         self.threshold_spinbox.setValue(settings.threshold)
+        mask_index = self.mask_combo.findData(settings.mask_source_id)
+        self.mask_combo.setCurrentIndex(max(mask_index, 0))
         for widget, blocked in blockers:
             widget.blockSignals(blocked)
 
@@ -162,6 +193,7 @@ class Volume3DPanel(CollapsibleGroupBox):
             self.render_mode_combo.setCurrentIndex(index)
             self.render_mode_combo.blockSignals(was_blocked)
         self._refresh_threshold_availability()
+        self._refresh_mask_availability()
         self.set_status(
             "Update required." if settings.dirty else "3D layer ready."
         )
@@ -184,12 +216,14 @@ class Volume3DPanel(CollapsibleGroupBox):
             self.opacity_slider,
             self.colour_button,
             self.render_mode_combo,
+            self.mask_combo,
             self.threshold_spinbox,
             self.update_button,
             self.reset_camera_button,
         ):
             widget.setEnabled(enabled)
         self._refresh_threshold_availability()
+        self._refresh_mask_availability()
 
     def set_busy(self, busy: bool, message: str = "Preparing 3D layer…") -> None:
         self.progress_bar.setVisible(busy)
@@ -226,6 +260,11 @@ class Volume3DPanel(CollapsibleGroupBox):
         )
         self.activation_requested.emit(active)
 
+    def _on_render_mode_changed(self, render_mode: str) -> None:
+        self._refresh_threshold_availability()
+        self._refresh_mask_availability()
+        self.render_mode_changed.emit(render_mode)
+
     def _choose_colour(self) -> None:
         selected = QColorDialog.getColor(QColor(*self._colour), self, "3D Layer Colour")
         if not selected.isValid():
@@ -246,4 +285,15 @@ class Volume3DPanel(CollapsibleGroupBox):
         active = self.activation_button.isChecked()
         self.threshold_spinbox.setEnabled(
             active and mode in {"Translucent", "Isosurface", "Surface", "Points"}
+        )
+
+    def _refresh_mask_availability(self) -> None:
+        mode = self.render_mode_combo.currentText()
+        visible = mode in {"MIP", "MinIP", "Surface", "Points"}
+        self.mask_label.setVisible(visible)
+        self.mask_combo.setVisible(visible)
+        self.mask_combo.setEnabled(
+            visible
+            and self.activation_button.isChecked()
+            and self.source_combo.currentIndex() >= 0
         )

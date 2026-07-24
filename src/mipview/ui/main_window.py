@@ -128,6 +128,7 @@ class MainWindow(QMainWindow):
         self.view_mode_action_group: QActionGroup | None = None
         self.orientation_indicator_actions: dict[str, QAction] = {}
         self.orientation_indicator_action_group: QActionGroup | None = None
+        self.patch_extension_lines_action: QAction | None = None
         self.ruler_action: QAction | None = None
         self._cursor_overlay_checked_before_patch = True
         self.patch_toggle_action: QAction | None = None
@@ -308,6 +309,17 @@ class MainWindow(QMainWindow):
         view_menu.addAction(self.cursor_overlay_action)
         view_menu.addSeparator()
         self._add_orientation_indicator_actions(view_menu)
+        view_menu.addSeparator()
+        self.patch_extension_lines_action = QAction(
+            "Turn on/off patch indicator extension lines",
+            self,
+        )
+        self.patch_extension_lines_action.setCheckable(True)
+        self.patch_extension_lines_action.setChecked(True)
+        self.patch_extension_lines_action.toggled.connect(
+            self.slice_viewer.volume_3d_view.set_patch_extension_lines_visible
+        )
+        view_menu.addAction(self.patch_extension_lines_action)
 
         self.patch_toggle_action = QAction("&Patch Selection", self)
         self.patch_toggle_action.setCheckable(True)
