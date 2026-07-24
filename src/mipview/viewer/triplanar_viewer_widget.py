@@ -34,6 +34,11 @@ from mipview.patch.selector import (
     source_bounds_to_display_bounds,
 )
 from mipview.viewer.oriented_volume import OrientedVolume, build_oriented_volume
+from mipview.viewer.orientation_indicator import (
+    ORIENTATION_INDICATOR_LABELS,
+    OrientationIndicatorMode,
+    normalize_orientation_indicator_mode,
+)
 from mipview.viewer.ruler import spatial_unit_to_mm
 from mipview.viewer.slice_geometry import (
     Orientation,
@@ -52,12 +57,14 @@ VIEW_MODE_AXIAL = "axial"
 VIEW_MODE_SAGITTAL = "sagittal"
 VIEW_MODE_CORONAL = "coronal"
 VIEW_MODE_3D = "3d"
+VIEW_MODE_ORTHOGONAL = "orthogonal"
 VIEW_MODE_ORTHOGONAL_3D = "orthogonal_3d"
 VIEW_MODES = (
     VIEW_MODE_AXIAL,
     VIEW_MODE_SAGITTAL,
     VIEW_MODE_CORONAL,
     VIEW_MODE_3D,
+    VIEW_MODE_ORTHOGONAL,
     VIEW_MODE_ORTHOGONAL_3D,
 )
 
@@ -199,6 +206,9 @@ class TriPlanarViewerWidget(QWidget):
         self._projection_segmentation_enabled = True
         self._projection_segmentation_source: str | None = "all"
         self._active_view: Orientation | None = None
+        self._orientation_indicator_mode: OrientationIndicatorMode = (
+            ORIENTATION_INDICATOR_LABELS
+        )
         self._drop_loading_enabled = False
         self._projection_enabled: dict[str, bool] = {
             "axial": False,
@@ -367,6 +377,16 @@ class TriPlanarViewerWidget(QWidget):
             self._viewer_splitter.setSizes(root)
             self._top_splitter.setSizes(top)
             self._bottom_splitter.setSizes(bottom)
+        elif self._view_mode == VIEW_MODE_ORTHOGONAL:
+            self._top_splitter.insertWidget(0, self.axial_view)
+            self._top_splitter.insertWidget(1, self.coronal_view)
+            self._top_splitter.insertWidget(2, self.sagittal_view)
+            self.axial_view.setVisible(True)
+            self.coronal_view.setVisible(True)
+            self.sagittal_view.setVisible(True)
+            self._top_splitter.setSizes(
+                self._splitter_sizes.get(VIEW_MODE_ORTHOGONAL, ([1, 1, 1],))[0]
+            )
         else:
             selected_widget = {
                 VIEW_MODE_AXIAL: self.axial_view,
@@ -384,6 +404,11 @@ class TriPlanarViewerWidget(QWidget):
         *,
         volume_active: bool | None = None,
     ) -> None:
+        if self._view_mode == VIEW_MODE_ORTHOGONAL:
+            candidate = self._top_splitter.sizes()
+            if sum(candidate) > 0:
+                self._splitter_sizes[VIEW_MODE_ORTHOGONAL] = (candidate,)
+            return
         if self._view_mode != VIEW_MODE_ORTHOGONAL_3D:
             return
         _ = volume_active
@@ -403,6 +428,7 @@ class TriPlanarViewerWidget(QWidget):
             )
 
         self._display_volume = build_oriented_volume(volume.data, volume.affine)
+        self.volume_3d_view.set_volume_geometry(volume.shape, volume.affine)
         unit_scale_to_mm = spatial_unit_to_mm(volume.header.get_xyzt_units()[0])
         # Reset cursor state before reloading the views so the initial cursor
         # is always re-emitted into the freshly cleared slice widgets.
@@ -457,6 +483,7 @@ class TriPlanarViewerWidget(QWidget):
 
     def unload_volume(self) -> None:
         self.volume_3d_view.dismiss()
+        self.volume_3d_view.set_volume_geometry(None, None)
         self._display_volume = None
         self._segmentation_display_volume = None
         self._projection_mask_display_volume = None
@@ -507,6 +534,19 @@ class TriPlanarViewerWidget(QWidget):
     def set_cursor_overlay_visible(self, visible: bool) -> None:
         for view in self._views:
             view.set_cursor_overlay_visible(visible)
+        self.volume_3d_view.set_cursor_overlay_visible(visible)
+
+    def set_orientation_indicator_mode(self, mode: str) -> None:
+        normalized = normalize_orientation_indicator_mode(mode)
+        if normalized == self._orientation_indicator_mode:
+            return
+        self._orientation_indicator_mode = normalized
+        for view in self._views:
+            view.set_orientation_indicator_mode(normalized)
+        self.volume_3d_view.set_orientation_indicator_mode(normalized)
+
+    def orientation_indicator_mode(self) -> OrientationIndicatorMode:
+        return self._orientation_indicator_mode
 
     def set_ruler_visible(self, visible: bool) -> None:
         for view in self._views:
@@ -951,7 +991,8 @@ class TriPlanarViewerWidget(QWidget):
         self._emit_dropped_path(dropped_path)
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:
-        if watched in self._drop_event_sources and self._handle_drop_event(event):
+        drop_event_sources = getattr(self, "_drop_event_sources", ())
+        if watched in drop_event_sources and self._handle_drop_event(event):
             return True
         return super().eventFilter(watched, event)
 
@@ -966,6 +1007,7 @@ class TriPlanarViewerWidget(QWidget):
         cursor_position = (x, y, z)
         for view in self._views:
             view.set_cursor_position(cursor_position)
+        self.volume_3d_view.set_cursor_position(cursor_position)
 
         intensity = self._display_volume.source_data[x, y, z].item()
         self.cursor_inspection_changed.emit(x, y, z, intensity)

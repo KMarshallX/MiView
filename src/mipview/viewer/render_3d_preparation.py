@@ -169,6 +169,61 @@ def source_box_world_segments(
     return box_world_segments(starts, ends, affine)
 
 
+def cursor_world_position(
+    voxel: tuple[int, int, int],
+    shape: tuple[int, int, int],
+    affine: np.ndarray,
+) -> np.ndarray:
+    """Map one validated source-voxel cursor position into RAS world space."""
+    voxel_position = np.asarray(voxel, dtype=np.float64)
+    volume_shape = np.asarray(shape, dtype=np.int64)
+    if voxel_position.shape != (3,):
+        raise ValueError("3D cursor position must contain exactly three coordinates.")
+    if volume_shape.shape != (3,) or np.any(volume_shape <= 0):
+        raise ValueError("3D cursor volume shape must contain three positive sizes.")
+    if np.any(voxel_position < 0) or np.any(voxel_position >= volume_shape):
+        raise ValueError(
+            f"3D cursor {tuple(voxel)} is outside volume shape {tuple(shape)}."
+        )
+
+    transform = np.asarray(affine, dtype=np.float64)
+    if transform.shape != (4, 4):
+        raise ValueError(f"3D cursor affine must be 4x4, got {transform.shape}.")
+    return np.asarray(
+        apply_affine(transform, voxel_position),
+        dtype=np.float32,
+    )
+
+
+def orientation_label_world_positions(
+    shape: tuple[int, int, int],
+    affine: np.ndarray,
+) -> tuple[tuple[str, ...], np.ndarray]:
+    """Place L/R, P/A, and I/S labels around the volume in RAS world space."""
+    limits = _world_limits_for_shape(shape, affine)
+    midpoints = np.asarray(
+        [(minimum + maximum) / 2.0 for minimum, maximum in limits],
+        dtype=np.float64,
+    )
+    span = np.asarray(
+        [maximum - minimum for minimum, maximum in limits],
+        dtype=np.float64,
+    )
+    minimum_padding = max(float(np.linalg.norm(span)) * 0.002, 1.0e-3)
+    padding = np.maximum(span * 0.04, minimum_padding)
+    positions = np.repeat(midpoints[None, :], 6, axis=0)
+    positions[0, 0] = limits[0][0] - padding[0]
+    positions[1, 0] = limits[0][1] + padding[0]
+    positions[2, 1] = limits[1][0] - padding[1]
+    positions[3, 1] = limits[1][1] + padding[1]
+    positions[4, 2] = limits[2][0] - padding[2]
+    positions[5, 2] = limits[2][1] + padding[2]
+    return ("L", "R", "P", "A", "I", "S"), np.asarray(
+        positions,
+        dtype=np.float32,
+    )
+
+
 def box_world_segments(
     starts: np.ndarray,
     ends: np.ndarray,
@@ -205,6 +260,23 @@ def box_world_segments(
     return np.asarray(
         [world[index] for edge in edge_indices for index in edge],
         dtype=np.float32,
+    )
+
+
+def _world_limits_for_shape(
+    shape: tuple[int, int, int],
+    affine: np.ndarray,
+) -> tuple[
+    tuple[float, float],
+    tuple[float, float],
+    tuple[float, float],
+]:
+    coordinates = source_box_world_segments(shape, affine).reshape(-1, 3)
+    minimum = np.min(coordinates, axis=0)
+    maximum = np.max(coordinates, axis=0)
+    return tuple(
+        (float(minimum[axis]), float(maximum[axis]))
+        for axis in range(3)
     )
 
 

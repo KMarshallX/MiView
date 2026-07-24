@@ -92,6 +92,11 @@ from mipview.ui.window_styling import (
 )
 from mipview.viewer.intensity import normalize_slice_to_uint8, window_slice_to_uint8
 from mipview.viewer.oriented_volume import build_oriented_volume
+from mipview.viewer.orientation_indicator import (
+    ORIENTATION_INDICATOR_LABELS,
+    ORIENTATION_INDICATOR_OFF,
+    ORIENTATION_INDICATOR_WIDGET,
+)
 from mipview.viewer.ruler import display_voxel_spacing_mm, spatial_unit_to_mm
 from mipview.viewer.slice_geometry import project_oriented_volume
 from mipview.viewer.slice_geometry import Orientation, plane_axes_for_orientation
@@ -99,6 +104,7 @@ from mipview.viewer.triplanar_viewer_widget import (
     VIEW_MODE_3D,
     VIEW_MODE_AXIAL,
     VIEW_MODE_CORONAL,
+    VIEW_MODE_ORTHOGONAL,
     VIEW_MODE_ORTHOGONAL_3D,
     VIEW_MODE_SAGITTAL,
     TriPlanarViewerWidget,
@@ -469,6 +475,7 @@ class PatchViewerWindow(QMainWindow):
             ("Sagittal View", VIEW_MODE_SAGITTAL),
             ("Coronal View", VIEW_MODE_CORONAL),
             ("3D Render", VIEW_MODE_3D),
+            ("Orthogonal", VIEW_MODE_ORTHOGONAL),
             ("Orthogonal and 3D", VIEW_MODE_ORTHOGONAL_3D),
         ):
             action = QAction(label, self)
@@ -494,6 +501,31 @@ class PatchViewerWindow(QMainWindow):
             self.slice_viewer.set_cursor_overlay_visible
         )
         view_menu.addAction(self.cursor_overlay_action)
+        view_menu.addSeparator()
+
+        self.orientation_indicator_actions: dict[str, QAction] = {}
+        self.orientation_indicator_action_group = QActionGroup(self)
+        self.orientation_indicator_action_group.setExclusive(True)
+        for label, mode in (
+            ("Display orientation labels", ORIENTATION_INDICATOR_LABELS),
+            ("Display orientation widget", ORIENTATION_INDICATOR_WIDGET),
+            ("Turn off Orientation Indicator", ORIENTATION_INDICATOR_OFF),
+        ):
+            action = QAction(label, self)
+            action.setCheckable(True)
+            action.setChecked(
+                mode == self.slice_viewer.orientation_indicator_mode()
+            )
+            action.triggered.connect(
+                lambda _checked=False, selected_mode=mode: (
+                    self.slice_viewer.set_orientation_indicator_mode(
+                        selected_mode
+                    )
+                )
+            )
+            self.orientation_indicator_action_group.addAction(action)
+            view_menu.addAction(action)
+            self.orientation_indicator_actions[mode] = action
 
         self.segmentation_menu = self.menuBar().addMenu("&Segmentation")
         self.unload_current_segmentation_action = QAction(

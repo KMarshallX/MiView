@@ -30,6 +30,14 @@ from mipview.graph.spatial import (
 )
 from mipview.graph.vector import GraphVector, resolve_graph_vector
 from mipview.viewer.intensity import normalize_slice_to_uint8, window_slice_to_uint8
+from mipview.viewer.orientation_indicator import (
+    ORIENTATION_INDICATOR_LABELS,
+    ORIENTATION_INDICATOR_OFF,
+    ORIENTATION_INDICATOR_WIDGET,
+    OrientationIndicatorMode,
+    normalize_orientation_indicator_mode,
+    orientation_axis_colour,
+)
 from mipview.segmentation.overlay import build_segmentation_overlay_rgba
 from mipview.viewer.oriented_volume import OrientedVolume
 from mipview.viewer.ruler import display_voxel_spacing_mm, select_ruler_geometry
@@ -97,6 +105,9 @@ class SliceViewerWidget(QWidget):
         self._zoom_factor = 1.0
         self._pan_offset = (0.0, 0.0)
         self._cursor_overlay_visible = True
+        self._orientation_indicator_mode: OrientationIndicatorMode = (
+            ORIENTATION_INDICATOR_LABELS
+        )
         self._ruler_visible = True
         self._patch_overlay_visible = False
         self._patch_overlay_opacity = 0.5
@@ -247,6 +258,16 @@ class SliceViewerWidget(QWidget):
     def set_cursor_overlay_visible(self, visible: bool) -> None:
         self._cursor_overlay_visible = visible
         self._update_scaled_pixmap()
+
+    def set_orientation_indicator_mode(self, mode: str) -> None:
+        normalized = normalize_orientation_indicator_mode(mode)
+        if normalized == self._orientation_indicator_mode:
+            return
+        self._orientation_indicator_mode = normalized
+        self._update_scaled_pixmap()
+
+    def orientation_indicator_mode(self) -> OrientationIndicatorMode:
+        return self._orientation_indicator_mode
 
     def set_ruler_visible(self, visible: bool) -> None:
         self._ruler_visible = bool(visible)
@@ -605,8 +626,6 @@ class SliceViewerWidget(QWidget):
         )
         self._draw_segmentation_overlay(painter, display_rect)
         self._draw_annotation_overlay(painter, display_rect)
-        self._draw_orientation_indicators(painter)
-
         if (
             self._patch_overlay_visible
             and self._patch_plane_bounds is not None
@@ -631,6 +650,7 @@ class SliceViewerWidget(QWidget):
 
         self._draw_graph_overlay(painter, display_rect)
         self._draw_ruler(painter, display_rect)
+        self._draw_orientation_indicator(painter)
         painter.end()
 
         self.image_label.setPixmap(canvas)
@@ -1939,7 +1959,17 @@ class SliceViewerWidget(QWidget):
                 self.PATCH_HANDLE_RADIUS,
             )
 
-    def _draw_orientation_indicators(self, painter: QPainter) -> None:
+    def _draw_orientation_indicator(self, painter: QPainter) -> None:
+        if self._orientation_indicator_mode == ORIENTATION_INDICATOR_LABELS:
+            self._draw_orientation_labels(painter)
+        elif self._orientation_indicator_mode == ORIENTATION_INDICATOR_WIDGET:
+            self._draw_orientation_widget(painter)
+        elif self._orientation_indicator_mode != ORIENTATION_INDICATOR_OFF:
+            raise ValueError(
+                f"Unsupported orientation mode: {self._orientation_indicator_mode}"
+            )
+
+    def _draw_orientation_labels(self, painter: QPainter) -> None:
         indicators = orientation_indicators_for_orientation(self.orientation)
         indicator_font = QFont(self._fixed_orientation_indicator_font)
         indicator_font.setBold(True)
@@ -1968,6 +1998,127 @@ class SliceViewerWidget(QWidget):
             rect.adjusted(0, 0, 0, -margin),
             Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignHCenter,
             indicators.bottom,
+        )
+
+    def _draw_orientation_widget(self, painter: QPainter) -> None:
+        indicators = orientation_indicators_for_orientation(self.orientation)
+        widget_extent = 38.0
+        center = QPointF(
+            max(
+                widget_extent + 8.0,
+                self.image_label.width() - widget_extent - 10.0,
+            ),
+            max(
+                widget_extent + 8.0,
+                self.image_label.height() - widget_extent - 10.0,
+            ),
+        )
+
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        arrow_radius = 23.0
+        labelled_endpoints = (
+            (
+                indicators.left,
+                QPointF(center.x() - arrow_radius, center.y()),
+            ),
+            (
+                indicators.right,
+                QPointF(center.x() + arrow_radius, center.y()),
+            ),
+            (
+                indicators.top,
+                QPointF(center.x(), center.y() - arrow_radius),
+            ),
+            (
+                indicators.bottom,
+                QPointF(center.x(), center.y() + arrow_radius),
+            ),
+        )
+        for label, endpoint in labelled_endpoints:
+            self._draw_orientation_arrow(
+                painter,
+                center,
+                endpoint,
+                QColor(orientation_axis_colour(label)),
+            )
+
+        label_font = QFont(self._fixed_orientation_indicator_font)
+        label_font.setBold(True)
+        painter.setFont(label_font)
+        label_radius = 30.0
+        label_size = 16.0
+        labelled_centers = (
+            (
+                indicators.left,
+                QPointF(center.x() - label_radius, center.y()),
+            ),
+            (
+                indicators.right,
+                QPointF(center.x() + label_radius, center.y()),
+            ),
+            (
+                indicators.top,
+                QPointF(center.x(), center.y() - label_radius),
+            ),
+            (
+                indicators.bottom,
+                QPointF(center.x(), center.y() + label_radius),
+            ),
+        )
+        for label, label_center in labelled_centers:
+            painter.setPen(QPen(QColor(orientation_axis_colour(label))))
+            painter.drawText(
+                QRectF(
+                    label_center.x() - label_size / 2.0,
+                    label_center.y() - label_size / 2.0,
+                    label_size,
+                    label_size,
+                ),
+                Qt.AlignmentFlag.AlignCenter,
+                label,
+            )
+        painter.restore()
+
+    @staticmethod
+    def _draw_orientation_arrow(
+        painter: QPainter,
+        start: QPointF,
+        end: QPointF,
+        colour: QColor,
+    ) -> None:
+        axis_pen = QPen(colour, 2)
+        axis_pen.setCosmetic(True)
+        painter.setPen(axis_pen)
+        painter.setBrush(colour)
+        painter.drawLine(start, end)
+        delta_x = end.x() - start.x()
+        delta_y = end.y() - start.y()
+        length = float(np.hypot(delta_x, delta_y))
+        if length <= 0.0:
+            return
+        unit_x = delta_x / length
+        unit_y = delta_y / length
+        perpendicular_x = -unit_y
+        perpendicular_y = unit_x
+        head_length = 5.0
+        head_width = 3.5
+        base_x = end.x() - unit_x * head_length
+        base_y = end.y() - unit_y * head_length
+        painter.drawPolygon(
+            QPolygonF(
+                [
+                    end,
+                    QPointF(
+                        base_x + perpendicular_x * head_width,
+                        base_y + perpendicular_y * head_width,
+                    ),
+                    QPointF(
+                        base_x - perpendicular_x * head_width,
+                        base_y - perpendicular_y * head_width,
+                    ),
+                ]
+            )
         )
 
     def _start_patch_resize_if_hit(self, label_position: QPointF) -> bool:

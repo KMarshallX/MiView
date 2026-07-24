@@ -57,6 +57,9 @@ class MipViewController:
                 "annotation_editing_enabled": bool(state.annotation.editing_enabled),
                 "num_segmentations": len(state.loaded_segmentations),
                 "num_graph_sessions": len(self.main_window.graph_session_summaries()),
+                "orientation_indicator_mode": (
+                    self.main_window.slice_viewer.orientation_indicator_mode()
+                ),
                 "render3d": self.main_window.slice_viewer.volume_3d_view.status(),
             },
         )
@@ -83,6 +86,9 @@ class MipViewController:
                 "selection_enabled": bool(slice_viewer.patch_selection_enabled()),
             },
             "projection_mode": _projection_mode(slice_viewer),
+            "orientation_indicator_mode": (
+                slice_viewer.orientation_indicator_mode()
+            ),
             "segmentation": (
                 None
                 if active_segmentation is None

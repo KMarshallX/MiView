@@ -74,10 +74,16 @@ from mipview.ui.window_styling import (
     ResponsiveFontScaler,
     apply_window_content_frame,
 )
+from mipview.viewer.orientation_indicator import (
+    ORIENTATION_INDICATOR_LABELS,
+    ORIENTATION_INDICATOR_OFF,
+    ORIENTATION_INDICATOR_WIDGET,
+)
 from mipview.viewer.triplanar_viewer_widget import (
     VIEW_MODE_3D,
     VIEW_MODE_AXIAL,
     VIEW_MODE_CORONAL,
+    VIEW_MODE_ORTHOGONAL,
     VIEW_MODE_ORTHOGONAL_3D,
     VIEW_MODE_SAGITTAL,
     TriPlanarViewerWidget,
@@ -120,6 +126,8 @@ class MainWindow(QMainWindow):
         self.cursor_overlay_action: QAction | None = None
         self.view_mode_actions: dict[str, QAction] = {}
         self.view_mode_action_group: QActionGroup | None = None
+        self.orientation_indicator_actions: dict[str, QAction] = {}
+        self.orientation_indicator_action_group: QActionGroup | None = None
         self.ruler_action: QAction | None = None
         self._cursor_overlay_checked_before_patch = True
         self.patch_toggle_action: QAction | None = None
@@ -220,7 +228,12 @@ class MainWindow(QMainWindow):
         right_layout.setSpacing(0)
         right_layout.addWidget(self.cursor_panel)
         right_layout.addWidget(self.annotation_panel)
-        right_layout.addWidget(self.volume_3d_panel)
+        volume_3d_panel_container = QWidget(right_panel)
+        volume_3d_panel_layout = QVBoxLayout(volume_3d_panel_container)
+        volume_3d_panel_layout.setContentsMargins(8, 0, 8, 8)
+        volume_3d_panel_layout.setSpacing(0)
+        volume_3d_panel_layout.addWidget(self.volume_3d_panel)
+        right_layout.addWidget(volume_3d_panel_container)
         right_layout.addStretch(1)
 
         right_scroll_area = QScrollArea(self)
@@ -293,6 +306,8 @@ class MainWindow(QMainWindow):
             self.slice_viewer.set_cursor_overlay_visible
         )
         view_menu.addAction(self.cursor_overlay_action)
+        view_menu.addSeparator()
+        self._add_orientation_indicator_actions(view_menu)
 
         self.patch_toggle_action = QAction("&Patch Selection", self)
         self.patch_toggle_action.setCheckable(True)
@@ -344,6 +359,7 @@ class MainWindow(QMainWindow):
             ("Sagittal View", VIEW_MODE_SAGITTAL),
             ("Coronal View", VIEW_MODE_CORONAL),
             ("3D Render", VIEW_MODE_3D),
+            ("Orthogonal", VIEW_MODE_ORTHOGONAL),
             ("Orthogonal and 3D", VIEW_MODE_ORTHOGONAL_3D),
         )
         for label, mode in labels:
@@ -366,6 +382,31 @@ class MainWindow(QMainWindow):
         action = self.view_mode_actions.get(mode)
         if action is not None:
             action.setChecked(True)
+
+    def _add_orientation_indicator_actions(self, view_menu: object) -> None:
+        action_group = QActionGroup(self)
+        action_group.setExclusive(True)
+        self.orientation_indicator_action_group = action_group
+        for label, mode in (
+            ("Display orientation labels", ORIENTATION_INDICATOR_LABELS),
+            ("Display orientation widget", ORIENTATION_INDICATOR_WIDGET),
+            ("Turn off Orientation Indicator", ORIENTATION_INDICATOR_OFF),
+        ):
+            action = QAction(label, self)
+            action.setCheckable(True)
+            action.setChecked(
+                mode == self.slice_viewer.orientation_indicator_mode()
+            )
+            action.triggered.connect(
+                lambda _checked=False, selected_mode=mode: (
+                    self.slice_viewer.set_orientation_indicator_mode(
+                        selected_mode
+                    )
+                )
+            )
+            action_group.addAction(action)
+            view_menu.addAction(action)
+            self.orientation_indicator_actions[mode] = action
 
     def resizeEvent(self, event: QResizeEvent) -> None:
         super().resizeEvent(event)

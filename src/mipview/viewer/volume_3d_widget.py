@@ -1,18 +1,46 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
-from PySide6.QtCore import QObject, QRunnable, QThreadPool, Qt, Signal, Slot
-from PySide6.QtGui import QCloseEvent
+from PySide6.QtCore import (
+    QEvent,
+    QObject,
+    QPointF,
+    QRectF,
+    QRunnable,
+    QThreadPool,
+    Qt,
+    Signal,
+    Slot,
+)
+from PySide6.QtGui import (
+    QCloseEvent,
+    QColor,
+    QFont,
+    QPaintEvent,
+    QPainter,
+    QPen,
+    QPolygonF,
+)
 from PySide6.QtWidgets import QApplication, QLabel, QVBoxLayout, QWidget
 
 from mipview.io.nifti_io import NiftiLoadResult
 from mipview.patch.selector import PatchBounds
 from mipview.ui.volume_3d_panel import Volume3DPanel
+from mipview.viewer.orientation_indicator import (
+    ORIENTATION_INDICATOR_LABELS,
+    ORIENTATION_INDICATOR_WIDGET,
+    OrientationIndicatorMode,
+    normalize_orientation_indicator_mode,
+    orientation_axis_colour,
+)
 from mipview.viewer.render_3d_preparation import (
     PreparedRender3D,
+    cursor_world_position,
+    orientation_label_world_positions,
     patch_box_world_segments,
     prepare_render,
     source_box_world_segments,
@@ -67,6 +95,219 @@ class _PatchBoxState:
     visible: bool = False
 
 
+class _Volume3DCursorOverlay(QWidget):
+    """Mouse-transparent cursor and orientation overlay above the VisPy canvas."""
+
+    def __init__(
+        self,
+        position_provider: Callable[[], tuple[float, float] | None],
+        mode_provider: Callable[[], OrientationIndicatorMode],
+        orientation_provider: Callable[
+            [], tuple[tuple[str, float, float], ...]
+        ],
+        widget_provider: Callable[
+            [], tuple[tuple[str, float, float], ...]
+        ],
+        parent: QWidget,
+    ) -> None:
+        super().__init__(parent)
+        self._position_provider = position_provider
+        self._mode_provider = mode_provider
+        self._orientation_provider = orientation_provider
+        self._widget_provider = widget_provider
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setAutoFillBackground(False)
+        parent.installEventFilter(self)
+        self.setGeometry(parent.rect())
+        self.show()
+        self.raise_()
+
+    def detach(self) -> None:
+        parent = self.parentWidget()
+        if parent is not None:
+            parent.removeEventFilter(self)
+        self.close()
+        self.setParent(None)
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+        parent = self.parentWidget()
+        if watched is parent and event.type() in {
+            QEvent.Type.Resize,
+            QEvent.Type.Show,
+        }:
+            self.setGeometry(parent.rect())
+            self.raise_()
+            self.update()
+        return False
+
+    def paintEvent(self, event: QPaintEvent) -> None:
+        _ = event
+        position = self._position_provider()
+        orientation_mode = self._mode_provider()
+        orientation_labels = (
+            self._orientation_provider()
+            if orientation_mode == ORIENTATION_INDICATOR_LABELS
+            else ()
+        )
+        orientation_widget = (
+            self._widget_provider()
+            if orientation_mode == ORIENTATION_INDICATOR_WIDGET
+            else ()
+        )
+        if (
+            position is None
+            and not orientation_labels
+            and not orientation_widget
+        ):
+            return
+
+        painter = QPainter(self)
+        if position is not None:
+            x = int(round(position[0]))
+            y = int(round(position[1]))
+            if 0 <= x < self.width() and 0 <= y < self.height():
+                painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+                pen = QPen(QColor("#ffb000"))
+                pen.setWidth(1)
+                painter.setPen(pen)
+                painter.drawLine(x, 0, x, self.height() - 1)
+                painter.drawLine(0, y, self.width() - 1, y)
+
+        if orientation_labels:
+            painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+            label_font = QFont(self.font())
+            label_font.setBold(True)
+            painter.setFont(label_font)
+            painter.setPen(QPen(QColor("#ffd400")))
+            font_metrics = painter.fontMetrics()
+            margin = 8.0
+            for label, projected_x, projected_y in orientation_labels:
+                text_width = max(float(font_metrics.horizontalAdvance(label) + 6), 16.0)
+                text_height = max(float(font_metrics.height() + 4), 16.0)
+                center_x = min(
+                    max(float(projected_x), margin + text_width / 2.0),
+                    max(margin + text_width / 2.0, self.width() - margin - text_width / 2.0),
+                )
+                center_y = min(
+                    max(float(projected_y), margin + text_height / 2.0),
+                    max(
+                        margin + text_height / 2.0,
+                        self.height() - margin - text_height / 2.0,
+                    ),
+                )
+                painter.drawText(
+                    QRectF(
+                        center_x - text_width / 2.0,
+                        center_y - text_height / 2.0,
+                        text_width,
+                        text_height,
+                    ),
+                    Qt.AlignmentFlag.AlignCenter,
+                    label,
+                )
+        if orientation_widget:
+            self._draw_orientation_widget(painter, orientation_widget)
+        painter.end()
+
+    def _draw_orientation_widget(
+        self,
+        painter: QPainter,
+        axes: tuple[tuple[str, float, float], ...],
+    ) -> None:
+        widget_extent = 42.0
+        center = np.asarray(
+            [
+                max(
+                    widget_extent + 8.0,
+                    self.width() - widget_extent - 10.0,
+                ),
+                max(
+                    widget_extent + 8.0,
+                    self.height() - widget_extent - 10.0,
+                ),
+            ],
+            dtype=np.float64,
+        )
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
+        label_font = QFont(self.font())
+        label_font.setBold(True)
+        painter.setFont(label_font)
+        axis_length = 25.0
+        for index, (label, direction_x, direction_y) in enumerate(axes):
+            colour = QColor(orientation_axis_colour(label))
+            direction = np.asarray(
+                [direction_x, direction_y],
+                dtype=np.float64,
+            )
+            projected_length = float(np.linalg.norm(direction))
+            if projected_length <= 1.0e-6:
+                painter.setPen(QPen(colour, 2))
+                painter.setBrush(colour)
+                painter.drawEllipse(QPointF(*center), 3.0, 3.0)
+                label_center = center + np.asarray(
+                    [(index - 1) * 13.0, -9.0],
+                    dtype=np.float64,
+                )
+            else:
+                endpoint = center + direction * axis_length
+                self._draw_widget_arrow(
+                    painter,
+                    QPointF(*center),
+                    QPointF(*endpoint),
+                    colour,
+                )
+                label_center = endpoint + (
+                    direction / projected_length
+                ) * 8.0
+            painter.setPen(QPen(colour))
+            painter.drawText(
+                QRectF(
+                    float(label_center[0] - 8.0),
+                    float(label_center[1] - 8.0),
+                    16.0,
+                    16.0,
+                ),
+                Qt.AlignmentFlag.AlignCenter,
+                label,
+            )
+        painter.restore()
+
+    @staticmethod
+    def _draw_widget_arrow(
+        painter: QPainter,
+        start: QPointF,
+        end: QPointF,
+        colour: QColor,
+    ) -> None:
+        pen = QPen(colour, 2)
+        pen.setCosmetic(True)
+        painter.setPen(pen)
+        painter.setBrush(colour)
+        painter.drawLine(start, end)
+        delta = np.asarray(
+            [end.x() - start.x(), end.y() - start.y()],
+            dtype=np.float64,
+        )
+        length = float(np.linalg.norm(delta))
+        if length <= 0.0:
+            return
+        unit = delta / length
+        perpendicular = np.asarray([-unit[1], unit[0]])
+        base = np.asarray([end.x(), end.y()]) - unit * 6.0
+        painter.drawPolygon(
+            QPolygonF(
+                [
+                    end,
+                    QPointF(*(base + perpendicular * 4.0)),
+                    QPointF(*(base - perpendicular * 4.0)),
+                ]
+            )
+        )
+
+
 class Volume3DWidget(QWidget):
     """Lazy VisPy scene for one isolated NIfTI layer plus locator geometry."""
 
@@ -90,6 +331,14 @@ class Volume3DWidget(QWidget):
         self._patch_visual: Any | None = None
         self._source_box_visual: Any | None = None
         self._locator_visual: Any | None = None
+        self._cursor_overlay: _Volume3DCursorOverlay | None = None
+        self._volume_shape: tuple[int, int, int] | None = None
+        self._volume_affine: np.ndarray | None = None
+        self._cursor_position: tuple[int, int, int] | None = None
+        self._cursor_visible = True
+        self._orientation_indicator_mode: OrientationIndicatorMode = (
+            ORIENTATION_INDICATOR_LABELS
+        )
         self._locator_volume: NiftiLoadResult | None = None
         self._locator_visible = False
         self._locator_source_shape: tuple[int, int, int] | None = None
@@ -212,6 +461,8 @@ class Volume3DWidget(QWidget):
             self._panel.set_status("Choose a layer and click Update.")
         self._refresh_patch_visual()
         self._refresh_locator_visual()
+        self._refresh_cursor_overlay()
+        self._refresh_orientation_overlay()
         self._emit_state()
         self.active_changed.emit(True)
 
@@ -376,6 +627,12 @@ class Volume3DWidget(QWidget):
                     self._locator_source_affine,
                 )
 
+        if self._volume_shape is not None and self._volume_affine is not None:
+            return _volume_world_limits(
+                self._volume_shape,
+                self._volume_affine,
+            )
+
         prepared = self._prepared
         if prepared is None:
             return None
@@ -401,6 +658,59 @@ class Volume3DWidget(QWidget):
             visible=bool(visible),
         )
         self._refresh_patch_visual()
+
+    def set_volume_geometry(
+        self,
+        shape: tuple[int, int, int] | None,
+        affine: np.ndarray | None,
+    ) -> None:
+        """Set source voxel geometry used by the cursor and orientation labels."""
+        if shape is None or affine is None:
+            self._volume_shape = None
+            self._volume_affine = None
+            self._cursor_position = None
+        else:
+            normalized_shape = tuple(int(value) for value in shape)
+            if len(normalized_shape) != 3 or any(
+                value <= 0 for value in normalized_shape
+            ):
+                raise ValueError(
+                    "3D source geometry must contain three positive shape values."
+                )
+            normalized_affine = np.asarray(affine, dtype=np.float64)
+            if normalized_affine.shape != (4, 4):
+                raise ValueError(
+                    f"3D source affine must be 4x4, got {normalized_affine.shape}."
+                )
+            self._volume_shape = normalized_shape
+            self._volume_affine = normalized_affine
+        self._refresh_cursor_overlay()
+        self._refresh_orientation_overlay()
+
+    def set_cursor_position(
+        self,
+        cursor_position: tuple[int, int, int] | None,
+    ) -> None:
+        self._cursor_position = (
+            None
+            if cursor_position is None
+            else tuple(int(value) for value in cursor_position)
+        )
+        self._refresh_cursor_overlay()
+
+    def set_cursor_overlay_visible(self, visible: bool) -> None:
+        self._cursor_visible = bool(visible)
+        self._refresh_cursor_overlay()
+
+    def set_orientation_indicator_mode(self, mode: str) -> None:
+        normalized = normalize_orientation_indicator_mode(mode)
+        if normalized == self._orientation_indicator_mode:
+            return
+        self._orientation_indicator_mode = normalized
+        self._refresh_orientation_overlay()
+
+    def orientation_indicator_mode(self) -> OrientationIndicatorMode:
+        return self._orientation_indicator_mode
 
     def set_locator_context(
         self,
@@ -437,6 +747,15 @@ class Volume3DWidget(QWidget):
         status = self.state.status()
         status["locator_visible"] = self._locator_visible
         status["patch_box_visible"] = self._patch_box.visible
+        status["cursor_visible"] = self._cursor_visible
+        status["cursor_position"] = (
+            None
+            if self._cursor_position is None
+            else list(self._cursor_position)
+        )
+        status["orientation_indicator_mode"] = (
+            self._orientation_indicator_mode
+        )
         return status
 
     def closeEvent(self, event: QCloseEvent) -> None:
@@ -513,9 +832,25 @@ class Volume3DWidget(QWidget):
         native.show()
         self._canvas = canvas
         self._view = canvas.central_widget.add_view()
-        self._view.camera = scene.cameras.TurntableCamera(
+        class _MiddlePanTurntableCamera(scene.cameras.TurntableCamera):
+            def viewbox_mouse_event(camera_self: Any, event: Any) -> None:
+                if _pan_camera_with_middle_drag(camera_self, event):
+                    return
+                super().viewbox_mouse_event(event)
+
+        self._view.camera = _MiddlePanTurntableCamera(
             fov=45.0,
             up="+z",
+        )
+        self._cursor_overlay = _Volume3DCursorOverlay(
+            self._cursor_canvas_position,
+            self.orientation_indicator_mode,
+            self._orientation_canvas_positions,
+            self._orientation_widget_axes,
+            native,
+        )
+        self._view.scene.transform.changed.connect(
+            self._on_scene_transform_changed
         )
         if self.isVisible():
             QApplication.processEvents()
@@ -528,7 +863,18 @@ class Volume3DWidget(QWidget):
 
     def _destroy_canvas(self) -> None:
         self._release_active_visual()
-        for name in ("_patch_visual", "_source_box_visual", "_locator_visual"):
+        if self._view is not None:
+            self._view.scene.transform.changed.disconnect(
+                self._on_scene_transform_changed
+            )
+        if self._cursor_overlay is not None:
+            self._cursor_overlay.detach()
+            self._cursor_overlay = None
+        for name in (
+            "_patch_visual",
+            "_source_box_visual",
+            "_locator_visual",
+        ):
             visual = getattr(self, name)
             if visual is not None:
                 visual.parent = None
@@ -662,6 +1008,135 @@ class Volume3DWidget(QWidget):
             parent=self._view.scene,
         )
         self._request_canvas_update()
+
+    def _refresh_cursor_overlay(self) -> None:
+        if self._cursor_overlay is not None:
+            self._cursor_overlay.update()
+
+    def _cursor_canvas_position(self) -> tuple[float, float] | None:
+        if (
+            self._view is None
+            or not self._cursor_visible
+            or self._cursor_position is None
+            or self._volume_shape is None
+            or self._volume_affine is None
+        ):
+            return None
+        try:
+            centre = cursor_world_position(
+                self._cursor_position,
+                self._volume_shape,
+                self._volume_affine,
+            )
+        except ValueError:
+            return None
+        return self._world_canvas_position(centre)
+
+    def _world_canvas_position(
+        self,
+        world_position: np.ndarray,
+    ) -> tuple[float, float] | None:
+        if self._view is None:
+            return None
+        mapped = np.asarray(
+            self._view.scene.transform.map(world_position),
+            dtype=np.float64,
+        )
+        if mapped.shape != (4,) or not np.all(np.isfinite(mapped)):
+            return None
+        if abs(float(mapped[3])) <= np.finfo(np.float64).eps:
+            return None
+        return float(mapped[0] / mapped[3]), float(mapped[1] / mapped[3])
+
+    def _orientation_canvas_positions(
+        self,
+    ) -> tuple[tuple[str, float, float], ...]:
+        if (
+            self._view is None
+            or self._volume_shape is None
+            or self._volume_affine is None
+        ):
+            return ()
+        labels, world_positions = orientation_label_world_positions(
+            self._volume_shape,
+            self._volume_affine,
+        )
+        projected: list[tuple[str, float, float]] = []
+        for label, world_position in zip(labels, world_positions, strict=True):
+            canvas_position = self._world_canvas_position(world_position)
+            if canvas_position is not None:
+                projected.append(
+                    (label, canvas_position[0], canvas_position[1])
+                )
+        return tuple(projected)
+
+    def _orientation_widget_axes(
+        self,
+    ) -> tuple[tuple[str, float, float], ...]:
+        if (
+            self._view is None
+            or self._volume_shape is None
+            or self._volume_affine is None
+        ):
+            return ()
+        limits = _volume_world_limits(
+            self._volume_shape,
+            self._volume_affine,
+        )
+        world_center = np.asarray(
+            [
+                (minimum + maximum) / 2.0
+                for minimum, maximum in limits
+            ],
+            dtype=np.float64,
+        )
+        center_canvas = self._world_canvas_position(world_center)
+        if center_canvas is None:
+            return ()
+        world_span = max(
+            maximum - minimum
+            for minimum, maximum in limits
+        )
+        axis_step = max(float(world_span) * 0.12, 1.0e-3)
+        projected_axes: list[tuple[str, float, float]] = []
+        for axis, label in enumerate(("R", "A", "S")):
+            endpoint = world_center.copy()
+            endpoint[axis] += axis_step
+            endpoint_canvas = self._world_canvas_position(endpoint)
+            if endpoint_canvas is None:
+                continue
+            projected_axes.append(
+                (
+                    label,
+                    endpoint_canvas[0] - center_canvas[0],
+                    endpoint_canvas[1] - center_canvas[1],
+                )
+            )
+        if not projected_axes:
+            return ()
+        maximum_length = max(
+            float(np.hypot(direction_x, direction_y))
+            for _label, direction_x, direction_y in projected_axes
+        )
+        if maximum_length <= 1.0e-6:
+            return tuple(
+                (label, 0.0, 0.0)
+                for label, _direction_x, _direction_y in projected_axes
+            )
+        return tuple(
+            (
+                label,
+                direction_x / maximum_length,
+                direction_y / maximum_length,
+            )
+            for label, direction_x, direction_y in projected_axes
+        )
+
+    def _on_scene_transform_changed(self, _event: object = None) -> None:
+        self._refresh_cursor_overlay()
+
+    def _refresh_orientation_overlay(self) -> None:
+        self._refresh_cursor_overlay()
 
     def _refresh_locator_visual(self) -> None:
         if self._view is None:
@@ -804,6 +1279,48 @@ def _point_world_limits(
         (float(minimum[axis]), float(maximum[axis]))
         for axis in range(3)
     )
+
+
+def _pan_camera_with_middle_drag(camera: Any, event: Any) -> bool:
+    """Translate a VisPy turntable camera during an unmodified middle drag."""
+    if (
+        event.type != "mouse_move"
+        or event.press_event is None
+        or 3 not in event.buttons
+        or event.mouse_event.modifiers
+    ):
+        return False
+
+    press_position = np.asarray(event.mouse_event.press_event.pos, dtype=np.float64)
+    current_position = np.asarray(event.mouse_event.pos, dtype=np.float64)
+    view_size = np.asarray(camera._viewbox.size, dtype=np.float64)
+    normalization = float(np.mean(view_size))
+    if normalization <= 0.0:
+        return False
+    event_value = camera._event_value
+    if event_value is None or np.asarray(event_value).shape != (3,):
+        camera._event_value = tuple(float(value) for value in camera.center)
+
+    distance = (press_position - current_position) / normalization
+    distance *= float(camera._scale_factor)
+    distance[1] *= -1.0
+    delta_x, delta_y, delta_z = camera._dist_to_trans(distance)
+    flip_factors = camera._flip_factors
+    up, forward, right = camera._get_dim_vectors()
+    delta_x, delta_y, delta_z = (
+        right * delta_x + forward * delta_y + up * delta_z
+    )
+    delta_x = flip_factors[0] * delta_x
+    delta_y = flip_factors[1] * delta_y
+    delta_z = flip_factors[2] * delta_z
+    start_x, start_y, start_z = camera._event_value
+    camera.center = (
+        start_x + delta_x,
+        start_y + delta_y,
+        start_z + delta_z,
+    )
+    event.handled = True
+    return True
 
 
 def _require_pyopengl_3d_textures() -> None:
