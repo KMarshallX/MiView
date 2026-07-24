@@ -10,6 +10,7 @@ from skimage.measure import marching_cubes
 from mipview.io.nifti_io import NiftiLoadResult
 from mipview.patch.selector import PatchBounds
 from mipview.vessel_graph.model import VesselGraphRenderGeometry
+from mipview.viewer.render_3d_state import segmentation_labels
 
 
 MAX_VOLUME_DIMENSION = 256
@@ -30,6 +31,7 @@ class PreparedRender3D:
     stride: tuple[int, int, int]
     source_range: tuple[float, float]
     mask_applied: bool = False
+    vertex_labels: np.ndarray | None = None
     graph_edge_segments: np.ndarray | None = None
     graph_node_positions: np.ndarray | None = None
     graph_intercept_positions: np.ndarray | None = None
@@ -159,14 +161,37 @@ def prepare_render(
             mask_applied=sampled_mask is not None,
         )
 
+    labels = segmentation_labels(volume)
     foreground = np.asarray(np.isfinite(sampled) & (sampled > float(threshold)))
     if sampled_mask is not None:
         foreground &= sampled_mask
+    included_labels = tuple(
+        label for label in labels if float(label) > float(threshold)
+    )
     if render_mode == "Points":
-        points = np.argwhere(foreground)
+        points_parts: list[np.ndarray] = []
+        point_label_parts: list[np.ndarray] = []
+        for label in included_labels:
+            label_points = np.argwhere(foreground & (sampled == label))
+            if label_points.size:
+                points_parts.append(label_points)
+                point_label_parts.append(
+                    np.full(label_points.shape[0], label, dtype=np.int64)
+                )
+        points = (
+            np.concatenate(points_parts, axis=0)
+            if points_parts
+            else np.empty((0, 3), dtype=np.int64)
+        )
+        point_labels = (
+            np.concatenate(point_label_parts, axis=0)
+            if point_label_parts
+            else np.empty((0,), dtype=np.int64)
+        )
         if points.shape[0] > MAX_POINT_COUNT:
             selection_stride = math.ceil(points.shape[0] / MAX_POINT_COUNT)
             points = points[::selection_stride]
+            point_labels = point_labels[::selection_stride]
         source_points = points.astype(np.float32) * float(stride_value)
         vertices = np.asarray(
             apply_affine(volume.affine, source_points),
@@ -183,14 +208,23 @@ def prepare_render(
             stride=stride,
             source_range=source_range,
             mask_applied=sampled_mask is not None,
+            vertex_labels=point_labels,
         )
 
-    if not np.any(foreground):
-        vertices = np.empty((0, 3), dtype=np.float32)
-        faces = np.empty((0, 3), dtype=np.uint32)
-    else:
-        padded = np.pad(foreground.astype(np.uint8), 1)
-        surface_step = _surface_step_size(foreground)
+    vertex_parts: list[np.ndarray] = []
+    face_parts: list[np.ndarray] = []
+    vertex_label_parts: list[np.ndarray] = []
+    vertex_offset = 0
+    face_budget = max(
+        1,
+        MAX_SURFACE_FACES // max(len(included_labels), 1),
+    )
+    for label in included_labels:
+        label_foreground = foreground & (sampled == label)
+        if not np.any(label_foreground):
+            continue
+        padded = np.pad(label_foreground.astype(np.uint8), 1)
+        surface_step = _surface_step_size(label_foreground)
         while True:
             raw_vertices, raw_faces, _normals, _values = marching_cubes(
                 padded,
@@ -199,18 +233,34 @@ def prepare_render(
                 allow_degenerate=False,
             )
             if (
-                raw_faces.shape[0] <= MAX_SURFACE_FACES
-                or surface_step >= min(foreground.shape)
+                raw_faces.shape[0] <= face_budget
+                or surface_step >= min(label_foreground.shape)
             ):
                 break
             surface_step *= 2
-        # Remove the padding, restore source voxel scale, then use world space.
         source_vertices = (raw_vertices - 1.0) * float(stride_value)
-        vertices = np.asarray(
+        label_vertices = np.asarray(
             apply_affine(volume.affine, source_vertices),
             dtype=np.float32,
         )
-        faces = np.asarray(raw_faces, dtype=np.uint32)
+        label_faces = np.asarray(raw_faces, dtype=np.uint32) + np.uint32(
+            vertex_offset
+        )
+        vertex_parts.append(label_vertices)
+        face_parts.append(label_faces)
+        vertex_label_parts.append(
+            np.full(label_vertices.shape[0], label, dtype=np.int64)
+        )
+        vertex_offset += label_vertices.shape[0]
+
+    if not vertex_parts:
+        vertices = np.empty((0, 3), dtype=np.float32)
+        faces = np.empty((0, 3), dtype=np.uint32)
+        vertex_labels = np.empty((0,), dtype=np.int64)
+    else:
+        vertices = np.concatenate(vertex_parts, axis=0)
+        faces = np.concatenate(face_parts, axis=0)
+        vertex_labels = np.concatenate(vertex_label_parts, axis=0)
     return PreparedRender3D(
         kind=kind,
         render_mode=render_mode,
@@ -222,6 +272,7 @@ def prepare_render(
         stride=stride,
         source_range=source_range,
         mask_applied=sampled_mask is not None,
+        vertex_labels=vertex_labels,
     )
 
 

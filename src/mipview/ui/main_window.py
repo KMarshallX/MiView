@@ -1958,6 +1958,7 @@ class MainWindow(QMainWindow):
                 display_name=segmentation.display_name,
                 volume=segmentation.volume,
                 kind="segmentation",
+                overlay_eligible=segmentation.path is not None,
             )
             for segmentation in self.state.loaded_segmentations
         )

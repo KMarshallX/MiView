@@ -256,11 +256,27 @@ def _build_parser() -> argparse.ArgumentParser:
             default=None,
             help="Optional patch-window session; omit for the main window.",
         )
+        command_parser.add_argument(
+            "--layer",
+            choices=("base", "overlay"),
+            default="base",
+            help="Target the base render or the independent 3D overlay.",
+        )
     render_select = render_subparsers.add_parser("select")
     render_select.add_argument("source_id")
     render_select.add_argument("--session-id", default=None)
+    render_select.add_argument(
+        "--layer",
+        choices=("base", "overlay"),
+        default="base",
+    )
     render_display = render_subparsers.add_parser("display")
     render_display.add_argument("--session-id", default=None)
+    render_display.add_argument(
+        "--layer",
+        choices=("base", "overlay"),
+        default="base",
+    )
     render_display.add_argument(
         "--visible",
         action=argparse.BooleanOptionalAction,
@@ -268,6 +284,13 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     render_display.add_argument("--opacity", type=float, default=None)
     render_display.add_argument("--colour", type=int, nargs=3, default=None)
+    render_display.add_argument(
+        "--label-colour",
+        type=int,
+        nargs=4,
+        metavar=("LABEL", "R", "G", "B"),
+        default=None,
+    )
     render_display.add_argument("--mode", default=None)
     render_mask_group = render_display.add_mutually_exclusive_group()
     render_mask_group.add_argument(
@@ -718,7 +741,10 @@ def _command_from_args(args: argparse.Namespace) -> tuple[str, dict[str, Any], A
             )
 
     if args.group == "render3d":
-        common = {"session_id": args.session_id}
+        common = {
+            "session_id": args.session_id,
+            "layer": args.layer,
+        }
         if args.render3d_command == "status":
             return "render3d.status", common, None
         if args.render3d_command in {"activate", "dismiss"}:
@@ -748,6 +774,7 @@ def _command_from_args(args: argparse.Namespace) -> tuple[str, dict[str, Any], A
                 "colour": args.colour,
                 "render_mode": args.mode,
                 "threshold": args.threshold,
+                "label_colour": args.label_colour,
             }
             if args.mask is not None:
                 display_args["mask_source_id"] = args.mask

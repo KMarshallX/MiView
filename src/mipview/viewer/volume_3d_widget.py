@@ -48,12 +48,15 @@ from mipview.viewer.render_3d_preparation import (
     source_box_world_segments,
 )
 from mipview.viewer.render_3d_state import (
+    RENDER_LAYER_BASE,
+    RENDER_LAYER_OVERLAY,
     RAW_RENDER_MODES,
     SEGMENTATION_RENDER_MODES,
     VESSEL_GRAPH_RENDER_MODES,
     Render3DSource,
     Render3DState,
     render_mode_supports_mask,
+    segmentation_labels,
 )
 from mipview.vessel_graph.model import (
     PROJECTED_INTERCEPT_COLOR,
@@ -347,11 +350,17 @@ class Volume3DWidget(QWidget):
         self._thread_pool = QThreadPool.globalInstance()
         self._job_token = 0
         self._workers: dict[int, _PreparationWorker] = {}
+        self._preparing_layer: str | None = None
+        self._pending_update_layers: list[str] = []
         self._canvas: Any | None = None
         self._view: Any | None = None
         self._active_visual: Any | None = None
         self._active_graph_visuals: dict[str, Any] = {}
         self._prepared: PreparedRender3D | None = None
+        self._overlay_visual: Any | None = None
+        self._overlay_depth_reset_visual: Any | None = None
+        self._overlay_graph_visuals: dict[str, Any] = {}
+        self._overlay_prepared: PreparedRender3D | None = None
         self._patch_visual: Any | None = None
         self._patch_extension_visual: Any | None = None
         self._source_box_visual: Any | None = None
@@ -410,103 +419,173 @@ class Volume3DWidget(QWidget):
             self.set_selected_edge_thickness
         )
         panel.colour_changed.connect(self.set_selected_colour)
+        panel.label_colour_changed.connect(self.set_selected_label_colour)
         panel.render_mode_changed.connect(self.set_selected_render_mode)
         panel.mask_changed.connect(self.set_selected_mask_source)
         panel.threshold_changed.connect(self.set_selected_threshold)
-        panel.update_requested.connect(self.update_selected_render)
+        panel.overlay_source_changed.connect(
+            lambda source_id: self.select_source(
+                source_id,
+                RENDER_LAYER_OVERLAY,
+            )
+        )
+        panel.overlay_opacity_changed.connect(
+            lambda opacity: self.set_selected_opacity(
+                opacity,
+                RENDER_LAYER_OVERLAY,
+            )
+        )
+        panel.overlay_label_colour_changed.connect(
+            lambda label, colour: self.set_selected_label_colour(
+                label,
+                colour,
+                RENDER_LAYER_OVERLAY,
+            )
+        )
+        panel.overlay_render_mode_changed.connect(
+            lambda mode: self.set_selected_render_mode(
+                mode,
+                RENDER_LAYER_OVERLAY,
+            )
+        )
+        panel.overlay_mask_changed.connect(
+            lambda source_id: self.set_selected_mask_source(
+                source_id,
+                RENDER_LAYER_OVERLAY,
+            )
+        )
+        panel.overlay_threshold_changed.connect(
+            lambda threshold: self.set_selected_threshold(
+                threshold,
+                RENDER_LAYER_OVERLAY,
+            )
+        )
+        panel.overlay_vessel_graph_node_size_changed.connect(
+            lambda size: self.set_selected_node_size(
+                size,
+                RENDER_LAYER_OVERLAY,
+            )
+        )
+        panel.overlay_vessel_graph_edge_thickness_changed.connect(
+            lambda thickness: self.set_selected_edge_thickness(
+                thickness,
+                RENDER_LAYER_OVERLAY,
+            )
+        )
+        panel.update_requested.connect(self.update_dirty_renders)
         panel.reset_camera_requested.connect(self.reset_camera)
         self._sync_panel_sources()
         self._sync_panel_settings()
 
     def set_sources(self, sources: list[Render3DSource]) -> None:
-        if self.state.busy:
+        if self.state.busy or self.state.overlay_busy:
             self._cancel_pending_preparation("Loaded files changed; update again.")
-        rendered_before = self.state.rendered_source_id
-        previous_source = (
-            None
-            if rendered_before is None
-            else self.state.sources.get(rendered_before)
-        )
-        previous_settings = (
-            None
-            if rendered_before is None
-            else self.state.settings.get(rendered_before)
-        )
-        previous_mask_id = (
-            None
-            if previous_settings is None
-            else previous_settings.mask_source_id
-        )
-        previous_mask_source = (
-            None
-            if previous_mask_id is None
-            else self.state.sources.get(previous_mask_id)
-        )
-        replacement_source = next(
-            (source for source in sources if source.id == rendered_before),
-            None,
-        )
-        replacement_mask_source = next(
-            (source for source in sources if source.id == previous_mask_id),
-            None,
-        )
+        previous_sources = dict(self.state.sources)
+        rendered_context: dict[str, tuple[str | None, str | None]] = {}
+        for layer in (RENDER_LAYER_BASE, RENDER_LAYER_OVERLAY):
+            rendered_id = self._rendered_source_id(layer)
+            settings_by_layer = (
+                self.state.settings
+                if layer == RENDER_LAYER_BASE
+                else self.state.overlay_settings
+            )
+            rendered_settings = (
+                None
+                if rendered_id is None
+                else settings_by_layer.get(rendered_id)
+            )
+            rendered_context[layer] = (
+                rendered_id,
+                (
+                    None
+                    if rendered_settings is None
+                    else rendered_settings.mask_source_id
+                ),
+            )
         self.state.set_sources(sources)
-        source_data_changed = (
-            previous_source is not None
-            and replacement_source is not None
-            and (
-                previous_source.volume is not replacement_source.volume
-                or previous_source.vessel_graph
-                is not replacement_source.vessel_graph
+        current_sources = self.state.sources
+        for layer, (rendered_id, mask_id) in rendered_context.items():
+            if rendered_id is None:
+                continue
+            previous = previous_sources.get(rendered_id)
+            replacement = current_sources.get(rendered_id)
+            previous_mask = (
+                None if mask_id is None else previous_sources.get(mask_id)
             )
-        )
-        mask_data_changed = (
-            previous_mask_source is not None
-            and previous_source is not None
-            and previous_settings is not None
-            and render_mode_supports_mask(
-                previous_source.kind,
-                previous_settings.render_mode,
+            replacement_mask = (
+                None if mask_id is None else current_sources.get(mask_id)
             )
-            and (
-                replacement_mask_source is None
-                or previous_mask_source.volume
-                is not replacement_mask_source.volume
+            changed = (
+                replacement is None
+                or previous is None
+                or previous.volume is not replacement.volume
+                or previous.vessel_graph is not replacement.vessel_graph
+                or (
+                    previous_mask is not None
+                    and (
+                        replacement_mask is None
+                        or previous_mask.volume is not replacement_mask.volume
+                    )
+                )
             )
-        )
-        if (
-            rendered_before is not None
-            and (
-                self.state.rendered_source_id is None
-                or source_data_changed
-                or mask_data_changed
+            current_rendered_id = (
+                self.state.rendered_source_id
+                if layer == RENDER_LAYER_BASE
+                else self.state.overlay_rendered_source_id
             )
-        ):
-            self._release_active_visual()
-            self.state.rendered_source_id = None
-            settings = self.state.settings.get(rendered_before)
-            if settings is not None:
-                settings.dirty = True
+            if changed or current_rendered_id is None:
+                self._release_visual(layer)
+                self._set_rendered_source_id(layer, None)
+                settings = self.state.selected_settings(layer)
+                if settings is not None:
+                    settings.dirty = True
         self._sync_panel_sources()
         self._sync_panel_settings()
         self._emit_state()
 
-    def select_source(self, source_id: object) -> None:
-        if self.state.busy:
+    def select_source(
+        self,
+        source_id: object,
+        layer: str = RENDER_LAYER_BASE,
+    ) -> None:
+        if self.state.busy or self.state.overlay_busy:
             self._cancel_pending_preparation("3D layer changed; click Update.")
         normalized = source_id if isinstance(source_id, str) else None
-        rendered_source_id = self.state.rendered_source_id
+        rendered_source_id = self._rendered_source_id(layer)
+        previous_overlay_selection = self.state.overlay_selected_source_id
         try:
-            self.state.select_source(normalized)
+            self.state.select_source(normalized, layer)
         except ValueError as exc:
-            self._set_error(str(exc))
+            self._set_error(str(exc), layer)
             return
         if rendered_source_id is not None and normalized != rendered_source_id:
-            self._release_active_visual()
-            self.state.rendered_source_id = None
-            self.state.prepared_shape = None
-            self.state.downsample_stride = None
+            self._release_visual(layer)
+            self._set_rendered_source_id(layer, None)
+            self._clear_prepared_status(layer)
+            if layer == RENDER_LAYER_OVERLAY:
+                self.state.overlay_active = False
+        settings = self.state.selected_settings(layer)
+        if settings is not None:
+            settings.dirty = True
+        if (
+            layer == RENDER_LAYER_BASE
+            and previous_overlay_selection is not None
+            and self.state.overlay_selected_source_id is None
+        ):
+            self._release_visual(RENDER_LAYER_OVERLAY)
+            self._clear_prepared_status(RENDER_LAYER_OVERLAY)
+            self.state.overlay_active = False
+        self._sync_panel_sources()
         self._sync_panel_settings()
+        if self._panel is not None:
+            if layer == RENDER_LAYER_OVERLAY:
+                self._panel.set_status(
+                    "Choose a 3D overlay and click Update."
+                    if normalized is None
+                    else "3D overlay changed; click Update."
+                )
+            else:
+                self._panel.set_status("3D layer changed; click Update.")
         self._emit_state()
 
     def set_active(self, active: bool) -> None:
@@ -540,11 +619,19 @@ class Volume3DWidget(QWidget):
         was_active = self.state.active
         self._job_token += 1
         self.state.busy = False
+        self.state.overlay_busy = False
         self.state.active = False
+        self.state.overlay_active = False
         self.state.rendered_source_id = None
+        self.state.overlay_rendered_source_id = None
         self.state.prepared_shape = None
         self.state.downsample_stride = None
+        self.state.overlay_prepared_shape = None
+        self.state.overlay_downsample_stride = None
         self._prepared = None
+        self._overlay_prepared = None
+        self._pending_update_layers.clear()
+        self._preparing_layer = None
         self._destroy_canvas()
         self.placeholder.setText("3D view inactive")
         self.placeholder.setVisible(True)
@@ -556,26 +643,138 @@ class Volume3DWidget(QWidget):
         if was_active:
             self.active_changed.emit(False)
 
-    def update_selected_render(self) -> None:
+    def set_overlay_active(self, active: bool) -> None:
+        if not active:
+            self.dismiss_overlay()
+            return
+        if (
+            not self.state.active
+            or self.state.overlay_rendered_source_id is None
+            or self._overlay_visual is None
+        ):
+            self.state.overlay_active = False
+            self._set_error(
+                "Select and update a 3D overlay before showing it.",
+                RENDER_LAYER_OVERLAY,
+            )
+            return
+        self.state.overlay_active = True
+        self.state.overlay_last_error = None
+        settings = self.state.selected_settings(RENDER_LAYER_OVERLAY)
+        self._overlay_visual.visible = (
+            True if settings is None else settings.visible
+        )
+        if self._overlay_depth_reset_visual is not None:
+            self._overlay_depth_reset_visual.visible = (
+                self._overlay_visual.visible
+            )
+        self._request_canvas_update()
+        if self._panel is not None:
+            self._panel.set_status("3D overlay shown.")
+        self._emit_state()
+
+    def dismiss_overlay(self) -> None:
+        self._cancel_layer_preparation(RENDER_LAYER_OVERLAY)
+        self.state.overlay_active = False
+        if self._overlay_visual is not None:
+            self._overlay_visual.visible = False
+            if self._overlay_depth_reset_visual is not None:
+                self._overlay_depth_reset_visual.visible = False
+            self._request_canvas_update()
+        if self._panel is not None:
+            self._panel.set_status("3D overlay hidden.")
+        self._emit_state()
+
+    def update_dirty_renders(self) -> None:
+        layers: list[str] = []
+        base_settings = self.state.selected_settings(RENDER_LAYER_BASE)
+        if base_settings is not None and (
+            base_settings.dirty or self.state.rendered_source_id is None
+        ):
+            layers.append(RENDER_LAYER_BASE)
+        overlay_settings = self.state.selected_settings(RENDER_LAYER_OVERLAY)
+        if (
+            overlay_settings is not None
+            and (
+                overlay_settings.dirty
+                or self.state.overlay_rendered_source_id is None
+            )
+        ):
+            layers.append(RENDER_LAYER_OVERLAY)
+        if not layers:
+            if (
+                overlay_settings is not None
+                and self.state.overlay_rendered_source_id
+                == self.state.overlay_selected_source_id
+                and not self.state.overlay_active
+            ):
+                self.set_overlay_active(True)
+                return
+            if self._panel is not None:
+                self._panel.set_status(
+                    "Choose a 3D overlay and click Update."
+                    if self.state.overlay_selected_source_id is None
+                    else "3D render is up to date."
+                )
+            return
+        self._queue_render_updates(layers)
+
+    def update_selected_render(
+        self,
+        layer: str = RENDER_LAYER_BASE,
+    ) -> None:
+        self._queue_render_updates([layer])
+
+    def _queue_render_updates(self, layers: list[str]) -> None:
         if not self.state.active:
             self.set_active(True)
         if not self.state.active:
             return
-        source = self.state.selected_source()
-        settings = self.state.selected_settings()
+        normalized_layers = list(dict.fromkeys(layers))
+        if RENDER_LAYER_OVERLAY in normalized_layers:
+            if self.state.overlay_selected_source_id is None:
+                self._release_visual(RENDER_LAYER_OVERLAY)
+                self.state.overlay_active = False
+                self._set_rendered_source_id(RENDER_LAYER_OVERLAY, None)
+                self._clear_prepared_status(RENDER_LAYER_OVERLAY)
+                if self._panel is not None:
+                    self._panel.set_status(
+                        "Choose a 3D overlay and click Update."
+                    )
+                self._emit_state()
+                normalized_layers.remove(RENDER_LAYER_OVERLAY)
+        if not normalized_layers:
+            return
+        self._cancel_pending_preparation("Preparing 3D render…")
+        self._pending_update_layers = normalized_layers
+        self._start_next_preparation()
+
+    def _start_next_preparation(self) -> None:
+        if not self._pending_update_layers:
+            self._preparing_layer = None
+            if self._panel is not None:
+                self._panel.set_busy(False)
+            return
+        layer = self._pending_update_layers.pop(0)
+        source = self.state.selected_source(layer)
+        settings = self.state.selected_settings(layer)
         if source is None or settings is None:
-            self._set_error("Load an image or segmentation before rendering.")
+            self._set_error(
+                "Load a 3D layer before rendering.",
+                layer,
+            )
             return
 
         self._job_token += 1
         token = self._job_token
+        self._preparing_layer = layer
         worker = _PreparationWorker(
             token,
             source,
             settings.render_mode,
             settings.threshold,
             (
-                self.state.selected_mask_source()
+                self.state.selected_mask_source(layer)
                 if render_mode_supports_mask(
                     source.kind,
                     settings.render_mode,
@@ -586,65 +785,116 @@ class Volume3DWidget(QWidget):
         self._workers[token] = worker
         worker.signals.finished.connect(self._on_preparation_finished)
         worker.signals.failed.connect(self._on_preparation_failed)
-        self.state.busy = True
-        self.state.last_error = None
+        self._set_layer_busy(layer, True)
+        self._set_layer_error(layer, None)
         if self._panel is not None:
             self._panel.set_busy(True)
-            self._panel.set_progress(10, "Preparing and downsampling 3D layer…")
+            layer_name = "overlay" if layer == RENDER_LAYER_OVERLAY else "base layer"
+            self._panel.set_progress(
+                10,
+                f"Preparing and downsampling 3D {layer_name}…",
+            )
         self.render_started.emit()
         self._emit_state()
         self._thread_pool.start(worker)
 
-    def set_selected_visibility(self, visible: bool) -> None:
-        settings = self.state.selected_settings()
+    def set_selected_visibility(
+        self,
+        visible: bool,
+        layer: str = RENDER_LAYER_BASE,
+    ) -> None:
+        settings = self.state.selected_settings(layer)
         if settings is None:
             return
         settings.visible = bool(visible)
         if (
-            self.state.selected_source_id == self.state.rendered_source_id
-            and self._active_visual is not None
+            self._selected_source_id(layer) == self._rendered_source_id(layer)
+            and self._visual(layer) is not None
         ):
-            self._active_visual.visible = settings.visible
+            self._visual(layer).visible = settings.visible and (
+                layer == RENDER_LAYER_BASE or self.state.overlay_active
+            )
+            if (
+                layer == RENDER_LAYER_OVERLAY
+                and self._overlay_depth_reset_visual is not None
+            ):
+                self._overlay_depth_reset_visual.visible = (
+                    self._visual(layer).visible
+                )
             self._request_canvas_update()
         self._emit_state()
 
-    def set_selected_opacity(self, opacity: float) -> None:
-        settings = self.state.selected_settings()
+    def set_selected_opacity(
+        self,
+        opacity: float,
+        layer: str = RENDER_LAYER_BASE,
+    ) -> None:
+        settings = self.state.selected_settings(layer)
         if settings is None:
             return
         settings.set_opacity(opacity)
-        self._apply_active_style()
+        self._apply_active_style(layer)
         self._emit_state()
 
-    def set_selected_colour(self, colour: object) -> None:
-        settings = self.state.selected_settings()
+    def set_selected_colour(
+        self,
+        colour: object,
+        layer: str = RENDER_LAYER_BASE,
+    ) -> None:
+        settings = self.state.selected_settings(layer)
         if settings is None or not isinstance(colour, tuple):
             return
         settings.set_colour(colour)
-        self._apply_active_style()
+        self._apply_active_style(layer)
         self._emit_state()
 
-    def set_selected_node_size(self, node_size: int) -> None:
-        settings = self.state.selected_settings()
+    def set_selected_label_colour(
+        self,
+        label: int,
+        colour: object,
+        layer: str = RENDER_LAYER_BASE,
+    ) -> None:
+        settings = self.state.selected_settings(layer)
+        if settings is None or not isinstance(colour, tuple):
+            return
+        settings.set_label_colour(label, colour)
+        self._apply_active_style(layer)
+        self._sync_panel_settings()
+        self._emit_state()
+
+    def set_selected_node_size(
+        self,
+        node_size: int,
+        layer: str = RENDER_LAYER_BASE,
+    ) -> None:
+        settings = self.state.selected_settings(layer)
         if settings is None:
             return
         settings.set_node_size(node_size)
-        self._apply_active_style()
+        self._apply_active_style(layer)
         self._sync_panel_settings()
         self._emit_state()
 
-    def set_selected_edge_thickness(self, edge_thickness: int) -> None:
-        settings = self.state.selected_settings()
+    def set_selected_edge_thickness(
+        self,
+        edge_thickness: int,
+        layer: str = RENDER_LAYER_BASE,
+    ) -> None:
+        settings = self.state.selected_settings(layer)
         if settings is None:
             return
         settings.set_edge_thickness(edge_thickness)
-        self._apply_active_style()
+        self._apply_active_style(layer)
         self._sync_panel_settings()
         self._emit_state()
 
-    def set_selected_render_mode(self, render_mode: str) -> None:
-        source = self.state.selected_source()
-        settings = self.state.selected_settings()
+    def set_selected_render_mode(
+        self,
+        render_mode: str,
+        layer: str = RENDER_LAYER_BASE,
+    ) -> None:
+        source = self.state.selected_source(layer)
+        settings = self.state.selected_settings(layer)
         if source is None or settings is None:
             return
         allowed = (
@@ -659,7 +909,7 @@ class Volume3DWidget(QWidget):
         if render_mode not in allowed:
             return
         if settings.render_mode != render_mode:
-            if self.state.busy:
+            if self.state.busy or self.state.overlay_busy:
                 self._cancel_pending_preparation(
                     "Render mode changed; click Update."
                 )
@@ -670,25 +920,30 @@ class Volume3DWidget(QWidget):
             self._panel.set_status("Update required.")
         self._emit_state()
 
-    def set_selected_mask_source(self, mask_source_id: object) -> None:
-        settings = self.state.selected_settings()
+    def set_selected_mask_source(
+        self,
+        mask_source_id: object,
+        layer: str = RENDER_LAYER_BASE,
+    ) -> None:
+        settings = self.state.selected_settings(layer)
         if settings is None:
             return
         normalized = mask_source_id if isinstance(mask_source_id, str) else None
         compatible_ids = {
             source.id
             for source in self.state.compatible_masks_for(
-                self.state.selected_source_id
+                self._selected_source_id(layer)
             )
         }
         if normalized is not None and normalized not in compatible_ids:
             self._set_error(
                 "3D render mask is unavailable or spatially incompatible: "
-                f"{normalized}"
+                f"{normalized}",
+                layer,
             )
             return
         if settings.mask_source_id != normalized:
-            if self.state.busy:
+            if self.state.busy or self.state.overlay_busy:
                 self._cancel_pending_preparation(
                     "3D render mask changed; click Update."
                 )
@@ -699,13 +954,17 @@ class Volume3DWidget(QWidget):
             self._panel.set_status("Update required.")
         self._emit_state()
 
-    def set_selected_threshold(self, threshold: float) -> None:
-        settings = self.state.selected_settings()
+    def set_selected_threshold(
+        self,
+        threshold: float,
+        layer: str = RENDER_LAYER_BASE,
+    ) -> None:
+        settings = self.state.selected_settings(layer)
         if settings is None:
             return
         value = float(threshold)
         if settings.threshold != value:
-            if self.state.busy:
+            if self.state.busy or self.state.overlay_busy:
                 self._cancel_pending_preparation(
                     "Threshold changed; click Update."
                 )
@@ -715,8 +974,12 @@ class Volume3DWidget(QWidget):
             self._panel.set_status("Update required.")
         self._emit_state()
 
-    def mark_selected_dirty(self, message: str = "Update required.") -> None:
-        self.state.mark_selected_dirty()
+    def mark_selected_dirty(
+        self,
+        message: str = "Update required.",
+        layer: str = RENDER_LAYER_BASE,
+    ) -> None:
+        self.state.mark_selected_dirty(layer)
         if self._panel is not None:
             self._panel.set_status(message)
         self._emit_state()
@@ -934,44 +1197,73 @@ class Volume3DWidget(QWidget):
         self._workers.pop(token, None)
         if token != self._job_token or not self.state.active:
             return
-        source_id = self.state.selected_source_id
-        settings = self.state.selected_settings()
+        layer = self._preparing_layer or RENDER_LAYER_BASE
+        source_id = self._selected_source_id(layer)
+        settings = self.state.selected_settings(layer)
         if source_id is None or settings is None:
             return
         try:
             if self._panel is not None:
-                self._panel.set_progress(85, "Uploading 3D layer to the GPU…")
-            self._release_active_visual()
-            self._prepared = prepared
-            self._active_visual = self._create_visual(prepared, settings)
+                layer_name = (
+                    "overlay" if layer == RENDER_LAYER_OVERLAY else "base layer"
+                )
+                self._panel.set_progress(
+                    85,
+                    f"Uploading 3D {layer_name} to the GPU…",
+                )
+            self._release_visual(layer)
+            self._set_prepared(layer, prepared)
+            self._set_visual(
+                layer,
+                self._create_visual(prepared, settings, layer),
+            )
         except Exception as exc:
             self._on_preparation_failed(token, f"GPU upload failed: {exc}")
             return
 
-        self.state.rendered_source_id = source_id
-        self.state.prepared_shape = prepared.prepared_shape
-        self.state.downsample_stride = prepared.stride
-        self.state.busy = False
+        self._set_rendered_source_id(layer, source_id)
+        self._set_prepared_status(layer, prepared)
+        self._set_layer_busy(layer, False)
+        if layer == RENDER_LAYER_OVERLAY:
+            self.state.overlay_active = True
+            visual = self._visual(layer)
+            if visual is not None:
+                visual.visible = settings.visible
+            if self._overlay_depth_reset_visual is not None:
+                self._overlay_depth_reset_visual.visible = settings.visible
         settings.dirty = False
         if self._panel is not None:
-            self._panel.set_busy(False)
             self._panel.set_status(
-                "3D layer ready"
+                (
+                    "3D overlay ready"
+                    if layer == RENDER_LAYER_OVERLAY
+                    else "3D layer ready"
+                )
                 if prepared.stride == (1, 1, 1)
-                else f"3D layer ready (overview stride {prepared.stride[0]})."
+                else (
+                    "3D overlay ready"
+                    if layer == RENDER_LAYER_OVERLAY
+                    else "3D layer ready"
+                )
+                + f" (overview stride {prepared.stride[0]})."
             )
-        self.reset_camera()
+        if layer == RENDER_LAYER_BASE:
+            self.reset_camera()
         payload = self.status()
         self.render_finished.emit(payload)
         self._emit_state()
+        self._start_next_preparation()
 
     @Slot(int, str)
     def _on_preparation_failed(self, token: int, message: str) -> None:
         self._workers.pop(token, None)
         if token != self._job_token:
             return
-        self.state.busy = False
-        self._set_error(message)
+        layer = self._preparing_layer or RENDER_LAYER_BASE
+        self._set_layer_busy(layer, False)
+        self._pending_update_layers.clear()
+        self._preparing_layer = None
+        self._set_error(message, layer)
         if self._panel is not None:
             self._panel.set_busy(False)
 
@@ -1025,7 +1317,8 @@ class Volume3DWidget(QWidget):
                 )
 
     def _destroy_canvas(self) -> None:
-        self._release_active_visual()
+        self._release_visual(RENDER_LAYER_BASE)
+        self._release_visual(RENDER_LAYER_OVERLAY)
         if self._view is not None:
             self._view.scene.transform.changed.disconnect(
                 self._on_scene_transform_changed
@@ -1053,26 +1346,48 @@ class Volume3DWidget(QWidget):
         self._view = None
 
     def _release_active_visual(self) -> None:
-        if self._active_visual is not None:
-            self._active_visual.parent = None
-        self._active_visual = None
-        self._active_graph_visuals = {}
-        self._prepared = None
+        """Backward-compatible alias for releasing the base visual."""
+        self._release_visual(RENDER_LAYER_BASE)
 
-    def _create_visual(self, prepared: PreparedRender3D, settings: Any) -> Any:
+    def _release_visual(self, layer: str) -> None:
+        visual = self._visual(layer)
+        if visual is not None:
+            visual.parent = None
+        self._set_visual(layer, None)
+        if layer == RENDER_LAYER_BASE:
+            self._active_graph_visuals = {}
+            self._prepared = None
+        else:
+            if self._overlay_depth_reset_visual is not None:
+                self._overlay_depth_reset_visual.parent = None
+                self._overlay_depth_reset_visual = None
+            self._overlay_graph_visuals = {}
+            self._overlay_prepared = None
+
+    def _create_visual(
+        self,
+        prepared: PreparedRender3D,
+        settings: Any,
+        layer: str = RENDER_LAYER_BASE,
+    ) -> Any:
         if self._view is None:
             raise RuntimeError("3D scene is not initialized.")
         from vispy import scene
         from vispy.visuals.transforms import MatrixTransform
 
         rgba = _rgba(settings.colour, settings.opacity)
+        graph_visuals = (
+            self._active_graph_visuals
+            if layer == RENDER_LAYER_BASE
+            else self._overlay_graph_visuals
+        )
         if prepared.kind == "vessel_graph":
             parent = scene.Node(parent=self._view.scene)
             if (
                 prepared.graph_edge_segments is not None
                 and prepared.graph_edge_segments.size
             ):
-                self._active_graph_visuals["edges"] = scene.visuals.Line(
+                graph_visuals["edges"] = scene.visuals.Line(
                     pos=prepared.graph_edge_segments,
                     connect="segments",
                     color=_rgba(VESSEL_EDGE_COLOR, settings.opacity),
@@ -1090,7 +1405,7 @@ class Volume3DWidget(QWidget):
                     edge_width=0,
                     size=float(settings.node_size * 2),
                 )
-                self._active_graph_visuals["nodes"] = nodes
+                graph_visuals["nodes"] = nodes
             if (
                 prepared.graph_intercept_positions is not None
                 and prepared.graph_intercept_positions.size
@@ -1102,7 +1417,7 @@ class Volume3DWidget(QWidget):
                     edge_width=0,
                     size=float(settings.node_size * 2),
                 )
-                self._active_graph_visuals["intercepts"] = intercepts
+                graph_visuals["intercepts"] = intercepts
             visual = parent
         elif prepared.kind == "image":
             _require_pyopengl_3d_textures()
@@ -1147,7 +1462,7 @@ class Volume3DWidget(QWidget):
             visual = scene.visuals.Markers(parent=self._view.scene)
             visual.set_data(
                 prepared.vertices,
-                face_color=rgba,
+                face_color=_segmentation_vertex_colours(prepared, settings),
                 edge_width=0,
                 size=4,
             )
@@ -1157,45 +1472,86 @@ class Volume3DWidget(QWidget):
             visual = scene.visuals.Mesh(
                 vertices=prepared.vertices,
                 faces=prepared.faces,
-                color=rgba,
+                vertex_colors=_segmentation_vertex_colours(
+                    prepared,
+                    settings,
+                ),
                 shading="smooth",
                 parent=self._view.scene,
             )
         visual.visible = settings.visible
+        if layer == RENDER_LAYER_OVERLAY:
+            self._ensure_overlay_depth_reset()
+            visual.order = 1
         return visual
 
-    def _apply_active_style(self) -> None:
+    def _ensure_overlay_depth_reset(self) -> None:
+        """Clear base-pass depth before drawing the alpha-composited overlay."""
+        if self._overlay_depth_reset_visual is not None:
+            self._overlay_depth_reset_visual.visible = True
+            return
+        if self._view is None:
+            raise RuntimeError("3D scene is not initialized.")
+        from vispy import gloo, scene
+        from vispy.visuals import Visual
+
+        class _OverlayDepthResetVisual(Visual):
+            def _prepare_transforms(self, view: Any) -> None:
+                return
+
+            def draw(self) -> None:
+                if self.visible:
+                    gloo.set_depth_mask(True)
+                    gloo.clear(color=False, depth=True, stencil=False)
+
+        depth_reset_node = scene.visuals.create_visual_node(
+            _OverlayDepthResetVisual
+        )(parent=self._view.scene)
+        depth_reset_node.order = 0.5
+        self._overlay_depth_reset_visual = depth_reset_node
+
+    def _apply_active_style(
+        self,
+        layer: str = RENDER_LAYER_BASE,
+    ) -> None:
+        visual = self._visual(layer)
+        prepared = self._prepared_for_layer(layer)
         if (
-            self._active_visual is None
-            or self._prepared is None
-            or self.state.selected_source_id != self.state.rendered_source_id
+            visual is None
+            or prepared is None
+            or self._selected_source_id(layer) != self._rendered_source_id(layer)
         ):
             return
-        settings = self.state.selected_settings()
+        settings = self.state.selected_settings(layer)
         if settings is None:
             return
         rgba = _rgba(settings.colour, settings.opacity)
-        if self._prepared.kind == "vessel_graph":
-            edges = self._active_graph_visuals.get("edges")
+        graph_visuals = (
+            self._active_graph_visuals
+            if layer == RENDER_LAYER_BASE
+            else self._overlay_graph_visuals
+        )
+        if prepared.kind == "vessel_graph":
+            edges = graph_visuals.get("edges")
             if edges is not None:
                 edges.set_data(
-                    pos=self._prepared.graph_edge_segments,
+                    pos=prepared.graph_edge_segments,
                     connect="segments",
                     color=_rgba(VESSEL_EDGE_COLOR, settings.opacity),
                     width=float(settings.edge_thickness),
                 )
-            nodes = self._active_graph_visuals.get("nodes")
+            nodes = graph_visuals.get("nodes")
             if nodes is not None:
                 nodes.set_data(
-                    self._prepared.graph_node_positions,
+                    prepared.graph_node_positions,
                     face_color=_rgba(VESSEL_NODE_COLOR, settings.opacity),
                     edge_width=0,
                     size=float(settings.node_size * 2),
                 )
-            intercepts = self._active_graph_visuals.get("intercepts")
+            intercepts = graph_visuals.get("intercepts")
             if intercepts is not None:
                 intercepts.set_data(
-                    self._prepared.graph_intercept_positions,
+                    prepared.graph_intercept_positions,
                     face_color=_rgba(
                         PROJECTED_INTERCEPT_COLOR,
                         settings.opacity,
@@ -1203,30 +1559,37 @@ class Volume3DWidget(QWidget):
                     edge_width=0,
                     size=float(settings.node_size * 2),
                 )
-        elif self._prepared.kind == "image":
+        elif prepared.kind == "image":
             cutoff = _normalized_threshold(
                 settings.threshold,
-                self._prepared.source_range,
+                prepared.source_range,
             )
-            self._active_visual.cmap = _volume_colormap(
+            visual.cmap = _volume_colormap(
                 settings.colour,
                 settings.opacity,
-                translucent=self._prepared.render_mode == "Translucent",
+                translucent=prepared.render_mode == "Translucent",
                 cutoff=cutoff,
                 masked_minip=(
-                    self._prepared.mask_applied
-                    and self._prepared.render_mode == "MinIP"
+                    prepared.mask_applied
+                    and prepared.render_mode == "MinIP"
                 ),
             )
-        elif self._prepared.render_mode == "Points":
-            self._active_visual.set_data(
-                self._prepared.vertices,
-                face_color=rgba,
+        elif prepared.render_mode == "Points":
+            visual.set_data(
+                prepared.vertices,
+                face_color=_segmentation_vertex_colours(prepared, settings),
                 edge_width=0,
                 size=4,
             )
         else:
-            self._active_visual.color = rgba
+            visual.set_data(
+                vertices=prepared.vertices,
+                faces=prepared.faces,
+                vertex_colors=_segmentation_vertex_colours(
+                    prepared,
+                    settings,
+                ),
+            )
         self._request_canvas_update()
 
     def _refresh_patch_visual(self) -> None:
@@ -1526,56 +1889,208 @@ class Volume3DWidget(QWidget):
             ],
             self.state.selected_source_id,
         )
+        self._panel.set_overlay_sources(
+            [
+                (source.id, source.display_name)
+                for source in self.state.overlay_sources()
+            ],
+            self.state.overlay_selected_source_id,
+        )
 
     def _sync_panel_settings(self) -> None:
         if self._panel is None:
             return
-        source = self.state.selected_source()
-        settings = self.state.selected_settings()
+        source = self.state.selected_source(RENDER_LAYER_BASE)
+        settings = self.state.selected_settings(RENDER_LAYER_BASE)
         if source is None or settings is None:
             self._panel.set_source_kind(None)
             self._panel.set_modes((), "")
             self._panel.set_masks((), None)
             self._panel.set_status("Load an image before rendering.")
             self._panel.set_render_controls_enabled(False)
-            return
-        modes = (
-            RAW_RENDER_MODES
-            if source.kind == "image"
-            else (
-                SEGMENTATION_RENDER_MODES
-                if source.kind == "segmentation"
-                else VESSEL_GRAPH_RENDER_MODES
+        else:
+            modes = (
+                RAW_RENDER_MODES
+                if source.kind == "image"
+                else (
+                    SEGMENTATION_RENDER_MODES
+                    if source.kind == "segmentation"
+                    else VESSEL_GRAPH_RENDER_MODES
+                )
             )
+            self._panel.set_source_kind(source.kind)
+            self._panel.set_modes(modes, settings.render_mode)
+            self._panel.set_masks(
+                [
+                    (mask_source.id, mask_source.display_name)
+                    for mask_source in self.state.compatible_masks_for(
+                        self.state.selected_source_id
+                    )
+                ],
+                settings.mask_source_id,
+            )
+            self._panel.set_settings(settings)
+            labels: tuple[int, ...] = ()
+            if source.kind == "segmentation" and source.volume is not None:
+                try:
+                    labels = segmentation_labels(source.volume)
+                except ValueError:
+                    labels = ()
+            self._panel.set_label_colours(labels, settings)
+            self._panel.set_render_controls_enabled(self.state.active)
+
+        overlay_source = self.state.selected_source(RENDER_LAYER_OVERLAY)
+        overlay_settings = self.state.selected_settings(RENDER_LAYER_OVERLAY)
+        if overlay_source is None or overlay_settings is None:
+            self._panel.set_overlay_source_kind(None)
+            self._panel.set_overlay_modes((), "")
+            self._panel.set_overlay_masks((), None)
+            return
+        overlay_modes = (
+            SEGMENTATION_RENDER_MODES
+            if overlay_source.kind == "segmentation"
+            else VESSEL_GRAPH_RENDER_MODES
         )
-        self._panel.set_source_kind(source.kind)
-        self._panel.set_modes(modes, settings.render_mode)
-        self._panel.set_masks(
+        self._panel.set_overlay_source_kind(overlay_source.kind)
+        self._panel.set_overlay_modes(
+            overlay_modes,
+            overlay_settings.render_mode,
+        )
+        self._panel.set_overlay_masks(
             [
                 (mask_source.id, mask_source.display_name)
                 for mask_source in self.state.compatible_masks_for(
-                    self.state.selected_source_id
+                    self.state.overlay_selected_source_id
                 )
             ],
-            settings.mask_source_id,
+            overlay_settings.mask_source_id,
         )
-        self._panel.set_settings(settings)
-        self._panel.set_render_controls_enabled(self.state.active)
+        overlay_labels: tuple[int, ...] = ()
+        if (
+            overlay_source.kind == "segmentation"
+            and overlay_source.volume is not None
+        ):
+            try:
+                overlay_labels = segmentation_labels(overlay_source.volume)
+            except ValueError:
+                overlay_labels = ()
+        self._panel.set_overlay_settings(
+            overlay_settings,
+            overlay_labels,
+        )
 
-    def _set_error(self, message: str) -> None:
-        self.state.last_error = str(message)
+    def _set_error(
+        self,
+        message: str,
+        layer: str = RENDER_LAYER_BASE,
+    ) -> None:
+        self._set_layer_error(layer, str(message))
         if self._panel is not None:
             self._panel.set_status(str(message))
-        self.placeholder.setText(str(message))
+        if layer == RENDER_LAYER_BASE:
+            self.placeholder.setText(str(message))
         self.render_failed.emit(str(message))
         self._emit_state()
 
     def _cancel_pending_preparation(self, message: str) -> None:
         self._job_token += 1
         self.state.busy = False
+        self.state.overlay_busy = False
+        self._preparing_layer = None
+        self._pending_update_layers.clear()
         if self._panel is not None:
             self._panel.set_busy(False)
             self._panel.set_status(message)
+
+    def _cancel_layer_preparation(self, layer: str) -> None:
+        if self._preparing_layer == layer or layer in self._pending_update_layers:
+            self._cancel_pending_preparation("3D render update canceled.")
+
+    def _selected_source_id(self, layer: str) -> str | None:
+        return (
+            self.state.selected_source_id
+            if layer == RENDER_LAYER_BASE
+            else self.state.overlay_selected_source_id
+        )
+
+    def _rendered_source_id(self, layer: str) -> str | None:
+        return (
+            self.state.rendered_source_id
+            if layer == RENDER_LAYER_BASE
+            else self.state.overlay_rendered_source_id
+        )
+
+    def _set_rendered_source_id(
+        self,
+        layer: str,
+        source_id: str | None,
+    ) -> None:
+        if layer == RENDER_LAYER_BASE:
+            self.state.rendered_source_id = source_id
+        else:
+            self.state.overlay_rendered_source_id = source_id
+
+    def _visual(self, layer: str) -> Any | None:
+        return (
+            self._active_visual
+            if layer == RENDER_LAYER_BASE
+            else self._overlay_visual
+        )
+
+    def _set_visual(self, layer: str, visual: Any | None) -> None:
+        if layer == RENDER_LAYER_BASE:
+            self._active_visual = visual
+        else:
+            self._overlay_visual = visual
+
+    def _prepared_for_layer(self, layer: str) -> PreparedRender3D | None:
+        return (
+            self._prepared
+            if layer == RENDER_LAYER_BASE
+            else self._overlay_prepared
+        )
+
+    def _set_prepared(
+        self,
+        layer: str,
+        prepared: PreparedRender3D | None,
+    ) -> None:
+        if layer == RENDER_LAYER_BASE:
+            self._prepared = prepared
+        else:
+            self._overlay_prepared = prepared
+
+    def _set_prepared_status(
+        self,
+        layer: str,
+        prepared: PreparedRender3D,
+    ) -> None:
+        if layer == RENDER_LAYER_BASE:
+            self.state.prepared_shape = prepared.prepared_shape
+            self.state.downsample_stride = prepared.stride
+        else:
+            self.state.overlay_prepared_shape = prepared.prepared_shape
+            self.state.overlay_downsample_stride = prepared.stride
+
+    def _clear_prepared_status(self, layer: str) -> None:
+        if layer == RENDER_LAYER_BASE:
+            self.state.prepared_shape = None
+            self.state.downsample_stride = None
+        else:
+            self.state.overlay_prepared_shape = None
+            self.state.overlay_downsample_stride = None
+
+    def _set_layer_busy(self, layer: str, busy: bool) -> None:
+        if layer == RENDER_LAYER_BASE:
+            self.state.busy = bool(busy)
+        else:
+            self.state.overlay_busy = bool(busy)
+
+    def _set_layer_error(self, layer: str, message: str | None) -> None:
+        if layer == RENDER_LAYER_BASE:
+            self.state.last_error = message
+        else:
+            self.state.overlay_last_error = message
 
     def _emit_state(self) -> None:
         self.state_changed.emit(self.status())
@@ -1595,6 +2110,28 @@ def _rgba(
         colour[2] / 255.0,
         min(max(float(opacity), 0.0), 1.0),
     )
+
+
+def _segmentation_vertex_colours(
+    prepared: PreparedRender3D,
+    settings: Any,
+) -> np.ndarray:
+    vertices = prepared.vertices
+    labels = prepared.vertex_labels
+    if vertices is None:
+        return np.empty((0, 4), dtype=np.float32)
+    if labels is None or labels.shape != (vertices.shape[0],):
+        return np.tile(
+            np.asarray(_rgba(settings.colour, settings.opacity), dtype=np.float32),
+            (vertices.shape[0], 1),
+        )
+    colours = np.empty((vertices.shape[0], 4), dtype=np.float32)
+    for label in np.unique(labels):
+        colours[labels == label] = _rgba(
+            settings.colour_for_label(int(label)),
+            settings.opacity,
+        )
+    return colours
 
 
 def _volume_world_limits(
