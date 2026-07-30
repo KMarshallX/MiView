@@ -267,6 +267,9 @@ class PatchViewerWindow(QMainWindow):
         self.patch_history_panel.restore_requested.connect(
             self._on_restore_patch_history_node_requested
         )
+        self.patch_history_panel.delete_requested.connect(
+            self._on_delete_patch_history_node_requested
+        )
         self.patch_position_panel.movement_requested.connect(
             self._on_patch_position_movement_requested
         )
@@ -2475,6 +2478,7 @@ class PatchViewerWindow(QMainWindow):
         self._patch_data = transformed_volume.data
         self._replace_patch_viewer_volume(transformed_volume)
         self._initialize_contrast(transformed_volume)
+        self._sync_volume_3d_sources(refresh_active_image=True)
         self._refresh_patch_history_panel()
         self.statusBar().showMessage(f"Applied {get_tool(tool_id).label} to selected patch")
 
@@ -3435,7 +3439,18 @@ class PatchViewerWindow(QMainWindow):
         self.slice_viewer.refresh_graph_overlay()
         self._refresh_vessel_graph_projection()
 
-    def _sync_volume_3d_sources(self) -> None:
+    def _sync_volume_3d_sources(
+        self,
+        *,
+        refresh_active_image: bool = False,
+    ) -> None:
+        volume_3d_view = self.slice_viewer.volume_3d_view
+        refresh_rendered_image = (
+            refresh_active_image
+            and volume_3d_view.state.active
+            and volume_3d_view.state.selected_source_id == "image"
+            and volume_3d_view.state.rendered_source_id == "image"
+        )
         sources = [
             Render3DSource(
                 id="image",
@@ -3488,6 +3503,8 @@ class PatchViewerWindow(QMainWindow):
                 render_settings.set_edge_thickness(settings.edge_thickness)
         finally:
             self._syncing_patch_vessel_3d = False
+        if refresh_rendered_image:
+            volume_3d_view.update_selected_render()
 
     def _on_display_patch_location_changed(self, visible: bool) -> None:
         self.slice_viewer.volume_3d_view.set_locator_context(
@@ -3671,6 +3688,7 @@ class PatchViewerWindow(QMainWindow):
         self._patch_history.reset(patch_volume.data)
         self._replace_patch_viewer_volume(patch_volume)
         self._initialize_contrast(patch_volume)
+        self._sync_volume_3d_sources(refresh_active_image=True)
         self._refresh_patch_history_panel()
 
     def _on_restore_patch_history_node_requested(self, node_id: str) -> None:
@@ -3686,8 +3704,28 @@ class PatchViewerWindow(QMainWindow):
         self._patch_data = restored_patch
         self._replace_patch_viewer_volume(restored_volume)
         self._initialize_contrast(restored_volume)
+        self._sync_volume_3d_sources(refresh_active_image=True)
         self._refresh_patch_history_panel()
         self.statusBar().showMessage("Restored selected patch to history state")
+
+    def _on_delete_patch_history_node_requested(self, node_id: str) -> None:
+        try:
+            restored_patch = self._patch_history.delete(node_id)
+        except ValueError as exc:
+            QMessageBox.warning(self, "Patch History Delete Failed", str(exc))
+            self.statusBar().showMessage("Patch history deletion failed")
+            return
+
+        restored_volume = derive_volume(self._patch_volume, restored_patch)
+        self._patch_volume = restored_volume
+        self._patch_data = restored_patch
+        self._replace_patch_viewer_volume(restored_volume)
+        self._initialize_contrast(restored_volume)
+        self._sync_volume_3d_sources(refresh_active_image=True)
+        self._refresh_patch_history_panel()
+        self.statusBar().showMessage(
+            "Deleted patch history state and later dependent states"
+        )
 
     def _apply_history_operation(
         self,

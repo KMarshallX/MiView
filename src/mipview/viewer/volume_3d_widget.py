@@ -379,6 +379,7 @@ class Volume3DWidget(QWidget):
         self._locator_source_affine: np.ndarray | None = None
         self._patch_box = _PatchBoxState()
         self._patch_extension_lines_visible = True
+        self._contrast_window: tuple[float, float] | None = None
 
         self.title_label = QLabel("3D", self)
         self.title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -406,6 +407,13 @@ class Volume3DWidget(QWidget):
     def set_footer_height(self, height: int) -> None:
         """Match the space occupied by slice-slider controls in adjacent panes."""
         self._footer_spacer.setFixedHeight(max(int(height), 0))
+
+    def set_contrast_window(self, window_min: float, window_max: float) -> None:
+        """Apply the shared image window to an already prepared 3D texture."""
+        if window_max < window_min:
+            window_min, window_max = window_max, window_min
+        self._contrast_window = (float(window_min), float(window_max))
+        self._apply_active_style(RENDER_LAYER_BASE)
 
     def connect_panel(self, panel: Volume3DPanel) -> None:
         self._panel = panel
@@ -1427,14 +1435,18 @@ class Volume3DWidget(QWidget):
                 "Translucent": "translucent",
                 "Isosurface": "iso",
             }[prepared.render_mode]
-            cutoff = _normalized_threshold(
+            cutoff = _image_contrast_cutoff(
                 settings.threshold,
                 prepared.source_range,
+                self._contrast_window,
             )
             visual = scene.visuals.Volume(
                 prepared.data,
                 method=method,
-                clim=(0, 255),
+                clim=_image_texture_clim(
+                    prepared.source_range,
+                    self._contrast_window,
+                ),
                 interpolation=(
                     "nearest" if prepared.mask_applied else "linear"
                 ),
@@ -1451,9 +1463,10 @@ class Volume3DWidget(QWidget):
                 parent=self._view.scene,
             )
             if method == "iso":
-                visual.threshold = _normalized_threshold(
+                visual.threshold = _image_contrast_cutoff(
                     settings.threshold,
                     prepared.source_range,
+                    self._contrast_window,
                 )
             transform = MatrixTransform()
             transform.matrix = np.asarray(prepared.texture_affine).T
@@ -1560,9 +1573,14 @@ class Volume3DWidget(QWidget):
                     size=float(settings.node_size * 2),
                 )
         elif prepared.kind == "image":
-            cutoff = _normalized_threshold(
+            cutoff = _image_contrast_cutoff(
                 settings.threshold,
                 prepared.source_range,
+                self._contrast_window,
+            )
+            visual.clim = _image_texture_clim(
+                prepared.source_range,
+                self._contrast_window,
             )
             visual.cmap = _volume_colormap(
                 settings.colour,
@@ -1574,6 +1592,8 @@ class Volume3DWidget(QWidget):
                     and prepared.render_mode == "MinIP"
                 ),
             )
+            if prepared.render_mode == "Isosurface":
+                visual.threshold = cutoff
         elif prepared.render_mode == "Points":
             visual.set_data(
                 prepared.vertices,
@@ -2275,3 +2295,50 @@ def _normalized_threshold(
     if maximum <= minimum:
         return 0.5
     return min(max((float(threshold) - minimum) / (maximum - minimum), 0.0), 1.0)
+
+
+def _image_texture_clim(
+    source_range: tuple[float, float],
+    contrast_window: tuple[float, float] | None,
+) -> tuple[float, float]:
+    """Map a raw intensity window onto the prepared uint8 texture."""
+    minimum, maximum = source_range
+    if (
+        contrast_window is None
+        or not np.isfinite(minimum)
+        or not np.isfinite(maximum)
+        or maximum <= minimum
+    ):
+        return (0.0, 255.0)
+
+    window_min, window_max = contrast_window
+    scale = 255.0 / (maximum - minimum)
+    texture_min = min(max((window_min - minimum) * scale, 0.0), 255.0)
+    texture_max = min(max((window_max - minimum) * scale, 0.0), 255.0)
+    if texture_max > texture_min:
+        return (texture_min, texture_max)
+    if texture_min >= 255.0:
+        return (254.0, 255.0)
+    return (texture_min, min(texture_min + 1.0, 255.0))
+
+
+def _image_contrast_cutoff(
+    threshold: float,
+    source_range: tuple[float, float],
+    contrast_window: tuple[float, float] | None,
+) -> float:
+    """Keep a raw threshold spatially stable while the display window changes."""
+    texture_min, texture_max = _image_texture_clim(
+        source_range,
+        contrast_window,
+    )
+    threshold_texture = _normalized_threshold(threshold, source_range) * 255.0
+    if texture_max <= texture_min:
+        return 0.5
+    return min(
+        max(
+            (threshold_texture - texture_min) / (texture_max - texture_min),
+            0.0,
+        ),
+        1.0,
+    )

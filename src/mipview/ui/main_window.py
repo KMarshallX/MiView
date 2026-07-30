@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from uuid import uuid4
 
+import numpy as np
 from PySide6.QtCore import QEvent, QObject, QPoint, QTimer, Qt
 from PySide6.QtGui import (
     QAction,
@@ -50,7 +51,8 @@ from mipview.segmentation.models import LoadedSegmentation
 from mipview.segmentation.validation import validate_segmentation_compatibility
 from mipview.state.app_state import AppState
 from mipview.state.contrast_state import ContrastState
-from mipview.tools import get_tool
+from mipview.tools import apply_tool, derive_volume, get_tool
+from mipview.tools.history import ProcessingHistoryManager
 from mipview.ui.contrast_helpers import (
     apply_auto_contrast,
     connect_contrast_controls,
@@ -67,9 +69,10 @@ from mipview.ui.drop_loading import (
     is_supported_nifti_path,
 )
 from mipview.ui.overlay_opacity_control_bar import OverlayOpacityControlBar
+from mipview.ui.patch_history_panel import ImageHistoryPanel
 from mipview.ui.patch_window import PatchViewerWindow
 from mipview.ui.segmentation_config_window import SegmentationConfigWindow
-from mipview.ui.tool_actions import apply_tool_to_volume
+from mipview.ui.tool_actions import apply_tool_to_volume_with_metadata
 from mipview.ui.tools_menu import build_tools_submenu
 from mipview.ui.volume_3d_panel import Volume3DPanel
 from mipview.ui.window_styling import (
@@ -124,6 +127,8 @@ class MainWindow(QMainWindow):
         self.slice_viewer = TriPlanarViewerWidget(maximum_zoom=25.0)
         self.cursor_panel = CursorInspectionPanel(adaptable_width=True)
         self.annotation_panel = AnnotationPanel(adaptable_width=True)
+        self.image_history_panel = ImageHistoryPanel(self)
+        self._image_history: ProcessingHistoryManager | None = None
         self.volume_3d_panel = Volume3DPanel(
             self,
             allow_vessel_graph_unload=True,
@@ -211,6 +216,12 @@ class MainWindow(QMainWindow):
             self._on_annotation_brush_mode_changed
         )
         self.annotation_panel.undo_requested.connect(self._on_annotation_undo_requested)
+        self.image_history_panel.restore_requested.connect(
+            self._on_restore_image_history_node_requested
+        )
+        self.image_history_panel.delete_requested.connect(
+            self._on_delete_image_history_node_requested
+        )
         self.volume_3d_panel.vessel_graph_unload_requested.connect(
             self._on_unload_vessel_graph
         )
@@ -233,6 +244,7 @@ class MainWindow(QMainWindow):
         self.segmentation_config_window.set_opacity(self.state.segmentation_opacity)
         self._refresh_segmentation_ui()
         self._refresh_patch_selection_ui()
+        self._refresh_image_history_panel()
         self._font_scaler.apply()
         self.statusBar().showMessage("Ready")
 
@@ -256,6 +268,12 @@ class MainWindow(QMainWindow):
         volume_3d_panel_layout.setSpacing(0)
         volume_3d_panel_layout.addWidget(self.volume_3d_panel)
         right_layout.addWidget(volume_3d_panel_container)
+        image_history_panel_container = QWidget(right_panel)
+        image_history_panel_layout = QVBoxLayout(image_history_panel_container)
+        image_history_panel_layout.setContentsMargins(8, 0, 8, 8)
+        image_history_panel_layout.setSpacing(0)
+        image_history_panel_layout.addWidget(self.image_history_panel)
+        right_layout.addWidget(image_history_panel_container)
         right_layout.addStretch(1)
 
         right_scroll_area = QScrollArea(self)
@@ -494,6 +512,8 @@ class MainWindow(QMainWindow):
         self.state.cursor_position = None
         self.state.selected_patch_bounds = None
         self.state.selected_patch_data = None
+        self._image_history = None
+        self._refresh_image_history_panel()
         self._clear_annotation_session()
         self._clear_segmentation_session()
         self._clear_vessel_graph_session()
@@ -1430,15 +1450,41 @@ class MainWindow(QMainWindow):
             )
             return
 
-        transformed_volume, status_message = apply_tool_to_volume(
+        tool_result, status_message = apply_tool_to_volume_with_metadata(
             self,
             tool_id,
             self.state.volume,
         )
-        if transformed_volume is None:
+        if tool_result is None:
             self.statusBar().showMessage(status_message)
             return
 
+        if self._image_history is None:
+            self._reset_image_history(self.state.volume)
+        tool = get_tool(tool_id)
+        self._image_history.record_operation(
+            operation_type=tool.id,
+            operation_label=tool.label,
+            operation_parameters=tool_result.parameters,
+            resulting_state=tool_result.transformed_volume.data,
+            parameter_summary=self._summarize_tool_parameters(
+                tool_result.parameters
+            ),
+            is_expensive=False,
+        )
+        self._replace_processed_main_volume(
+            tool_result.transformed_volume,
+            refresh_active_3d=True,
+        )
+        self._refresh_image_history_panel()
+        self.statusBar().showMessage(f"Applied {tool.label} to main image")
+
+    def _replace_processed_main_volume(
+        self,
+        transformed_volume: NiftiLoadResult,
+        *,
+        refresh_active_3d: bool,
+    ) -> None:
         self.state.volume = transformed_volume
         cursor_position = self.state.cursor_position
         patch_enabled = self.slice_viewer.patch_selection_enabled()
@@ -1464,9 +1510,85 @@ class MainWindow(QMainWindow):
         self._initialize_contrast_for_loaded_volume()
         self._sync_patch_windows_from_processed_main_image()
         self._apply_active_segmentation_overlay()
+        self._sync_volume_3d_sources(
+            refresh_active_image=refresh_active_3d,
+        )
 
-        tool_label = get_tool(tool_id).label
-        self.statusBar().showMessage(f"Applied {tool_label} to main image")
+    def _on_restore_image_history_node_requested(self, node_id: str) -> None:
+        if self._image_history is None or self.state.volume is None:
+            return
+        try:
+            restored_data = self._image_history.restore(node_id)
+        except ValueError as exc:
+            QMessageBox.warning(self, "Image Restore Failed", str(exc))
+            self.statusBar().showMessage("Image restore failed")
+            return
+
+        self._replace_processed_main_volume(
+            derive_volume(self.state.volume, restored_data),
+            refresh_active_3d=True,
+        )
+        self._refresh_image_history_panel()
+        self.statusBar().showMessage("Restored main image to history state")
+
+    def _on_delete_image_history_node_requested(self, node_id: str) -> None:
+        if self._image_history is None or self.state.volume is None:
+            return
+        try:
+            restored_data = self._image_history.delete(node_id)
+        except ValueError as exc:
+            QMessageBox.warning(self, "Image History Delete Failed", str(exc))
+            self.statusBar().showMessage("Image history deletion failed")
+            return
+
+        self._replace_processed_main_volume(
+            derive_volume(self.state.volume, restored_data),
+            refresh_active_3d=True,
+        )
+        self._refresh_image_history_panel()
+        self.statusBar().showMessage(
+            "Deleted image history state and later dependent states"
+        )
+
+    def _reset_image_history(self, volume: NiftiLoadResult) -> None:
+        self._image_history = ProcessingHistoryManager(
+            volume.data,
+            apply_operation=self._apply_image_history_operation,
+            checkpoint_interval=None,
+            initial_label="Initial Image",
+            initial_summary="Initial loaded image state",
+            copy_initial_state=False,
+        )
+        self._refresh_image_history_panel()
+
+    def _apply_image_history_operation(
+        self,
+        image_state: np.ndarray,
+        operation_type: str,
+        parameters: dict[str, int | float | bool | str],
+    ) -> np.ndarray:
+        return apply_tool(operation_type, image_state, parameters)
+
+    def _refresh_image_history_panel(self) -> None:
+        if self._image_history is None:
+            self.image_history_panel.set_history([], None)
+            self.image_history_panel.setEnabled(False)
+            return
+        self.image_history_panel.setEnabled(True)
+        self.image_history_panel.set_history(
+            self._image_history.nodes_by_step(),
+            self._image_history.active_node_id,
+        )
+
+    @staticmethod
+    def _summarize_tool_parameters(
+        parameters: dict[str, int | float | bool | str],
+    ) -> str:
+        if not parameters:
+            return "No parameters"
+        return ", ".join(
+            f"{key}={value}" for key, value in sorted(parameters.items())
+        )
 
     def _on_load_segmentation(self) -> None:
         if self.state.volume is None or self.state.loaded_file_path is None:
@@ -1938,7 +2060,18 @@ class MainWindow(QMainWindow):
         self._sync_patch_windows_segmentation_menu_state()
         self._sync_volume_3d_sources()
 
-    def _sync_volume_3d_sources(self) -> None:
+    def _sync_volume_3d_sources(
+        self,
+        *,
+        refresh_active_image: bool = False,
+    ) -> None:
+        volume_3d_view = self.slice_viewer.volume_3d_view
+        refresh_rendered_image = (
+            refresh_active_image
+            and volume_3d_view.state.active
+            and volume_3d_view.state.selected_source_id == "image"
+            and volume_3d_view.state.rendered_source_id == "image"
+        )
         sources: list[Render3DSource] = []
         if self.state.volume is not None:
             sources.append(
@@ -1995,6 +2128,8 @@ class MainWindow(QMainWindow):
                 settings.set_edge_thickness(layer.settings.edge_thickness)
         finally:
             self._syncing_main_vessel_3d = False
+        if refresh_rendered_image:
+            volume_3d_view.update_selected_render()
 
     def _clear_segmentation_session(self) -> None:
         self.state.segmentation_image_path = None
@@ -2251,6 +2386,7 @@ class MainWindow(QMainWindow):
 
         self.state.loaded_file_path = image_path
         self.state.volume = loaded
+        self._reset_image_history(loaded)
         self.cursor_panel.set_axis_directions(loaded.affine)
         self.state.cursor_position = self.slice_viewer.current_cursor_position()
         self.state.selected_patch_bounds = None

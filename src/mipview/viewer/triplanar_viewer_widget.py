@@ -627,6 +627,7 @@ class TriPlanarViewerWidget(QWidget):
         self._contrast_window = (window_min, window_max)
         for view in self._views:
             view.set_contrast_window(window_min, window_max)
+        self.volume_3d_view.set_contrast_window(window_min, window_max)
 
     def set_projection_mode(self, mode: str) -> None:
         normalized_mode = mode.strip().upper()
