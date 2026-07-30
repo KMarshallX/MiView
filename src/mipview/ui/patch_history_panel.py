@@ -4,7 +4,10 @@ from PySide6.QtCore import QEvent, QPoint, QTimer, Qt, Signal
 from PySide6.QtGui import QAction, QColor, QFont, QMouseEvent
 from PySide6.QtWidgets import QGroupBox, QListWidget, QListWidgetItem, QMenu, QToolTip, QVBoxLayout, QWidget
 
-from mipview.patch.history import PatchHistoryNode
+from mipview.tools.history import ProcessingHistoryNode
+from mipview.ui.collapsible_group_box import CollapsibleGroupBox
+
+STEP_INDEX_ROLE = int(Qt.ItemDataRole.UserRole) + 1
 
 
 class _HoverDelayListWidget(QListWidget):
@@ -48,11 +51,8 @@ class _HoverDelayListWidget(QListWidget):
         )
 
 
-class PatchHistoryPanel(QGroupBox):
-    restore_requested = Signal(str)
-
-    def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__("Patch History", parent)
+class _HistoryPanelBehavior:
+    def _initialize_history_panel(self) -> None:
         layout = QVBoxLayout(self)
         self._list_widget = _HoverDelayListWidget(self)
         self._list_widget.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -60,13 +60,18 @@ class PatchHistoryPanel(QGroupBox):
         layout.addWidget(self._list_widget)
         self._active_node_id: str | None = None
 
-    def set_history(self, nodes: list[PatchHistoryNode], active_node_id: str) -> None:
+    def set_history(
+        self,
+        nodes: list[ProcessingHistoryNode],
+        active_node_id: str | None,
+    ) -> None:
         self._active_node_id = active_node_id
         self._list_widget.clear()
         for node in nodes:
             label = f"{node.step_index:02d}  {node.operation_label}"
             item = QListWidgetItem(label)
             item.setData(Qt.ItemDataRole.UserRole, node.node_id)
+            item.setData(STEP_INDEX_ROLE, node.step_index)
             item.setToolTip(self._build_tooltip(node))
             if node.node_id == active_node_id:
                 font = QFont(item.font())
@@ -82,13 +87,25 @@ class PatchHistoryPanel(QGroupBox):
         node_id = item.data(Qt.ItemDataRole.UserRole)
         if not isinstance(node_id, str):
             return
+        menu = self._build_context_menu(item, node_id)
+        menu.exec(self._list_widget.viewport().mapToGlobal(position))
+
+    def _build_context_menu(
+        self,
+        item: QListWidgetItem,
+        node_id: str,
+    ) -> QMenu:
         menu = QMenu(self)
         restore_action = QAction("Restore This State", menu)
         restore_action.triggered.connect(lambda: self.restore_requested.emit(node_id))
         menu.addAction(restore_action)
-        menu.exec(self._list_widget.viewport().mapToGlobal(position))
+        if item.data(STEP_INDEX_ROLE) != 0:
+            delete_action = QAction("Delete This State", menu)
+            delete_action.triggered.connect(lambda: self.delete_requested.emit(node_id))
+            menu.addAction(delete_action)
+        return menu
 
-    def _build_tooltip(self, node: PatchHistoryNode) -> str:
+    def _build_tooltip(self, node: ProcessingHistoryNode) -> str:
         timestamp = node.timestamp.astimezone().strftime("%Y-%m-%d %H:%M:%S")
         checkpoint = "yes" if node.is_checkpoint else "no"
         summary = node.parameter_summary if node.parameter_summary else "No parameters"
@@ -98,3 +115,31 @@ class PatchHistoryPanel(QGroupBox):
             f"Checkpoint: {checkpoint}\n"
             f"Time: {timestamp}"
         )
+
+
+class HistoryPanel(_HistoryPanelBehavior, QGroupBox):
+    restore_requested = Signal(str)
+    delete_requested = Signal(str)
+
+    def __init__(self, title: str, parent: QWidget | None = None) -> None:
+        QGroupBox.__init__(self, title, parent)
+        self._initialize_history_panel()
+
+
+class PatchHistoryPanel(HistoryPanel):
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__("Patch History", parent)
+
+
+class ImageHistoryPanel(_HistoryPanelBehavior, CollapsibleGroupBox):
+    restore_requested = Signal(str)
+    delete_requested = Signal(str)
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        CollapsibleGroupBox.__init__(
+            self,
+            "Image History",
+            parent,
+            expanded=False,
+        )
+        self._initialize_history_panel()

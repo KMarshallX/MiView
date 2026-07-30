@@ -8,26 +8,13 @@ It is designed as a focused research tool for:
 - multi-label segmentation overlay inspection with deterministic per-label colors
   and synchronized main/patch overlay selectors (`---` disables the overlay),
 - voxel-space annotation with editable label masks,
-- interactive patch selection,
-- patch saving,
-- patch-wise volumetric computation (e.g., normalization, standardization, filtering, etc.),
+- interactive patch selection, computation and saving,
 - orthogonal **MIP / MinIP** inspection of selected, modified patches, optionally
   restricted to a loaded file-backed segmentation mask, with opt-in MIP of the
   active file or annotation segmentation overlay,
-- projection-graph editing with local state save/load, drag-and-drop patch restoration,
-  persistent directed vectors, straight or curved edges, restored MIP/MinIP
-  orientation settings, and physical-spacing-aware one-to-one angle measurements,
-- import-only GraphML vessel skeletons as read-only 3D file layers, with
-  patch-clipped MIP/MinIP projections, red source nodes, green edges, and blue
-  synthetic patch-boundary intersections,
-- patch-window 2×2 viewer screenshot export at 1–200% output resolution,
-- independent patch-window translation along LR, AP, and SI with live projection
-  and aligned-overlay refresh,
-- manually refreshed, memory-bounded 3D rendering of one raw image,
+- memory-bounded 3D rendering of one raw image,
   segmentation, or binary-mask layer at a time,
-- affine-aware 3D patch boxes in the main viewer and an optional full-source
-  locator in patch windows,
-- controlled local IPC and `mipview-ctl` commands for viewer, patch, annotation, projection, and graph workflows.
+- controlled local IPC and `mipview-ctl` commands
 
 MipView is intentionally minimal. The goal is to build a small, reliable viewer before adding more advanced features.
 
@@ -98,23 +85,6 @@ pip install -r requirements.txt
 ```
 
 This `requirements.txt` mirrors the runtime dependencies used by the app and is intended for Docker-style installs. In installed/container environments, the intended launch command remains `mipview`.
-
-The optional 3D viewer uses VisPy with its PySide6 backend and PyOpenGL for
-raw-volume texture uploads. A working OpenGL implementation is also required.
-If 3D rendering is unavailable, the orthogonal viewers remain usable and the
-**3D Volume** toolbox reports an actionable error.
-The main and patch 3D viewers support one independent overlay in addition to
-the base render. Overlay choices are limited to loaded file-backed NIfTI
-segmentations and loaded GraphML vessel graphs; unsaved annotations and
-additional scalar image volumes are not offered. NIfTI overlays must retain
-the source shape and affine, are never resampled automatically, and use
-editable deterministic per-label colours. GraphML overlays retain their
-semantic edge, node, and intercept colours. Base and overlay renders are
-prepared independently and alpha-composited with the overlay drawn last. The
-base-pass depth buffer is reset before the overlay pass so ray-cast scalar
-volume proxy geometry cannot clip overlays located inside the volume.
-Camera framing uses affine-scaled world bounds so raw textures and foreground
-meshes open at the same physical scale and default viewing angle.
 
 CI note:
 
