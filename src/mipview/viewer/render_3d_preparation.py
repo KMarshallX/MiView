@@ -162,17 +162,26 @@ def prepare_render(
         )
 
     labels = segmentation_labels(volume)
-    foreground = np.asarray(np.isfinite(sampled) & (sampled > float(threshold)))
-    if sampled_mask is not None:
-        foreground &= sampled_mask
     included_labels = tuple(
         label for label in labels if float(label) > float(threshold)
+    )
+    mask_data = None if mask_volume is None else np.asarray(mask_volume.data)
+    source_mask = (
+        None
+        if mask_data is None
+        else np.asarray(np.isfinite(mask_data) & (mask_data != 0))
     )
     if render_mode == "Points":
         points_parts: list[np.ndarray] = []
         point_label_parts: list[np.ndarray] = []
         for label in included_labels:
-            label_points = np.argwhere(foreground & (sampled == label))
+            label_foreground = _reduce_segmentation_label(
+                source,
+                label,
+                stride_value=stride_value,
+                source_mask=source_mask,
+            )
+            label_points = np.argwhere(label_foreground)
             if label_points.size:
                 points_parts.append(label_points)
                 point_label_parts.append(
@@ -192,7 +201,11 @@ def prepare_render(
             selection_stride = math.ceil(points.shape[0] / MAX_POINT_COUNT)
             points = points[::selection_stride]
             point_labels = point_labels[::selection_stride]
-        source_points = points.astype(np.float32) * float(stride_value)
+        source_points = _reduced_to_source_coordinates(
+            points,
+            source_shape=source.shape,
+            stride_value=stride_value,
+        )
         vertices = np.asarray(
             apply_affine(volume.affine, source_points),
             dtype=np.float32,
@@ -220,7 +233,12 @@ def prepare_render(
         MAX_SURFACE_FACES // max(len(included_labels), 1),
     )
     for label in included_labels:
-        label_foreground = foreground & (sampled == label)
+        label_foreground = _reduce_segmentation_label(
+            source,
+            label,
+            stride_value=stride_value,
+            source_mask=source_mask,
+        )
         if not np.any(label_foreground):
             continue
         padded = np.pad(label_foreground.astype(np.uint8), 1)
@@ -238,7 +256,11 @@ def prepare_render(
             ):
                 break
             surface_step *= 2
-        source_vertices = (raw_vertices - 1.0) * float(stride_value)
+        source_vertices = _reduced_to_source_coordinates(
+            raw_vertices - 1.0,
+            source_shape=source.shape,
+            stride_value=stride_value,
+        )
         label_vertices = np.asarray(
             apply_affine(volume.affine, source_vertices),
             dtype=np.float32,
@@ -509,6 +531,66 @@ def _normalize_to_uint8(
     scaled = (np.asarray(data, dtype=np.float32) - minimum) / (maximum - minimum)
     scaled[~np.isfinite(scaled)] = 0.0
     return np.asarray(np.clip(scaled * 255.0, 0.0, 255.0), dtype=np.uint8)
+
+
+def _reduce_segmentation_label(
+    source: np.ndarray,
+    label: int,
+    *,
+    stride_value: int,
+    source_mask: np.ndarray | None,
+) -> np.ndarray:
+    """Reduce one label without dropping thin structures between stride samples."""
+    foreground = np.asarray(source == label)
+    if source_mask is not None:
+        foreground &= source_mask
+    if stride_value == 1:
+        return foreground
+
+    reduced_shape = tuple(
+        math.ceil(size / stride_value)
+        for size in foreground.shape
+    )
+    reduced = np.zeros(reduced_shape, dtype=bool)
+    for x_offset in range(stride_value):
+        for y_offset in range(stride_value):
+            for z_offset in range(stride_value):
+                block_sample = foreground[
+                    x_offset::stride_value,
+                    y_offset::stride_value,
+                    z_offset::stride_value,
+                ]
+                target = reduced[
+                    : block_sample.shape[0],
+                    : block_sample.shape[1],
+                    : block_sample.shape[2],
+                ]
+                np.logical_or(target, block_sample, out=target)
+    return reduced
+
+
+def _reduced_to_source_coordinates(
+    coordinates: np.ndarray,
+    *,
+    source_shape: tuple[int, ...],
+    stride_value: int,
+) -> np.ndarray:
+    """Map reduced block coordinates to their voxel-space block centres."""
+    reduced = np.asarray(coordinates, dtype=np.float64)
+    source_coordinates = np.empty(reduced.shape, dtype=np.float64)
+    for axis, source_size in enumerate(source_shape):
+        reduced_size = math.ceil(source_size / stride_value)
+        reduced_boundaries = np.arange(reduced_size + 1, dtype=np.float64) - 0.5
+        source_boundaries = np.minimum(
+            np.arange(reduced_size + 1, dtype=np.float64) * stride_value,
+            source_size,
+        ) - 0.5
+        source_coordinates[:, axis] = np.interp(
+            reduced[:, axis],
+            reduced_boundaries,
+            source_boundaries,
+        )
+    return source_coordinates
 
 
 def _sample_render_mask(
